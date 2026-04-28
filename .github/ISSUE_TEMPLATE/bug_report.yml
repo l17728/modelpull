@@ -1,0 +1,71 @@
+name: 🐛 Bug Report
+description: 报告一个错误（代码 / 文档 / 部署物料）
+title: "[Bug] "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告！请尽量提供完整的上下文，以便快速定位。
+        > 当前 modelpull 处于设计阶段，代码未实现；以下问题类型均欢迎：
+        > - 设计文档矛盾 / 不清晰
+        > - OpenAPI 规范错误
+        > - Helm chart / 部署脚本问题
+        > - Runbook 步骤错漏
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 受影响区域
+      options:
+        - 设计文档（docs/v2.0/）
+        - OpenAPI（api/openapi.yaml）
+        - Helm chart（deploy/helm/）
+        - Prometheus / Grafana（deploy/prometheus, deploy/grafana）
+        - Runbook 脚本（deploy/runbooks/scripts）
+        - 历史归档（docs/archive/）
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: 文件路径 + 行号
+      description: 例如 `docs/v2.0/03-distributed-correctness.md:142` 或 `deploy/helm/values.yaml:45`
+      placeholder: docs/v2.0/...md:NNN
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 当前文档/配置说了什么，问题在哪里
+      placeholder: |
+        例：03 §3.2 与 09 §2.2 对 multipart_upload_id 字段的引入版本说法不一致……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为 / 修复建议
+      placeholder: |
+        建议统一为 v2.0 引入；09 中相应 alembic migration 应在 Phase 2 而非 Phase 1。
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 额外上下文
+      description: 截图、相关链接、相关 issue 等
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已搜索现有 issue 没找到重复
+          required: true
+        - label: 我已阅读 [00-INDEX.md](../docs/v2.0/00-INDEX.md) 确认问题不在其他文档已解决
+          required: true

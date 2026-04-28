@@ -1,0 +1,95 @@
+name: 🏛 Design Review
+description: 对架构 / 协议 / 不变量提出 review 意见（设计阶段最重要的反馈类型）
+title: "[Design Review] "
+labels: [design-review, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 设计阶段欢迎严格 review
+
+        modelpull 当前处于设计完成、代码未开始阶段。这是修正架构错误成本最低的窗口。
+        请按 5 位虚拟 reviewer 的视角之一来组织你的意见：
+        架构一致性 / 分布式正确性 / 安全 / 运维 / 用户价值（盲区）。
+
+        参考索引：
+        - [00-INDEX.md](../docs/v2.0/00-INDEX.md)
+        - [14 条核心不变量](../docs/v2.0/01-architecture.md) §7
+
+  - type: dropdown
+    id: lens
+    attributes:
+      label: Review 视角
+      options:
+        - 架构一致性（跨文档矛盾、抽象边界、依赖分层、可演进性）
+        - 分布式正确性（并发竞态、状态机、crash-consistency、故障注入）
+        - 安全（认证、凭证、网络面、供应链、DoS、审计）
+        - 运维（SLO、告警、容量、成本、Runbook、灰度、备份）
+        - 用户价值盲区（多租户、配额、生态集成、合规、UX）
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重等级
+      options:
+        - 🔴 Critical — 不修复就别发布
+        - 🟡 High — 应当修复
+        - 🟢 Medium — 可改进
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题（含证据）
+      description: 给出可定位的引证（文件路径 + 行号 + 引文片段）
+      placeholder: |
+        例：03-distributed-correctness.md:155-180 中 fence token 协议未覆盖 X 场景：
+        当 controller crash → standby 接管 → executor 用旧 epoch 上报，可能导致……
+
+        引文：
+        > "request.epoch == executors.epoch WHERE id = executor_id"
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 触发场景（推荐用 Lamport 风格事件序列）
+      placeholder: |
+        T1: ...
+        T2: ...
+        T3: ...
+        后果：...
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 修复建议
+      description: 不要泛泛而谈；给出具体协议变更 / 不变量增删 / 算法选择
+      placeholder: |
+        建议在 §X 增加：每个 reclaim 操作必须携带 controller_epoch；
+        controller crash 时 standby 提升后递增此 epoch ……
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariant_impact
+    attributes:
+      label: 是否需要新增/修改不变量？
+      description: 引用 01 §7 的不变量编号
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已读完相关章节，理解上下文
+          required: true
+        - label: 引证含具体行号
+          required: true
+        - label: 已检查这不是 5 位 reviewer 已发现的 70+ 条问题（详见 git log 首次提交记录）
+          required: false

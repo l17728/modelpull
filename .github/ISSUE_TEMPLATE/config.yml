@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 General discussion
+    url: https://github.com/l17728/modelpull/discussions
+    about: Questions, ideas, or general chat (not a bug report).
+  - name: 📚 Documentation
+    url: https://github.com/l17728/modelpull/tree/main/docs/v2.0
+    about: 设计文档入口（v2.0 权威版本）

@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # OpenAPI: lint + spectral rules + diff against base
+  # ============================================================
+  openapi:
+    name: OpenAPI lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with: {node-version: '20'}
+
+      - name: Install spectral
+        run: npm install -g @stoplight/spectral-cli@6
+
+      - name: Validate OpenAPI syntax
+        run: spectral lint api/openapi.yaml --ruleset spectral:oas --fail-severity=error
+
+      - name: Validate with swagger-cli (catches $ref errors)
+        run: |
+          npm install -g @apidevtools/swagger-cli
+          swagger-cli validate api/openapi.yaml
+
+  # ============================================================
+  # Helm: lint + template + values schema
+  # ============================================================
+  helm:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with: {version: v3.14.0}
+
+      - name: helm lint
+        run: helm lint deploy/helm/
+
+      - name: helm template (default values)
+        run: helm template dlw deploy/helm/ --debug > /tmp/rendered.yaml
+
+      - name: kubeconform (validate against k8s schemas)
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.29.0 /tmp/rendered.yaml
+
+  # ============================================================
+  # Shell: shellcheck on runbook scripts
+  # ============================================================
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./deploy/runbooks/scripts
+          severity: warning
+          # SC2086: word splitting; SC1091: source resolution; SC2034: unused vars - 已知 false positive
+          ignore_paths: ""
+
+  # ============================================================
+  # Markdown: lint + link check
+  # ============================================================
+  markdown:
+    name: Markdown lint + link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v15
+        with:
+          globs: 'docs/v2.0/*.md README.md CONTRIBUTING.md'
+          config: |
+            {
+              "default": true,
+              "MD013": false,
+              "MD024": { "siblings_only": true },
+              "MD033": false,
+              "MD041": false,
+              "MD036": false,
+              "MD026": false
+            }
+
+      - name: Link check (markdown internal links only)
+        uses: lycheeverse/lychee-action@v1
+        with:
+          args: --offline --include-fragments --no-progress 'docs/v2.0/**/*.md' 'README.md'
+          fail: true
+
+  # ============================================================
+  # YAML: yamllint
+  # ============================================================
+  yamllint:
+    name: YAML lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: deploy/ api/
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              comments-indentation: disable
+              indentation:
+                indent-sequences: consistent
+              truthy:
+                check-keys: false
+
+  # ============================================================
+  # Security: gitleaks (no secrets in repo)
+  # ============================================================
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # JSON: Grafana dashboards must be valid JSON
+  # ============================================================
+  json:
+    name: JSON validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Grafana JSON
+        run: |
+          for f in deploy/grafana/*.json; do
+            echo "Validating $f"
+            python3 -c "import json; json.load(open('$f'))"
+          done
+
+  # ============================================================
+  # Aggregate gate
+  # ============================================================
+  ci:
+    name: CI Status
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          echo "All checks passed ✓"
