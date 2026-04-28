@@ -2,9 +2,11 @@
 
 > **分布式 HuggingFace 模型权重下载系统** · 多机并行 · 多源加速 · 断点续传 · 完整性校验
 
+[![CI](https://github.com/l17728/modelpull/actions/workflows/ci.yml/badge.svg)](https://github.com/l17728/modelpull/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 ![Status](https://img.shields.io/badge/status-design--complete-green)
 ![Version](https://img.shields.io/badge/version-v2.0--design-orange)
+[![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
 `modelpull` 是一套面向大型语言模型权重下载的分布式系统。专为 TB 级模型（如 DeepSeek-V3 689 GB、Kimi-K2 1 TB）设计，单机下载耗时极长，本系统通过多机协调 + 多源加速将下载时间压缩到接近"出口带宽总和"。
 
@@ -242,7 +244,15 @@ CI 强制失败任何违反不变量的 PR。
 
 ## 贡献
 
-设计阶段欢迎对架构 / 协议 / 不变量提出 review 意见。请通过 Issue 或 PR 提出。
+设计阶段欢迎对架构 / 协议 / 不变量提出 review 意见。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+
+3 种 issue 模板：
+
+- 🐛 [Bug Report](https://github.com/l17728/modelpull/issues/new?template=bug_report.yml) — 文档矛盾 / 规范错误 / 部署物料 bug
+- ✨ [Feature Request](https://github.com/l17728/modelpull/issues/new?template=feature_request.yml) — 新能力提议
+- 🏛 [Design Review](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — **当前阶段最有价值**：从架构 / 分布式 / 安全 / 运维 / 用户价值 5 个视角 review
+
+讨论：[GitHub Discussions](https://github.com/l17728/modelpull/discussions)
 
 实施开始后将开放代码贡献，遵循 [`07-test-plan.md`](./docs/v2.0/07-test-plan.md) 的覆盖率要求。
 

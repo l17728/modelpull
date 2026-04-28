@@ -60,10 +60,14 @@
 
 ### 1.4 入场标准（Phase 0 → Phase 1）
 
-- [x] 设计文档 v2.0 全部完成（00-09）
-- [x] 项目骨架 PR：`pyproject.toml`、目录结构、Dockerfile、CI 雏形
-- [x] 团队成员就位（后端 ×2、前端 ×1、QA ×1、SRE ×0.5）
-- [x] 开发/测试 K8s namespace 就绪
+- [x] 设计文档 v2.0 全部完成（00-11）
+- [x] 仓库与 CI 就绪（`l17728/modelpull`，8 jobs 全绿）
+- [x] Issue/PR 模板 + CONTRIBUTING.md 就绪
+- [x] OpenAPI spec 完整（`api/openapi.yaml`）
+- [x] Helm chart + Prometheus rules + Grafana dashboards 就绪（`deploy/`）
+- [ ] 项目代码骨架 PR：`pyproject.toml`、Python 模块结构、前端 `package.json`、Dockerfile
+- [ ] 团队成员就位（后端 ×2、前端 ×1、QA ×1、SRE ×0.5）
+- [ ] 开发/测试 K8s namespace 就绪
 
 ### 1.5 出场标准（Phase 1 → Phase 2）
 
