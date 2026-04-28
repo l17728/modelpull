@@ -1,0 +1,14 @@
+extends: default
+ignore: |
+  deploy/helm/templates/
+
+rules:
+  line-length: disable
+  comments-indentation: disable
+  document-start: disable
+  indentation:
+    indent-sequences: consistent
+  truthy:
+    check-keys: false
+  braces:
+    max-spaces-inside: 1

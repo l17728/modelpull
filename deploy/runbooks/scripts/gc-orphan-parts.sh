@@ -34,7 +34,7 @@ log() { printf '\033[36m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # Get list of subtask IDs that are still active
 ACTIVE_IDS_FILE=$(mktemp)
-trap "rm -f $ACTIVE_IDS_FILE" EXIT
+trap 'rm -f "$ACTIVE_IDS_FILE"' EXIT
 
 API="${DLW_CONTROLLER_ENDPOINT:-https://controller.dlw.svc.cluster.local:8000}/api/v2"
 EXECUTOR_ID="${DLW_EXECUTOR_ID:-$(hostname)}"

@@ -25,7 +25,7 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
-        checksum/config: {{ include (print $.Template.BasePath "/controller-config.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "dlw.fullname" . }}-controller
       securityContext:

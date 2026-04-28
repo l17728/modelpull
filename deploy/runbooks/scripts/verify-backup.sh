@@ -37,7 +37,7 @@ dlw_backup_verify_last_result{result="$result",reason="$reason"} 1
 EOF
 }
 
-trap "rm -rf $TMP_PG_DATA" EXIT
+trap 'rm -rf "$TMP_PG_DATA"' EXIT
 
 # Step 1: Pick latest basebackup
 log "Step 1/4: locating latest basebackup"

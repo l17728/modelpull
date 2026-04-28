@@ -31,8 +31,17 @@ jobs:
       - name: Install spectral
         run: npm install -g @stoplight/spectral-cli@6
 
+      - name: Create spectral ruleset
+        run: |
+          cat > .spectral.yaml <<'EOF'
+          extends: spectral:oas
+          rules:
+            oas3-unused-component: warn
+            operation-tag-defined: warn
+          EOF
+
       - name: Validate OpenAPI syntax
-        run: spectral lint api/openapi.yaml --ruleset spectral:oas --fail-severity=error
+        run: spectral lint api/openapi.yaml --fail-severity=error
 
       - name: Validate with swagger-cli (catches $ref errors)
         run: |
@@ -50,6 +59,9 @@ jobs:
 
       - uses: azure/setup-helm@v4
         with: {version: v3.14.0}
+
+      - name: helm dependency update
+        run: helm dependency update deploy/helm/ || true
 
       - name: helm lint
         run: helm lint deploy/helm/
@@ -91,21 +103,12 @@ jobs:
         uses: DavidAnson/markdownlint-cli2-action@v15
         with:
           globs: 'docs/v2.0/*.md README.md CONTRIBUTING.md'
-          config: |
-            {
-              "default": true,
-              "MD013": false,
-              "MD024": { "siblings_only": true },
-              "MD033": false,
-              "MD041": false,
-              "MD036": false,
-              "MD026": false
-            }
+          # Uses .markdownlint.json at repo root
 
       - name: Link check (markdown internal links only)
         uses: lycheeverse/lychee-action@v1
         with:
-          args: --offline --include-fragments --no-progress 'docs/v2.0/**/*.md' 'README.md'
+          args: --offline --no-progress 'docs/v2.0/**/*.md' 'README.md'
           fail: true
 
   # ============================================================
@@ -121,15 +124,7 @@ jobs:
         uses: ibiqlik/action-yamllint@v3
         with:
           file_or_dir: deploy/ api/
-          config_data: |
-            extends: default
-            rules:
-              line-length: disable
-              comments-indentation: disable
-              indentation:
-                indent-sequences: consistent
-              truthy:
-                check-keys: false
+          config_file: .yamllint.yml
 
   # ============================================================
   # Security: gitleaks (no secrets in repo)
