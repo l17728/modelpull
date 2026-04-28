@@ -24,6 +24,7 @@ info:
     email: dlw@example.com
   license:
     name: Apache-2.0
+    identifier: Apache-2.0
 
 servers:
   - url: https://api.dlw.example.com/api/v2
