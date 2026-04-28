@@ -114,8 +114,8 @@ paths:
                 summary: Incremental upgrade
                 value:
                   repo_id: Qwen/Qwen3-72B-Instruct
-                  revision: new567890abc123def4567890abc123def4567890
-                  upgrade_from_revision: oldabc123def4567890abc123def4567890abc12
+                  revision: 1234567890abcdef1234567890abcdef12345678
+                  upgrade_from_revision: 0000000000fedcba0000000000fedcba00000000
                   storage_id: 5
       responses:
         '201':
