@@ -1,0 +1,120 @@
+{{- if .Values.executor.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "dlw.fullname" . }}-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+spec:
+  serviceName: {{ include "dlw.fullname" . }}-executor
+  replicas: {{ .Values.executor.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "dlw.executor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dlw.executor.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "dlw.fullname" . }}-executor
+      securityContext:
+        {{- toYaml .Values.common.podSecurityContext | nindent 8 }}
+      {{- if eq .Values.executor.podAntiAffinity.type "soft" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "dlw.executor.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      containers:
+        - name: executor
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.executor.image.repository }}:{{ .Values.executor.image.tag }}"
+          imagePullPolicy: {{ .Values.executor.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9000
+          env:
+            - name: DLW_CONTROLLER_ENDPOINT
+              value: "https://{{ include "dlw.fullname" . }}-controller:{{ .Values.controller.service.port }}"
+            - name: DLW_EXECUTOR_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DLW_HOST_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DLW_OTEL_ENDPOINT
+              value: {{ .Values.controller.config.observability.otel_endpoint | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "dlw.fullname" . }}-executor-config
+          volumeMounts:
+            - name: parts
+              mountPath: /var/lib/dlw/parts
+            - name: enrollment
+              mountPath: /etc/dlw/enrollment
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/dlw/ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: metrics
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.executor.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.common.containerSecurityContext | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Graceful drain: 写回 in-flight subtask 让其他 executor 接管 (详见 05 §6.2)
+                command: ["/app/bin/drain.py", "--timeout=600"]
+      volumes:
+        - name: enrollment
+          secret:
+            secretName: {{ .Values.executor.enrollment.secret_name }}
+        - name: ca-certs
+          secret:
+            secretName: {{ .Values.security.mTLS.ca_secret }}
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 720    # 12min: 给 drain 留余量
+  volumeClaimTemplates:
+    - metadata:
+        name: parts
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.executor.parts.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.executor.parts.storage }}
+{{- end }}

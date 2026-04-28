@@ -1,0 +1,86 @@
+groups:
+  # ============================================
+  # SLI recording rules - 用于 SLO 计算
+  # ============================================
+  - name: dlw_sli_recording
+    interval: 30s
+    rules:
+      # SLI: API 可用性（5xx ratio）
+      - record: dlw:api_availability:ratio_rate5m
+        expr: |
+          (
+            sum(rate(http_requests_total{job="dlw-controller", code=~"2..|3..|4.."}[5m]))
+          ) / (
+            sum(rate(http_requests_total{job="dlw-controller"}[5m]))
+          )
+
+      # SLI: 任务完成率（7d）
+      - record: dlw:task_completion:ratio_rate7d
+        expr: |
+          (
+            sum(rate(dlw_tasks_completed_total{status="completed"}[7d]))
+          ) / (
+            sum(rate(dlw_tasks_completed_total{status=~"completed|failed"}[7d]))
+          )
+
+      # SLI: 下载吞吐（每 executor 单任务）
+      - record: dlw:executor_throughput_bytes_per_sec:5m
+        expr: |
+          rate(dlw_chunk_download_bytes_total[5m])
+
+      # SLI: 任务时延 P95
+      - record: dlw:task_duration:p95_30d
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(dlw_task_duration_seconds_bucket[30d]))
+          )
+
+  # ============================================
+  # 聚合 rules（避免高基数）
+  # ============================================
+  - name: dlw_aggregations
+    interval: 30s
+    rules:
+      - record: dlw:executors_count:by_status
+        expr: |
+          count by (status) (dlw_executor_health_score)
+
+      - record: dlw:tasks_active:count
+        expr: |
+          sum by (tenant_id) (dlw_tasks_active_count)
+
+      - record: dlw:source_health:by_id
+        expr: |
+          dlw_source_health
+
+      - record: dlw:source_speed_avg:5m
+        expr: |
+          avg by (source_id) (rate(dlw_chunk_download_bytes_total[5m]))
+
+  # ============================================
+  # SLO error budget burn rate
+  # ============================================
+  - name: dlw_slo_burn_rates
+    interval: 30s
+    rules:
+      # Multi-window multi-burn-rate (SRE Workbook)
+      - record: dlw:api_availability:slo_target
+        expr: vector(0.999)
+
+      - record: dlw:api_availability:burn_rate_1h
+        expr: |
+          (1 - dlw:api_availability:ratio_rate5m)
+          / (1 - dlw:api_availability:slo_target)
+
+      - record: dlw:api_availability:burn_rate_6h
+        expr: |
+          (1 - avg_over_time(dlw:api_availability:ratio_rate5m[6h]))
+          / (1 - dlw:api_availability:slo_target)
+
+      - record: dlw:task_completion:slo_target
+        expr: vector(0.99)
+
+      - record: dlw:task_completion:burn_rate_1d
+        expr: |
+          (1 - avg_over_time(dlw:task_completion:ratio_rate7d[1d]))
+          / (1 - dlw:task_completion:slo_target)

@@ -1,0 +1,1312 @@
+openapi: 3.1.0
+info:
+  title: Distributed HF Downloader API
+  version: 2.0.0
+  description: |
+    Distributed HuggingFace model weight downloader.
+
+    Authentication:
+      - User APIs: OIDC + Bearer JWT
+      - Executor APIs: mTLS + Bearer JWT + HMAC body signature
+      - Admin APIs: same as User APIs but require role=tenant_admin or system_admin
+
+    Tenancy:
+      - All resources are tenant-scoped except system-level admin endpoints
+      - Header `X-Tenant-Slug` only honored for system_admin role
+
+    Rate limits:
+      - Per-route token bucket (see 02-protocol.md §8.1)
+
+    Error format:
+      - All errors: `{code, message, trace_id, details?}`
+
+  contact:
+    email: dlw@example.com
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: https://api.dlw.example.com/api/v2
+    description: Production
+  - url: https://staging-api.dlw.example.com/api/v2
+    description: Staging
+  - url: http://localhost:8000/api/v2
+    description: Local dev
+
+tags:
+  - name: tasks
+    description: Download task management
+  - name: subtasks
+    description: File-level subtask operations
+  - name: executors
+    description: Executor lifecycle (called by executors only)
+  - name: models
+    description: HuggingFace model search and metadata
+  - name: storage
+    description: Storage backend management
+  - name: tenants
+    description: Tenant / project / user management
+  - name: quota
+    description: Quota and usage
+  - name: audit
+    description: Audit log access
+  - name: admin
+    description: System administration
+  - name: webhooks
+    description: Webhook configuration
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ========== Tasks ==========
+  /tasks:
+    get:
+      tags: [tasks]
+      summary: List tasks
+      operationId: listTasks
+      parameters:
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - in: query
+          name: project_id
+          schema: {type: integer, format: int64}
+        - in: query
+          name: created_after
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: Paged tasks
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskListResponse'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+
+    post:
+      tags: [tasks]
+      summary: Create download task
+      operationId: createTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTaskRequest'}
+            examples:
+              minimal:
+                summary: Minimal request
+                value:
+                  repo_id: deepseek-ai/DeepSeek-V3
+                  revision: abc123def4567890abc123def4567890abc12345
+              fullAutoBalance:
+                summary: Auto-balance multi-source
+                value:
+                  repo_id: Qwen/Qwen3-72B-Instruct
+                  revision: abc123def4567890abc123def4567890abc12345
+                  storage_id: 5
+                  priority: 2
+                  source_strategy: auto_balance
+                  file_filter: core_only
+              upgrade:
+                summary: Incremental upgrade
+                value:
+                  repo_id: Qwen/Qwen3-72B-Instruct
+                  revision: new567890abc123def4567890abc123def4567890
+                  upgrade_from_revision: oldabc123def4567890abc123def4567890abc12
+                  storage_id: 5
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskCreatedResponse'}
+              examples:
+                created:
+                  value:
+                    id: 7e57a3f8-1234-4567-8901-abcdef012345
+                    status: pending
+                    trace_id: c0ffee0123456789
+                    files_to_download: 163
+                    estimated_bytes: 740088332288
+                    speed_probe_eta_seconds: 8
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+              examples:
+                invalidRevision:
+                  value:
+                    code: INVALID_REVISION
+                    message: revision must be a 40-char git sha; 'main' / branches not allowed
+                    trace_id: c0ffee0123456789
+        '403':
+          description: Gated model not approved
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+              example:
+                code: REPO_GATED
+                message: Repo requires approval; ticket created
+                trace_id: c0ffee0123456789
+                details:
+                  approval_ticket_url: https://dlw.example.com/approvals/123
+        '404':
+          description: Repo not found
+        '409':
+          description: Duplicate task or idempotency replay
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+              example:
+                code: DUPLICATE_TASK
+                message: Same (repo_id, revision) already in progress
+                trace_id: c0ffee0123456789
+                details:
+                  existing_task_id: 7e57a3f8-1234-4567-8901-abcdef012345
+        '429':
+          description: Quota exceeded or rate limited
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+              example:
+                code: QUOTA_EXCEEDED
+                message: Tenant monthly bytes quota exceeded
+                trace_id: c0ffee0123456789
+                details:
+                  metric: bytes_month
+                  current: 12345678901234
+                  limit: 10000000000000
+
+  /tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+
+    get:
+      tags: [tasks]
+      summary: Get task by ID
+      operationId: getTask
+      responses:
+        '200':
+          description: Task detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DownloadTask'}
+
+    patch:
+      tags: [tasks]
+      summary: Update task (priority only)
+      operationId: updateTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                priority: {type: integer, minimum: 0, maximum: 3}
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DownloadTask'}
+
+  /tasks/{taskId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: Cancel task (async)
+      operationId: cancelTask
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string, maxLength: 256}
+      responses:
+        '202':
+          description: Cancelling
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, in_flight_subtasks]
+                properties:
+                  status: {type: string, const: cancelling}
+                  in_flight_subtasks: {type: integer}
+
+  /tasks/{taskId}/retry:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: Retry failed subtasks
+      operationId: retrySubtasks
+      parameters:
+        - in: query
+          name: subtask_ids
+          schema:
+            type: array
+            items: {type: string, format: uuid}
+            maxItems: 200
+      responses:
+        '204': {description: Accepted}
+
+  /tasks/{taskId}/upgrade:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: Upgrade to new revision (incremental)
+      operationId: upgradeTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_revision]
+              properties:
+                to_revision: {type: string, pattern: '^[0-9a-f]{40}$'}
+                keep_old_files_for_days: {type: integer, default: 7, minimum: 0, maximum: 365}
+      responses:
+        '201':
+          description: New task created (linked to old)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskCreatedResponse'}
+
+  /tasks/{taskId}/subtasks:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [subtasks]
+      summary: List subtasks of a task
+      operationId: listSubtasks
+      parameters:
+        - in: query
+          name: status
+          schema: {$ref: '#/components/schemas/SubtaskStatus'}
+      responses:
+        '200':
+          description: Subtasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/FileSubTask'}
+
+  /tasks/{taskId}/source-allocation:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: View source allocation (multi-source visualization)
+      operationId: getSourceAllocation
+      responses:
+        '200':
+          description: Source allocation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceAllocation'}
+
+  /tasks/{taskId}/events:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Task event log
+      operationId: getTaskEvents
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/TaskEvent'}
+                  next_cursor: {type: string, nullable: true}
+
+  # ========== Models ==========
+  /models/search:
+    get:
+      tags: [models]
+      summary: Search HuggingFace models
+      operationId: searchModels
+      parameters:
+        - in: query
+          name: query
+          required: true
+          schema: {type: string, maxLength: 200}
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - in: query
+          name: pipeline_tag
+          schema: {type: string}
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ModelSummary'}
+        '503':
+          description: HF upstream degraded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+
+  /models/{repoId}/info:
+    parameters:
+      - in: path
+        name: repoId
+        required: true
+        schema: {type: string}
+        description: Format `org/model`
+    get:
+      tags: [models]
+      summary: Get model info (file list, sha256, multi-source coverage)
+      operationId: getModelInfo
+      parameters:
+        - in: query
+          name: revision
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{40}$|^main$'}
+      responses:
+        '200':
+          description: Model info
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelInfo'}
+
+  # ========== Executors ==========
+  /executors/register:
+    post:
+      tags: [executors]
+      summary: Register an executor (mTLS bootstrap)
+      description: |
+        Called once during executor startup. Requires enrollment_token (out-of-band).
+        Returns mTLS client certificate and JWT.
+      operationId: registerExecutor
+      security: []
+      parameters:
+        - in: header
+          name: X-Enrollment-Token
+          required: true
+          schema: {type: string}
+          description: 256-bit hex enrollment secret
+        - in: header
+          name: X-Enrollment-Nonce
+          required: true
+          schema: {type: string}
+          description: 128-bit random hex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ExecutorRegisterRequest'}
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutorRegisterResponse'}
+        '401':
+          description: Invalid enrollment token
+        '409':
+          description: Nonce replay or executor_id conflict
+
+  /executors/heartbeat:
+    post:
+      tags: [executors]
+      summary: Executor heartbeat
+      operationId: postHeartbeat
+      parameters:
+        - in: header
+          name: X-Heartbeat-Nonce
+          required: true
+          schema: {type: string}
+        - in: header
+          name: X-Heartbeat-Timestamp
+          required: true
+          schema: {type: string, format: date-time}
+        - in: header
+          name: X-Heartbeat-HMAC
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/HeartbeatRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HeartbeatResponse'}
+        '401':
+          description: EPOCH_MISMATCH or CERT_REVOKED
+        '409':
+          description: CLOCK_SKEW or NONCE_REPLAY
+        '429':
+          description: Server requesting backoff
+
+  /executors/{executorId}/renew:
+    parameters:
+      - in: path
+        name: executorId
+        required: true
+        schema: {type: string}
+    post:
+      tags: [executors]
+      summary: Renew JWT (proactive)
+      operationId: renewExecutorJwt
+      responses:
+        '200':
+          description: New JWT
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executor_jwt: {type: string}
+                  expires_at: {type: string, format: date-time}
+
+  /executors/{executorId}/subtasks/{subtaskId}/complete:
+    parameters:
+      - in: path
+        name: executorId
+        required: true
+        schema: {type: string}
+      - in: path
+        name: subtaskId
+        required: true
+        schema: {type: string, format: uuid}
+      - in: header
+        name: X-Assignment-Token
+        required: true
+        schema: {type: string, format: uuid}
+      - in: header
+        name: X-Executor-Epoch
+        required: true
+        schema: {type: integer, format: int64}
+    post:
+      tags: [executors]
+      summary: Report subtask completion
+      operationId: completeSubtask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubtaskCompleteRequest'}
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subtask_status: {$ref: '#/components/schemas/SubtaskStatus'}
+        '409':
+          description: STALE_ASSIGNMENT or ALREADY_COMPLETED
+        '410':
+          description: TOKEN_EXPIRED
+
+  # ========== Tenants / Quota / Audit ==========
+  /tenants/{tenantId}:
+    parameters:
+      - in: path
+        name: tenantId
+        required: true
+        schema: {type: integer, format: int64}
+    get:
+      tags: [tenants]
+      summary: Get tenant
+      operationId: getTenant
+      responses:
+        '200':
+          description: Tenant
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Tenant'}
+
+  /quota/current:
+    get:
+      tags: [quota]
+      summary: Current quota status
+      operationId: getQuotaCurrent
+      responses:
+        '200':
+          description: Quota
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuotaCurrent'}
+
+  /quota/usage:
+    get:
+      tags: [quota]
+      summary: Usage report
+      operationId: getQuotaUsage
+      parameters:
+        - in: query
+          name: from
+          required: true
+          schema: {type: string, format: date-time}
+        - in: query
+          name: to
+          required: true
+          schema: {type: string, format: date-time}
+        - in: query
+          name: group_by
+          schema: {type: string, enum: [project, user, region_pair, source_id]}
+      responses:
+        '200':
+          description: Usage
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QuotaUsage'}
+
+  /audit/log:
+    get:
+      tags: [audit]
+      summary: Search audit log (admin / audit_reader)
+      operationId: searchAuditLog
+      parameters:
+        - in: query
+          name: actor_user_id
+          schema: {type: integer, format: int64}
+        - in: query
+          name: action
+          schema: {type: string}
+        - in: query
+          name: from
+          schema: {type: string, format: date-time}
+        - in: query
+          name: to
+          schema: {type: string, format: date-time}
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/AuditEntry'}
+
+  # ========== Storage Backends ==========
+  /storage-backends:
+    get:
+      tags: [storage]
+      summary: List storage backends
+      operationId: listStorageBackends
+      responses:
+        '200':
+          description: Storage backends
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/StorageBackend'}
+    post:
+      tags: [storage]
+      summary: Register storage backend (admin)
+      operationId: createStorageBackend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateStorageBackendRequest'}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StorageBackend'}
+
+  # ========== Webhooks ==========
+  /webhooks:
+    get:
+      tags: [webhooks]
+      operationId: listWebhooks
+      responses:
+        '200':
+          description: Webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/WebhookConfig'}
+    post:
+      tags: [webhooks]
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateWebhookRequest'}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebhookConfig'}
+
+  # ========== Admin: Maintenance ==========
+  /admin/maintenance/enter:
+    post:
+      tags: [admin]
+      summary: Enter maintenance mode (system_admin)
+      operationId: enterMaintenance
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                freeze_minutes: {type: integer, minimum: 1, maximum: 1440}
+                reason: {type: string}
+      responses:
+        '202': {description: Entering}
+
+  /admin/maintenance/exit:
+    post:
+      tags: [admin]
+      summary: Exit maintenance mode
+      operationId: exitMaintenance
+      responses:
+        '202': {description: Exiting}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TaskId:
+      in: path
+      name: taskId
+      required: true
+      schema: {type: string, format: uuid}
+    StatusFilter:
+      in: query
+      name: status
+      schema: {$ref: '#/components/schemas/TaskStatus'}
+    Limit:
+      in: query
+      name: limit
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    Cursor:
+      in: query
+      name: cursor
+      schema: {type: string, nullable: true}
+    IdempotencyKey:
+      in: header
+      name: X-Idempotency-Key
+      schema: {type: string, format: uuid}
+      description: Client-generated UUID for safe retries
+
+  responses:
+    Unauthenticated:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    RateLimited:
+      description: Rate limited
+      headers:
+        Retry-After:
+          schema: {type: integer}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+
+  schemas:
+    # ===== Common =====
+    ErrorResponse:
+      type: object
+      required: [code, message, trace_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        trace_id: {type: string}
+        details:
+          type: object
+          additionalProperties: true
+
+    # ===== Task =====
+    TaskStatus:
+      type: string
+      enum: [pending, scheduling, downloading, verifying, completed, failed, cancelling, cancelled]
+
+    SubtaskStatus:
+      type: string
+      enum:
+        - pending
+        - assigned
+        - downloading
+        - verifying_local
+        - uploading
+        - verifying_remote
+        - verified
+        - failed_permanent
+        - paused_external
+        - paused_disk_full
+        - cancelling
+        - cancelled
+
+    SourceStrategy:
+      type: string
+      enum: [auto_balance, pin_huggingface, pin_modelscope, pin_hf_mirror, fastest_only, custom]
+
+    FileFilter:
+      type: string
+      enum: [core_only, all, glob]
+
+    DownloadTask:
+      type: object
+      required: [id, tenant_id, repo_id, revision, status, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        tenant_id: {type: integer, format: int64}
+        project_id: {type: integer, format: int64, nullable: true}
+        owner_user_id: {type: integer, format: int64}
+        repo_id:
+          type: string
+          pattern: '^[A-Za-z0-9_\-]{1,96}/[A-Za-z0-9_.\-]{1,96}$'
+        revision: {type: string, pattern: '^[0-9a-f]{40}$'}
+        storage_id: {type: integer, format: int64}
+        path_template: {type: string, maxLength: 512}
+        priority: {type: integer, minimum: 0, maximum: 3}
+        status: {$ref: '#/components/schemas/TaskStatus'}
+        source_strategy: {$ref: '#/components/schemas/SourceStrategy'}
+        source_blacklist:
+          type: array
+          items: {type: string}
+        is_simulation: {type: boolean}
+        download_bytes_limit: {type: integer, format: int64, nullable: true}
+        upgrade_from_revision: {type: string, nullable: true}
+        progress: {$ref: '#/components/schemas/TaskProgress'}
+        created_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time, nullable: true}
+        cancelled_at: {type: string, format: date-time, nullable: true}
+        error_message: {type: string, nullable: true}
+        trace_id: {type: string}
+
+    TaskProgress:
+      type: object
+      properties:
+        files_total: {type: integer}
+        files_completed: {type: integer}
+        bytes_total: {type: integer, format: int64}
+        bytes_downloaded: {type: integer, format: int64}
+        eta_seconds: {type: integer, nullable: true}
+        sources_used:
+          type: array
+          items: {type: string}
+
+    FileSubTask:
+      type: object
+      required: [id, task_id, filename, status]
+      properties:
+        id: {type: string, format: uuid}
+        task_id: {type: string, format: uuid}
+        filename: {type: string, maxLength: 512}
+        file_size: {type: integer, format: int64, nullable: true}
+        expected_sha256: {type: string, pattern: '^[0-9a-f]{64}$', nullable: true}
+        actual_sha256: {type: string, pattern: '^[0-9a-f]{64}$', nullable: true}
+        status: {$ref: '#/components/schemas/SubtaskStatus'}
+        executor_id: {type: string, nullable: true}
+        executor_epoch: {type: integer, format: int64, nullable: true}
+        assignment_token: {type: string, format: uuid, nullable: true}
+        source_id: {type: string, nullable: true}
+        chunks_total: {type: integer, nullable: true}
+        chunks_completed: {type: integer}
+        bytes_downloaded: {type: integer, format: int64}
+        multipart_upload_id: {type: string, nullable: true}
+        retry_count: {type: integer}
+        last_error: {type: string, nullable: true}
+
+    CreateTaskRequest:
+      type: object
+      required: [repo_id, revision]
+      properties:
+        repo_id:
+          type: string
+          pattern: '^[A-Za-z0-9_\-]{1,96}/[A-Za-z0-9_.\-]{1,96}$'
+        revision:
+          type: string
+          pattern: '^[0-9a-f]{40}$'
+          description: Must be 40-char git sha; 'main' / branches not allowed
+        storage_id: {type: integer, format: int64}
+        path_template: {type: string, default: '{tenant}/{repo_id}/{revision}'}
+        priority: {type: integer, minimum: 0, maximum: 3, default: 1}
+        source_strategy: {$ref: '#/components/schemas/SourceStrategy'}
+        source_blacklist:
+          type: array
+          items: {type: string}
+        file_filter: {$ref: '#/components/schemas/FileFilter'}
+        file_glob: {type: string, nullable: true}
+        is_simulation: {type: boolean, default: false}
+        upgrade_from_revision: {type: string, pattern: '^[0-9a-f]{40}$', nullable: true}
+        download_bytes_limit: {type: integer, format: int64, nullable: true}
+        trust_non_hf_sha256: {type: boolean, default: false}
+
+    TaskCreatedResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/TaskStatus'}
+        trace_id: {type: string}
+        files_to_download: {type: integer}
+        estimated_bytes: {type: integer, format: int64}
+        speed_probe_eta_seconds: {type: integer}
+
+    TaskListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/DownloadTask'}
+        next_cursor: {type: string, nullable: true}
+        total_estimated: {type: integer, nullable: true}
+
+    SourceAllocation:
+      type: object
+      properties:
+        task_id: {type: string, format: uuid}
+        sources_used:
+          type: array
+          items:
+            type: object
+            properties:
+              source_id: {type: string}
+              bytes_assigned: {type: integer, format: int64}
+              percent: {type: number}
+              measured_speed_bps: {type: number}
+        chunk_level_routing:
+          type: array
+          items:
+            type: object
+            properties:
+              filename: {type: string}
+              chunks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    chunk_index: {type: integer}
+                    byte_start: {type: integer, format: int64}
+                    byte_end: {type: integer, format: int64}
+                    source_id: {type: string}
+                    status: {type: string}
+                    bytes_done: {type: integer, format: int64}
+
+    TaskEvent:
+      type: object
+      properties:
+        ts: {type: string, format: date-time}
+        type: {type: string}
+        message: {type: string}
+        details:
+          type: object
+          additionalProperties: true
+
+    # ===== Models =====
+    ModelSummary:
+      type: object
+      properties:
+        repo_id: {type: string}
+        downloads: {type: integer}
+        likes: {type: integer}
+        last_modified: {type: string, format: date-time}
+        pipeline_tag: {type: string, nullable: true}
+        is_gated: {type: boolean}
+
+    ModelInfo:
+      type: object
+      properties:
+        repo_id: {type: string}
+        revision: {type: string}
+        license: {type: string, nullable: true}
+        is_gated: {type: boolean}
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              filename: {type: string}
+              size: {type: integer, format: int64, nullable: true}
+              sha256: {type: string, nullable: true}
+              available_on:
+                type: array
+                items: {type: string}
+
+    # ===== Executor =====
+    ExecutorRegisterRequest:
+      type: object
+      required: [host_id, executor_id_proposal, capabilities, client_csr]
+      properties:
+        host_id: {type: string}
+        executor_id_proposal: {type: string}
+        tenant_id: {type: integer, format: int64, nullable: true}
+        parent_executor_id: {type: string, nullable: true}
+        capabilities:
+          type: object
+          properties:
+            nic_speed_gbps: {type: integer}
+            regions:
+              type: array
+              items: {type: string}
+            storage_backends:
+              type: array
+              items: {type: integer}
+        client_csr:
+          type: string
+          description: X.509 CSR PEM
+
+    ExecutorRegisterResponse:
+      type: object
+      properties:
+        executor_id: {type: string}
+        epoch: {type: integer, format: int64}
+        client_cert: {type: string, description: PEM-encoded X.509}
+        ca_chain:
+          type: array
+          items: {type: string}
+        executor_jwt: {type: string}
+        jwt_signing_alg: {type: string, const: EdDSA}
+        next_renew_in_seconds: {type: integer}
+
+    HeartbeatRequest:
+      type: object
+      required: [executor_id, epoch, host_id, timestamp]
+      properties:
+        executor_id: {type: string}
+        epoch: {type: integer, format: int64}
+        host_id: {type: string}
+        parent_executor_id: {type: string, nullable: true}
+        timestamp: {type: string, format: date-time}
+        uptime_seconds: {type: integer}
+        system: {$ref: '#/components/schemas/ExecutorSystemReport'}
+        source_health:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/SourceHealthReport'}
+        tasks:
+          type: array
+          items: {$ref: '#/components/schemas/SubtaskProgressReport'}
+        completed_subtasks:
+          type: array
+          items: {$ref: '#/components/schemas/SubtaskCompleteRequest'}
+        failed_subtasks:
+          type: array
+          items: {$ref: '#/components/schemas/SubtaskFailureReport'}
+
+    ExecutorSystemReport:
+      type: object
+      properties:
+        nic_speed_gbps: {type: integer}
+        nic_utilization_percent: {type: number}
+        disk_total_gb: {type: integer, format: int64}
+        disk_free_gb: {type: integer, format: int64}
+        parts_dir_bytes: {type: integer, format: int64}
+        memory_used_percent: {type: number}
+        load_avg_1min: {type: number}
+        active_threads: {type: integer}
+        running_subtasks: {type: integer}
+        multi_executor:
+          type: object
+          properties:
+            siblings_on_host:
+              type: array
+              items: {type: string}
+            host_total_running: {type: integer}
+
+    SourceHealthReport:
+      type: object
+      properties:
+        reachable: {type: boolean}
+        rtt_ms: {type: integer, nullable: true}
+        last_5xx_ago_s: {type: integer, nullable: true}
+
+    SubtaskProgressReport:
+      type: object
+      required: [subtask_id, task_id, executor_epoch, assignment_token]
+      properties:
+        subtask_id: {type: string, format: uuid}
+        task_id: {type: string, format: uuid}
+        executor_epoch: {type: integer, format: int64}
+        assignment_token: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/SubtaskStatus'}
+        bytes_downloaded: {type: integer, format: int64}
+        bytes_total: {type: integer, format: int64, nullable: true}
+        chunks_total: {type: integer, nullable: true}
+        chunks_completed: {type: integer}
+        active_threads: {type: integer}
+        current_speed_bytes_per_sec: {type: number}
+        speed_window_seconds: {type: integer}
+        eta_seconds: {type: integer, nullable: true}
+        source_id: {type: string}
+        remote_etag_seen: {type: string, nullable: true}
+
+    SubtaskCompleteRequest:
+      type: object
+      required: [actual_sha256, actual_size]
+      properties:
+        actual_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        actual_size: {type: integer, format: int64}
+        remote_storage_uri: {type: string}
+        remote_etag: {type: string}
+        remote_sha256_via_checksum: {type: string, nullable: true}
+        duration_seconds: {type: integer}
+        sources_used:
+          type: array
+          items: {type: string}
+        bytes_per_source:
+          type: object
+          additionalProperties: {type: integer, format: int64}
+
+    SubtaskFailureReport:
+      type: object
+      required: [subtask_id, error_code, retryable]
+      properties:
+        subtask_id: {type: string, format: uuid}
+        error_code: {type: string}
+        error_message: {type: string}
+        retryable: {type: boolean}
+        attempted_sources:
+          type: array
+          items: {type: string}
+
+    HeartbeatResponse:
+      type: object
+      required: [server_timestamp, epoch_check]
+      properties:
+        server_timestamp: {type: string, format: date-time}
+        epoch_check: {type: string, enum: [ok, mismatch]}
+        next_heartbeat_in_seconds: {type: integer, default: 10}
+        config_version: {type: integer}
+        policies_to_apply:
+          type: object
+          properties:
+            max_concurrent_per_executor: {type: integer}
+            global_speed_limit_bytes_per_sec: {type: integer, nullable: true}
+            source_blacklist_global:
+              type: array
+              items: {type: string}
+        new_assignments:
+          type: array
+          items: {$ref: '#/components/schemas/SubtaskAssignment'}
+        cancellations:
+          type: array
+          items:
+            type: object
+            properties:
+              subtask_id: {type: string, format: uuid}
+              reason: {type: string}
+        reassignments:
+          type: array
+          items:
+            type: object
+            properties:
+              subtask_id: {type: string, format: uuid}
+              chunks_to_release:
+                type: array
+                items: {type: integer}
+        speed_probe_request:
+          type: object
+          nullable: true
+          properties:
+            task_id: {type: string, format: uuid}
+            sources:
+              type: array
+              items: {type: string}
+            probe_size_mb: {type: integer}
+            deadline_at: {type: string, format: date-time}
+
+    SubtaskAssignment:
+      type: object
+      required: [subtask_id, task_id, filename, expected_size, source_id, executor_epoch, assignment_token, deadline_at]
+      properties:
+        subtask_id: {type: string, format: uuid}
+        task_id: {type: string, format: uuid}
+        filename: {type: string}
+        expected_size: {type: integer, format: int64}
+        expected_sha256: {type: string, nullable: true}
+        source_id: {type: string}
+        alternate_sources:
+          type: array
+          items: {type: string}
+        executor_epoch: {type: integer, format: int64}
+        assignment_token: {type: string, format: uuid}
+        deadline_at: {type: string, format: date-time}
+        chunk_plan:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              chunk_index: {type: integer}
+              byte_start: {type: integer, format: int64}
+              byte_end: {type: integer, format: int64}
+              source_id: {type: string}
+        storage_target:
+          type: object
+          properties:
+            backend: {type: string, enum: [s3, obs, minio, nfs, local]}
+            endpoint: {type: string}
+            bucket: {type: string}
+            key_prefix: {type: string}
+            sts_credentials:
+              type: object
+              properties:
+                access_key_id: {type: string}
+                secret_access_key: {type: string}
+                session_token: {type: string}
+                expires_at: {type: string, format: date-time}
+
+    # ===== Tenant / Quota / Audit =====
+    Tenant:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        slug: {type: string}
+        display_name: {type: string}
+        quota_bytes_month: {type: integer, format: int64}
+        quota_concurrent: {type: integer}
+        quota_storage_gb: {type: integer, format: int64}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+
+    QuotaCurrent:
+      type: object
+      properties:
+        tenant_id: {type: integer, format: int64}
+        bytes_used_month: {type: integer, format: int64}
+        bytes_quota_month: {type: integer, format: int64}
+        storage_gb_used: {type: integer, format: int64}
+        storage_gb_quota: {type: integer, format: int64}
+        concurrent_tasks: {type: integer}
+        concurrent_quota: {type: integer}
+        remaining_days_in_billing_period: {type: integer}
+        forecast_month_end_usage: {type: integer, format: int64, nullable: true}
+
+    QuotaUsage:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            from: {type: string, format: date-time}
+            to: {type: string, format: date-time}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              group_key: {type: string}
+              metrics:
+                type: object
+                additionalProperties: {type: integer, format: int64}
+
+    AuditEntry:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        occurred_at: {type: string, format: date-time}
+        tenant_id: {type: integer, format: int64, nullable: true}
+        actor_user_id: {type: integer, format: int64, nullable: true}
+        actor_ip: {type: string}
+        action: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string, nullable: true}
+        outcome: {type: string, enum: [success, denied, error]}
+        payload:
+          type: object
+          additionalProperties: true
+        trace_id: {type: string}
+        prev_hash: {type: string, nullable: true}
+        self_hash: {type: string}
+
+    # ===== Storage =====
+    StorageBackend:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        tenant_id: {type: integer, format: int64, nullable: true}
+        name: {type: string}
+        backend_type: {type: string, enum: [s3, obs, minio, nfs, local]}
+        region: {type: string, nullable: true}
+        is_default: {type: boolean}
+
+    CreateStorageBackendRequest:
+      type: object
+      required: [name, backend_type, config]
+      properties:
+        name: {type: string, maxLength: 128}
+        backend_type: {type: string, enum: [s3, obs, minio, nfs, local]}
+        region: {type: string}
+        is_default: {type: boolean}
+        config:
+          type: object
+          description: |
+            Backend-specific config; encrypted at rest with envelope encryption.
+            For s3: {endpoint, bucket, role_arn, access_key_id, secret_access_key}
+            For nfs: {mount_path}
+          additionalProperties: true
+
+    # ===== Webhook =====
+    WebhookConfig:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        url: {type: string, format: uri}
+        events:
+          type: array
+          items: {type: string}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+
+    CreateWebhookRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url: {type: string, format: uri}
+        events:
+          type: array
+          items: {type: string, enum: ['*', task.completed, task.failed, task.cancelled, quota.exceeded]}
+        secret: {type: string, description: "HMAC secret; envelope-encrypted at rest"}

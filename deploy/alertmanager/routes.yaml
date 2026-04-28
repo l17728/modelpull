@@ -1,0 +1,110 @@
+global:
+  resolve_timeout: 5m
+
+# 抑制规则：上游 down 时压制下游
+inhibit_rules:
+  - source_matchers:
+      - alertname="ControllerDown"
+    target_matchers:
+      - alertname=~"TaskStuck|HighErrorRate|HFGlobalThrottle|ControllerDBSlow"
+    equal: []
+
+  - source_matchers:
+      - alertname="AllExecutorsOffline"
+    target_matchers:
+      - alertname=~"ExecutorOffline|ExecutorDegraded|DiskSpaceLow|PartsDirHigh"
+    equal: []
+
+  - source_matchers:
+      - alertname="HFCompletelyDown"
+    target_matchers:
+      - alertname="HFGlobalThrottle"
+    equal: []
+
+# 路由
+route:
+  receiver: slack-default
+  group_by: [alertname, tenant_id, executor_id]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # P0 → PagerDuty（不分组等待，立即触发）
+    - matchers:
+        - severity = "page"
+      receiver: pagerduty
+      group_wait: 0s
+      repeat_interval: 30m
+      continue: true
+
+    # P0 也同步到 Slack
+    - matchers:
+        - severity = "page"
+      receiver: slack-incidents
+
+    # P1 → Slack #alerts
+    - matchers:
+        - severity = "work-hours"
+      receiver: slack-alerts
+      group_wait: 1m
+      repeat_interval: 4h
+
+    # P2 → Jira / 邮件
+    - matchers:
+        - severity = "ticket"
+      receiver: jira
+      group_wait: 1h
+      repeat_interval: 24h
+
+    # 信息类（恢复通知等）
+    - matchers:
+        - severity = "info"
+      receiver: slack-info
+
+# 接收器
+receivers:
+  - name: pagerduty
+    pagerduty_configs:
+      - service_key_file: /secrets/pagerduty_url
+        description: '{{ template "pagerduty.default.description" . }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+          runbook_url: '{{ (index .Alerts 0).Annotations.runbook_url }}'
+
+  - name: slack-incidents
+    slack_configs:
+      - api_url_file: /secrets/slack_webhook_incidents
+        channel: '#dlw-incidents'
+        title: '🚨 [P0] {{ .GroupLabels.alertname }}'
+        text: '{{ template "slack.dlw.text" . }}'
+        send_resolved: true
+
+  - name: slack-alerts
+    slack_configs:
+      - api_url_file: /secrets/slack_webhook_alerts
+        channel: '#dlw-alerts'
+        title: '⚠️ [P1] {{ .GroupLabels.alertname }}'
+        text: '{{ template "slack.dlw.text" . }}'
+        send_resolved: true
+
+  - name: slack-info
+    slack_configs:
+      - api_url_file: /secrets/slack_webhook_info
+        channel: '#dlw-noise'
+        send_resolved: true
+
+  - name: slack-default
+    slack_configs:
+      - api_url_file: /secrets/slack_webhook_alerts
+        channel: '#dlw-alerts'
+
+  - name: jira
+    webhook_configs:
+      - url_file: /secrets/jira_webhook
+        send_resolved: false
+
+# 模板
+templates:
+  - /etc/alertmanager/templates/*.tmpl

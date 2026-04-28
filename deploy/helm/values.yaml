@@ -1,0 +1,304 @@
+# Default values for dlw v2.0
+# Production-ready defaults; overlay environment-specific values
+
+global:
+  imageRegistry: registry.example.com
+  imagePullSecrets:
+    - name: registry-creds
+  storageClass: fast-ssd
+
+## ============================================
+## Controller (active/standby; PG advisory_lock)
+## ============================================
+controller:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: dlw/controller
+    tag: "2.0.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 4Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  ingress:
+    enabled: true
+    className: nginx
+    host: api.dlw.example.com
+    tls:
+      - secretName: dlw-api-tls
+        hosts: [api.dlw.example.com]
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      nginx.ingress.kubernetes.io/proxy-body-size: 100m
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+
+  podAntiAffinity:
+    type: hard      # 强制不同 node
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  config:
+    # See 02-protocol.md
+    heartbeat:
+      timeout_seconds: 30
+      reclaim_after_failures: 6
+    scheduler:
+      loop_interval_ms: 200
+      max_concurrent_per_executor: 5
+    multipart:
+      part_size_mb: 64
+    speed_probe:
+      probe_size_mb: 32
+      probe_timeout_s: 8
+      ewma_alpha: 0.3
+    sources:
+      builtin:
+        - id: huggingface
+          enabled: true
+          base_url: https://huggingface.co
+        - id: hf_mirror
+          enabled: true
+          base_url: https://hf-mirror.com
+        - id: modelscope
+          enabled: true
+          base_url: https://www.modelscope.cn
+    quota:
+      hard_block_default: true
+    audit:
+      worm_export_enabled: true
+      worm_bucket: s3://dlw-audit-worm/
+    observability:
+      otel_endpoint: http://tempo:4317
+      log_level: INFO
+
+  secrets:
+    # ★ 使用 CSI Driver 从 Vault 拉取，不在此处明文
+    vault:
+      enabled: true
+      role: dlw-controller
+      mountPath: /secrets
+
+  envFromVault:
+    - HF_TOKEN_PRIMARY: secret/data/dlw/hf_token#primary
+    - HF_TOKEN_SECONDARY: secret/data/dlw/hf_token#secondary
+    - DLW_DB_PASSWORD: secret/data/dlw/db#password
+    - DLW_KMS_KEY_ID: secret/data/dlw/kms#key_id
+    - DLW_OIDC_CLIENT_ID: secret/data/dlw/oidc#client_id
+    - DLW_OIDC_CLIENT_SECRET: secret/data/dlw/oidc#client_secret
+
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 8000
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+## ============================================
+## Executor (StatefulSet for stable parts/ volume)
+## ============================================
+executor:
+  enabled: true
+  replicaCount: 10
+
+  image:
+    repository: dlw/executor
+    tag: "2.0.0"
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 4000m
+      memory: 8Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+  parts:
+    storage: 500Gi              # ≥ 1.5x 最大单文件
+    storageClassName: fast-ssd
+
+  podAntiAffinity:
+    type: soft                  # 软亲和，可同 node
+
+  config:
+    download:
+      max_threads: 8
+      chunk_size_mb: 64
+    upload:
+      max_concurrent_parts: 4
+    graceful_shutdown_timeout_seconds: 600
+
+  enrollment:
+    # 引导用 token：通过 K8s Secret + projected
+    # Controller 根据此 token 颁发 mTLS 证书
+    secret_name: dlw-executor-enrollment
+
+## ============================================
+## PostgreSQL (production: external; dev: bitnami)
+## ============================================
+postgresql:
+  enabled: false                # 生产建议外部托管
+  # If enabled (dev only):
+  auth:
+    username: dlw
+    database: dlw
+  primary:
+    persistence:
+      size: 200Gi
+      storageClass: fast-ssd
+
+# 外部 PG（生产）
+externalDatabase:
+  host: dlw-pg-primary.dlw.svc.cluster.local
+  port: 5432
+  user: dlw
+  database: dlw
+  existingSecret: dlw-db-secret
+  existingSecretPasswordKey: password
+  walArchive:
+    enabled: true
+    bucket: s3://dlw-pg-wal/
+  backup:
+    schedule: "0 */6 * * *"
+    retention_days: 30
+
+## ============================================
+## Storage backends (registered via API after deploy)
+## ============================================
+storageBackends: {}
+  # 通过 admin API / dlw CLI 注册，不在 helm 值中放凭证
+
+## ============================================
+## Observability
+## ============================================
+observability:
+  prometheus:
+    enabled: true
+    retention: 30d
+    remoteWrite:
+      - url: http://thanos-receive.observability:19291/api/v1/receive
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+
+  alertmanager:
+    enabled: true
+    receivers:
+      pagerduty:
+        url_secret_key: pagerduty_url
+      slack:
+        webhook_secret_key: slack_webhook
+
+  loki:
+    enabled: true
+    retention: 90d
+
+  tempo:
+    enabled: true
+    retention: 14d
+
+  grafana:
+    enabled: true
+    adminPassword_secretKey: grafana_admin_password
+    sso:
+      enabled: true
+      provider: oidc
+
+  otel:
+    enabled: true
+    sampler: parentbased_traceidratio
+    sampling_ratio: 0.01
+
+## ============================================
+## Security
+## ============================================
+security:
+  mTLS:
+    ca_secret: dlw-ca-cert        # Controller 自签 CA
+    cert_ttl_hours: 24
+
+  envelope_encryption:
+    kms:
+      provider: aws               # aws / azure / vault
+      key_id: ${DLW_KMS_KEY_ID}
+
+  oidc:
+    issuer: https://auth.example.com/realms/dlw
+    redirect_uri: https://dlw.example.com/auth/callback
+
+  network_policies:
+    enabled: true                 # 强制 k8s NetworkPolicy
+
+## ============================================
+## UI (frontend SPA)
+## ============================================
+ui:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: dlw/ui
+    tag: "2.0.0"
+
+  ingress:
+    enabled: true
+    className: nginx
+    host: dlw.example.com
+    tls:
+      - secretName: dlw-ui-tls
+        hosts: [dlw.example.com]
+
+  config:
+    api_base_url: https://api.dlw.example.com
+    ws_base_url: wss://api.dlw.example.com/ws/v1
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+## ============================================
+## Maintenance / GameDay
+## ============================================
+chaos:
+  enabled: false                  # production: false; staging chaos cluster: true
+  scheduler: chaos-mesh
+
+## ============================================
+## Common pod tuning
+## ============================================
+common:
+  serviceAccount:
+    create: true
+    annotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    readOnlyRootFilesystem: true
+  topologySpreadConstraints: true

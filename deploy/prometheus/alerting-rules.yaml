@@ -1,0 +1,185 @@
+groups:
+  # ============================================
+  # P0 - Page on-call (PagerDuty)
+  # ============================================
+  - name: dlw_p0_alerts
+    rules:
+      - alert: ControllerDown
+        expr: up{job="dlw-controller"} == 0
+        for: 1m
+        labels:
+          severity: page
+          category: availability
+        annotations:
+          summary: "DLW Controller is down ({{ $labels.instance }})"
+          description: "Controller {{ $labels.instance }} unreachable for 1+ min"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-01
+
+      - alert: ControllerHighRestart
+        expr: rate(kube_pod_container_status_restarts_total{namespace=~".*dlw.*",container="controller"}[15m]) > 0
+        for: 1m
+        labels: {severity: page, category: availability}
+        annotations:
+          summary: "DLW Controller restarting frequently"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-01
+
+      - alert: AllExecutorsOffline
+        expr: count(dlw:executors_count:by_status{status="healthy"}) == 0
+        for: 2m
+        labels: {severity: page, category: availability}
+        annotations:
+          summary: "All DLW executors offline"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-02
+
+      - alert: DataIntegrityFailure
+        expr: |
+          rate(dlw_subtask_retries_total{reason="checksum"}[10m]) > 0.05
+        for: 5m
+        labels: {severity: page, category: integrity}
+        annotations:
+          summary: "Multiple checksum failures detected"
+          description: "Possible data integrity issue or source corruption"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-03
+
+      - alert: CertExpiringIn1h
+        expr: |
+          (dlw_mtls_cert_expiry_seconds - time()) < 3600
+        for: 1m
+        labels: {severity: page, category: security}
+        annotations:
+          summary: "mTLS certificate expiring in <1h ({{ $labels.executor_id }})"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-08
+
+      - alert: SLOAvailabilityFastBurn
+        expr: |
+          (
+            dlw:api_availability:burn_rate_1h > 14.4
+            and
+            dlw:api_availability:burn_rate_6h > 6
+          )
+        for: 2m
+        labels: {severity: page, category: slo}
+        annotations:
+          summary: "API availability SLO burning fast"
+          description: "Burn rate {{ $value }}x in last hour"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-09
+
+  # ============================================
+  # P1 - Work-hours response (Slack)
+  # ============================================
+  - name: dlw_p1_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="dlw-controller",code=~"5.."}[5m]))
+            / sum(rate(http_requests_total{job="dlw-controller"}[5m]))
+          ) > 0.05
+        for: 10m
+        labels: {severity: work-hours, category: availability}
+        annotations:
+          summary: "API 5xx rate >5% sustained 10m"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-09
+
+      - alert: HFGlobalThrottle
+        expr: |
+          dlw_source_429_rate_5m{source_id="huggingface"} > 0.05
+        for: 5m
+        labels: {severity: work-hours, category: external}
+        annotations:
+          summary: "HuggingFace 429 rate >5%"
+          description: "May affect tasks pinned to HF"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-04
+
+      - alert: HFCompletelyDown
+        expr: |
+          dlw:source_health:by_id{source_id="huggingface"} == 0
+        for: 10m
+        labels: {severity: work-hours, category: external}
+        annotations:
+          summary: "HuggingFace fully unreachable"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-04
+
+      - alert: StorageS3High5xx
+        expr: |
+          rate(dlw_storage_put_total{status_code=~"5.."}[10m]) > 0.05
+        for: 5m
+        labels: {severity: work-hours, category: external}
+        annotations:
+          summary: "Storage backend 5xx rate >5%"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-05
+
+      - alert: ControllerDBSlow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(dlw_controller_db_query_duration_seconds_bucket[5m]))
+          ) > 0.5
+        for: 10m
+        labels: {severity: work-hours, category: performance}
+        annotations:
+          summary: "Controller DB P99 latency >500ms"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-09
+
+  # ============================================
+  # P2 - Ticket / FYI
+  # ============================================
+  - name: dlw_p2_alerts
+    rules:
+      - alert: ExecutorDegraded
+        expr: dlw_executor_health_score < 50
+        for: 10m
+        labels: {severity: ticket, category: availability}
+        annotations:
+          summary: "Executor {{ $labels.executor_id }} health score <50"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-02
+
+      - alert: ExecutorHealthLowRecovery
+        # 触发：score<50；恢复阈值：score>70（hysteresis）
+        expr: dlw_executor_health_score > 70
+        for: 5m
+        labels: {severity: info, category: availability}
+        annotations:
+          summary: "Executor recovered ({{ $labels.executor_id }})"
+
+      - alert: DiskSpaceLow
+        expr: dlw_executor_disk_free_gb < 50
+        for: 5m
+        labels: {severity: ticket, category: capacity}
+        annotations:
+          summary: "Executor disk free <50GB ({{ $labels.executor_id }})"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-06
+
+      - alert: PartsDirHigh
+        expr: |
+          (dlw_executor_parts_dir_bytes / dlw_executor_disk_total_bytes) > 0.6
+        for: 15m
+        labels: {severity: ticket, category: capacity}
+        annotations:
+          summary: "Parts dir using >60% disk ({{ $labels.executor_id }})"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-07
+
+      - alert: QuotaApproachingLimit
+        expr: |
+          (dlw_quota_bytes_used_month / dlw_quota_bytes_limit_month) > 0.85
+        for: 1h
+        labels: {severity: ticket, category: quota}
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} approaching monthly quota (85%)"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-10
+
+      - alert: SLOAvailabilitySlowBurn
+        expr: |
+          dlw:api_availability:burn_rate_6h > 1
+        for: 1h
+        labels: {severity: ticket, category: slo}
+        annotations:
+          summary: "API SLO burning slowly"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-09
+
+      - alert: AuditChainBroken
+        expr: dlw_audit_chain_integrity == 0
+        for: 5m
+        labels: {severity: ticket, category: security}
+        annotations:
+          summary: "Audit log chain integrity check failed"
+          description: "Possible tampering attempt"

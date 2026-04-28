@@ -1,0 +1,138 @@
+{{- if .Values.controller.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "dlw.controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dlw.controller.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+        checksum/config: {{ include (print $.Template.BasePath "/controller-config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "dlw.fullname" . }}-controller
+      securityContext:
+        {{- toYaml .Values.common.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq .Values.controller.podAntiAffinity.type "hard" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "dlw.controller.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "dlw.controller.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: controller
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: ws
+              containerPort: 8001
+          env:
+            - name: DLW_DB_HOST
+              value: {{ include "dlw.dbHost" . | quote }}
+            - name: DLW_DB_PORT
+              value: "5432"
+            - name: DLW_DB_USER
+              value: {{ .Values.externalDatabase.user | quote }}
+            - name: DLW_DB_NAME
+              value: {{ .Values.externalDatabase.database | quote }}
+            - name: DLW_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.existingSecret }}
+                  key: {{ .Values.externalDatabase.existingSecretPasswordKey }}
+            - name: DLW_OTEL_ENDPOINT
+              value: {{ .Values.controller.config.observability.otel_endpoint | quote }}
+            - name: DLW_LOG_LEVEL
+              value: {{ .Values.controller.config.observability.log_level | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          envFrom:
+            - configMapRef:
+                name: {{ include "dlw.fullname" . }}-controller-config
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /secrets
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/dlw/ca
+              readOnly: true
+            - name: config
+              mountPath: /etc/dlw/config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            {{- toYaml .Values.controller.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.controller.readinessProbe | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.common.containerSecurityContext | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Graceful shutdown: drain LB then exit (详见 05 §10.1)
+                command: ["/bin/sh", "-c", "sleep 30 && /app/bin/graceful_stop.py"]
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "dlw.fullname" . }}-vault
+        - name: ca-certs
+          secret:
+            secretName: {{ .Values.security.mTLS.ca_secret }}
+        - name: config
+          configMap:
+            name: {{ include "dlw.fullname" . }}-controller-config
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 180
+{{- end }}

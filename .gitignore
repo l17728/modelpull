@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtual env
+venv/
+.venv/
+env/
+.env
+.env.local
+
+# Node / Frontend
+node_modules/
+dist/
+.cache/
+.vite/
+.parcel-cache/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Build / Generated
+build/
+*.tar.gz
+*.whl
+api/generated/
+frontend/dist/
+
+# Local config / secrets (never commit)
+*.local.yaml
+*.local.yml
+*.local.json
+config.local.*
+secrets/
+*.pem
+*.key
+*.crt
+!deploy/helm/templates/*
+.dlw/
+~/.dlw/
+
+# Test artifacts
+.benchmarks/
+test-results/
+playwright-report/
+.nyc_output/
+
+# OS / temp
+*.bak
+*.tmp
+.parts/
+*.partial
+
+# Database (dev)
+*.db
+*.sqlite
+*.sqlite3
+
+# Docs build output
+site/
+_site/
+
+# Helm
+charts/
+*.tgz

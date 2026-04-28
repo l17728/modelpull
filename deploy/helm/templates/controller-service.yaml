@@ -1,0 +1,62 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: {{ .Values.controller.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.controller.service.port }}
+      targetPort: http
+      protocol: TCP
+    - name: ws
+      port: 8001
+      targetPort: ws
+  selector:
+    {{- include "dlw.controller.selectorLabels" . | nindent 4 }}
+
+---
+{{- if .Values.controller.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  minAvailable: {{ .Values.controller.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "dlw.controller.selectorLabels" . | nindent 6 }}
+{{- end }}
+
+---
+{{- if .Values.controller.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml .Values.controller.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.controller.ingress.className }}
+  tls:
+    {{- toYaml .Values.controller.ingress.tls | nindent 4 }}
+  rules:
+    - host: {{ .Values.controller.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dlw.fullname" . }}-controller
+                port:
+                  number: {{ .Values.controller.service.port }}
+{{- end }}
+{{- end }}

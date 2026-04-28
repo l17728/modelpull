@@ -1,0 +1,60 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+data:
+  controller.yaml: |
+    heartbeat:
+      timeout_seconds: {{ .Values.controller.config.heartbeat.timeout_seconds }}
+      reclaim_after_failures: {{ .Values.controller.config.heartbeat.reclaim_after_failures }}
+    scheduler:
+      loop_interval_ms: {{ .Values.controller.config.scheduler.loop_interval_ms }}
+      max_concurrent_per_executor: {{ .Values.controller.config.scheduler.max_concurrent_per_executor }}
+    multipart:
+      part_size_mb: {{ .Values.controller.config.multipart.part_size_mb }}
+    speed_probe:
+      probe_size_mb: {{ .Values.controller.config.speed_probe.probe_size_mb }}
+      probe_timeout_s: {{ .Values.controller.config.speed_probe.probe_timeout_s }}
+      ewma_alpha: {{ .Values.controller.config.speed_probe.ewma_alpha }}
+    quota:
+      hard_block_default: {{ .Values.controller.config.quota.hard_block_default }}
+    audit:
+      worm_export_enabled: {{ .Values.controller.config.audit.worm_export_enabled }}
+      worm_bucket: {{ .Values.controller.config.audit.worm_bucket | quote }}
+
+  sources.yaml: |
+    sources:
+{{- range .Values.controller.config.sources.builtin }}
+      - id: {{ .id }}
+        enabled: {{ .enabled }}
+        base_url: {{ .base_url | quote }}
+{{- end }}
+    balancing:
+      strategy: lpt
+      speed_ewma_alpha: {{ .Values.controller.config.speed_probe.ewma_alpha }}
+      speed_probe_interval_seconds: 300
+      chunk_level_min_file_mb: 100
+      blacklist_after_5xx_count: 3
+      blacklist_duration_minutes: 5
+      sha_mismatch_blacklist_hours: 24
+{{- end }}
+---
+{{- if .Values.executor.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dlw.fullname" . }}-executor-config
+  namespace: {{ .Release.Namespace }}
+data:
+  executor.yaml: |
+    download:
+      max_threads: {{ .Values.executor.config.download.max_threads }}
+      chunk_size_mb: {{ .Values.executor.config.download.chunk_size_mb }}
+    upload:
+      max_concurrent_parts: {{ .Values.executor.config.upload.max_concurrent_parts }}
+    graceful_shutdown_timeout_seconds: {{ .Values.executor.config.graceful_shutdown_timeout_seconds }}
+{{- end }}
