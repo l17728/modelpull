@@ -285,17 +285,252 @@ def compute_split_plan(f, state, k):
 
 不展开实现细节；超时 5 秒回退 fast path 结果。
 
-### 4.3 触发条件
+### 4.3 决策触发时机（最优化的核心子问题）
 
-PlanOptimizer 不一定每 30s 全量重算。事件触发也加入：
+**决策何时触发**本身就是一个最优化问题：
 
-| 触发 | 优先级 |
+```
+trade-off:
+  trigger 太频繁  → optimizer CPU 开销 + 决策抖动 + 频繁切换的 switch_cost
+  trigger 太稀疏  → 错过最优切换窗口 → makespan 实际比理论最优长
+
+我们要的 trigger 策略是：让"必要决策点"100% 覆盖，"无效决策点"近 0%。
+```
+
+下面是 v2.1 的触发框架。**核心思路：把所有触发分成 3 级 + 自适应周期 + 瓶颈聚焦 + 信息量门控**。
+
+#### 4.3.1 三级触发分类
+
+按"是否可能改变 makespan"做强弱分类。每级有独立处理路径。
+
+##### Tier 1 — Hard triggers（事件即触发，无 debounce）
+
+**判定原则：能直接证明 makespan 已变 / 即将变**。
+
+| 信号 | 为什么 hard | 处理 |
+|------|-----------|------|
+| **Bottleneck 文件速度 < 基线 × 30% 持续 ≥ 15s** | 当前最长 ETA 直接拉长，必须立即评估 | 立即调 `decide(bottleneck_file)` |
+| Executor 进入 `faulty` / 心跳超时 | 容量减少；可能影响多个文件 | 立即调 `decide(all_files_on_this_executor)` |
+| 新 Executor 注册成功（capacity 变） | 新增容量；可能用于瓶颈文件子分片 | 立即调 `decide(bottleneck_file)`（仅瓶颈，不全量） |
+| Source 进入 `circuit_open`（详见 03 §8） | 该 source 完全不可用 | 立即调 `decide(files_using_this_source)` |
+| 任务 ETA > 预测 × 1.5 触发持续 30s | 实际进度严重偏离 → 模型与现实不一致 | 立即全量 `decide(all_files_in_task)` |
+| 用户 `POST /api/tasks/{id}/replan` | 显式请求 | 立即全量 |
+
+🔒 **不变量 27：Hard trigger 不被 cooldown 抑制**
+（不变量 21 的 60s/file cooldown 仅约束 soft trigger 与周期。Hard 永远响应。）
+
+##### Tier 2 — Soft triggers（进入待评估队列，下一个 tick 评估）
+
+**判定原则：可能改变 makespan，但不一定**。攒一批一起评估。
+
+| 信号 | 处理 |
 |------|------|
-| 周期 tick（30s） | 普通 |
-| Executor 状态变 healthy↔degraded | 高 |
-| Source 状态变 normal↔throttled↔circuit_open | 高 |
-| 任务级 ETA 偏离预测 > 50% | 高 |
-| 用户手动 `POST /api/tasks/{id}/replan` | 立即 |
+| **非瓶颈文件**速度变化（任意方向） | 入队，下一个 tick 评估"是否成为新瓶颈" |
+| Source 进入 `throttled`（非 circuit_open） | 入队 |
+| Executor 进入 `degraded`（不是 faulty） | 入队，仅评估它当前承担的 chunk |
+| Executor 完成一个 sub-chunk 进入 idle | 入队，评估"这个 idle 容量能用于瓶颈吗" |
+| ETA 预测偏离 ∈ [20%, 50%] | 入队 |
+
+##### Tier 3 — Periodic safety net
+
+> 兜底：万一漏报某个 hard/soft 信号，不至于卡死在次优状态。
+
+不是固定 30s。**周期自适应**：
+
+```python
+def next_tick_interval(state):
+    # 系统稳定性：最近 5 分钟内 hard trigger 数 / soft trigger 数 / actual_savings 分布
+    instability = state.recent_hard_triggers_5m * 5 \
+                + state.recent_soft_triggers_5m \
+                + state.recent_speed_variance_pct
+
+    if instability > 50:    return 5   # 高扰动期，密集观察
+    if instability > 20:    return 15
+    if instability > 5:     return 30
+    if state.all_etas_on_track and state.recent_actions_5m == 0:
+        return 120          # 完全稳定，省 CPU
+    return 60               # 默认
+```
+
+**最小周期 5s，最大 120s**。
+
+#### 4.3.2 瓶颈聚焦（Bottleneck-Scoped Evaluation）
+
+不是每个 trigger 都全量重新规划所有文件。**仅评估"可能影响 makespan"的文件子集**：
+
+```python
+def files_to_evaluate(state, trigger):
+    if trigger.tier == 1:
+        return trigger.affected_files     # hard trigger 自带受影响文件集合
+
+    bottleneck_eta = max(state.eta_per_file.values())
+    candidates = []
+
+    # 1. 当前瓶颈文件
+    candidates.append(state.bottleneck_file)
+
+    # 2. ETA 在瓶颈 ±20% 内的文件（容易成为新瓶颈）
+    for f, eta in state.eta_per_file.items():
+        if abs(eta - bottleneck_eta) / bottleneck_eta < 0.2:
+            candidates.append(f)
+
+    # 3. 有 idle executor 等待时，所有文件都可能受益（额外容量）
+    if state.has_idle_executor():
+        candidates.extend(state.in_progress_files)
+
+    return list(set(candidates))
+```
+
+**Why**：评估 100 文件 vs 评估 5 文件，CPU 差 20×。瓶颈聚焦让 fast path 真的 fast。
+
+#### 4.3.3 信息量门控（Information-Gated Triggering）
+
+> 即使 trigger 进了队列，**评估前先问：state 真的变了吗？变化能改变决策吗？**
+
+```python
+def should_actually_evaluate(file, state, last_state):
+    # 1. 状态显著变化检测
+    speed_changed = max_speed_change_pct(state, last_state, file) > 10
+    capacity_changed = state.idle_executors != last_state.idle_executors
+    progress_changed = state.P[file] / file.size > last_state.progress + 0.05
+
+    if not (speed_changed or capacity_changed or progress_changed):
+        return False   # 状态实质未变，跳过
+
+    # 2. 决策稳定性预估（粗略）
+    expected_diff = abs(estimate_savings(state, file) - last_state.expected_savings)
+    if expected_diff < SAVINGS_NOISE_THRESHOLD:
+        return False   # 即使评估也是同一个决定，跳过
+
+    return True
+```
+
+`SAVINGS_NOISE_THRESHOLD` 默认 5 秒（小于这就是噪声）。
+
+#### 4.3.4 Trigger 抖动抑制
+
+同一文件短时间内反复触发：
+
+| 防护 | 配置 |
+|------|------|
+| 单文件 cooldown | 60s（不变量 21；hard trigger 也尊重，但 hard 优先级压过 cooldown 的提示告警） |
+| 同类型 hard trigger 去重 | 5s 内同 file + 同 reason 仅算一次 |
+| Soft trigger 队列合并 | 30s 窗口内同 file 多次 soft 合并为一次 |
+| 全局 trigger 频率上限 | 单 controller 优化决策 ≤ 60 次/分钟 |
+
+#### 4.3.5 决策预算（Cost-Bounded Triggering）
+
+PlanOptimizer 自身 CPU 也是有限资源。当 controller 同时管理大量任务时，触发预算分配：
+
+```
+budget(task) = base_quota
+             + priority_bonus(task.priority)        # higher prio gets more
+             + bottleneck_bonus(if task is system-wide longest)
+             - recency_penalty(time_since_last_decision)
+```
+
+低预算任务的 soft trigger 直接丢弃；保证整体 controller 不爆 CPU（详见 §9.1 容量）。
+
+#### 4.3.6 触发流程总图
+
+```
+                ┌──────────────────────────────────────┐
+                │ Signal (heartbeat / state change /   │
+                │  user action / periodic tick)         │
+                └──────────────────┬────────────────────┘
+                                   ▼
+                          ┌─────────────────┐
+                          │ Classify Tier   │
+                          └────┬──────┬─────┘
+                       Tier 1  │      │  Tier 2 / 3
+                  (hard)       │      │  (soft / periodic)
+                               ▼      ▼
+                  ┌────────────────┐  ┌──────────────────┐
+                  │ Cooldown check │  │ Enqueue to       │
+                  │  (passthrough) │  │  pending_queue   │
+                  └───────┬────────┘  └────────┬─────────┘
+                          │                    │  next tick
+                          │   ┌────────────────┘
+                          ▼   ▼
+                  ┌─────────────────────────────┐
+                  │ Bottleneck-scoped selection │
+                  │ (files_to_evaluate)          │
+                  └────────────┬─────────────────┘
+                               ▼
+                  ┌─────────────────────────────┐
+                  │ Information-gated check     │
+                  │ (should_actually_evaluate)  │
+                  └────────────┬─────────────────┘
+                       skip ←──┤  ──→ proceed
+                               ▼
+                  ┌─────────────────────────────┐
+                  │ Budget check                │
+                  │ (per-task quota)            │
+                  └────────────┬─────────────────┘
+                               ▼
+                  ┌─────────────────────────────┐
+                  │ DecisionEngine.decide()      │
+                  │  (fast_path → slow_path)    │
+                  └────────────┬─────────────────┘
+                               ▼
+                  ┌─────────────────────────────┐
+                  │ Apply or skip decision      │
+                  │ (write optimization_decisions) │
+                  └─────────────────────────────┘
+```
+
+#### 4.3.7 配置默认值
+
+```yaml
+trigger:
+  # 周期
+  period:
+    min_seconds: 5
+    max_seconds: 120
+    default_seconds: 60
+    instability_thresholds: {high: 50, medium: 20, low: 5}
+
+  # Hard trigger
+  bottleneck_speed_drop_pct: 30
+  bottleneck_speed_drop_duration_s: 15
+  eta_drift_pct: 50
+  eta_drift_duration_s: 30
+
+  # Cooldown
+  cooldown_per_file_seconds: 60        # soft trigger 受限；hard 不受
+  hard_trigger_dedup_window_s: 5
+  soft_trigger_merge_window_s: 30
+
+  # 全局
+  max_decisions_per_controller_per_minute: 60
+  max_files_per_evaluation: 20
+
+  # 门控
+  speed_change_threshold_pct: 10        # 信息量门控
+  savings_noise_threshold_seconds: 5
+  bottleneck_proximity_pct: 20          # ETA 在瓶颈 ±20% 内才参与评估
+```
+
+#### 4.3.8 v2.2 进阶：预测性触发（Predictive Triggering）
+
+v2.1 的所有 trigger 都是 **reactive**——速度变了才反应。v2.2 引入 **predictive**：
+
+| 预测信号 | 来源 | 行动 |
+|---------|------|------|
+| Source 429 概率上升（按 time-of-day + 累计使用量历史） | 历史 source_throttle_state 表 | 提前 30s 把流量往其他源迁 |
+| Executor 性能退化（按 health_score 趋势） | executor_status_history 表 | 提前 reduce 该 executor 上分配 |
+| 任务总耗时偏长（按文件 size 分布预测） | 历史任务库 | 一开始就直接 split 大文件 |
+
+📝 **决策**：v2.1 只用 reactive；predictive 收集决策历史 30 天后（v2.2）启用，先验证模型准确度。
+
+#### 4.3.9 已知失效模式
+
+| 场景 | 失效 | 缓解 |
+|------|------|------|
+| EWMA 速度估计有 ~10s 延迟 → bottleneck 速度跌已经发生 ~10s 才被 hard trigger | 决策已经"晚了"几秒 | 接受；adaptive period 调到 5s 时基本能压到 5-15s 总反应延迟 |
+| 多个 hard trigger 同时触发 → 决策 race | 后一个决策可能基于前一个未生效的 state | 串行化：单 controller 内 PlanOptimizer 用全局 lock |
+| 触发风暴（如重启时所有 executor 同时 register） | 每个都是 hard trigger | dedup window 5s 合并 |
+| User 频繁 `replan` 制造 thrash | 决策抖动 | per-user replan 限流 6 次/小时 |
 
 ---
 

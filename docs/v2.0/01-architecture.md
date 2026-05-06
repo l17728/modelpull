@@ -668,6 +668,7 @@ CREATE TABLE quota_snapshots (
 | 24 | v2.1 单任务最优化；跨任务全局调度延后到 v2.2 | scope 限制 |
 | 25 | 单次决策 ≤ 5s（超时回退 fast path 启发式） | 性能基线 |
 | 26 | sub-chunk 的 `s3_part_number` 在 multipart 内唯一且稳定（即使 reassign） | 恢复测试 |
+| 27 | Hard trigger（瓶颈速度跌 / executor faulty / source circuit_open / user replan）不被 cooldown 抑制 | trigger 单测 U-ADO-T-* |
 
 ---
 

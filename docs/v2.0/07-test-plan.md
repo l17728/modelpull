@@ -664,6 +664,23 @@ Tag release:
 | U-ADO-017 | actual_savings 与 expected_savings 偏差正确记录 |
 | U-ADO-018 | 跨任务调度场景：v2.1 不会跨任务考虑（不变量 24） |
 
+#### 10.1.1 触发时机 unit（~12，对应 13 §4.3）
+
+| ID | 测试 |
+|----|------|
+| U-ADO-T-001 | Hard trigger（瓶颈速度跌 30%/15s）立即触发，不等周期 |
+| U-ADO-T-002 | Hard trigger 不被 cooldown 抑制（不变量 27） |
+| U-ADO-T-003 | Soft trigger 入队，下一个 tick 才评估 |
+| U-ADO-T-004 | 5s 窗口内同 file + 同 reason 的 hard trigger 仅算一次（dedup） |
+| U-ADO-T-005 | 30s 窗口内同 file 多次 soft trigger 合并 |
+| U-ADO-T-006 | 自适应周期：高扰动期降至 5s；完全稳定升至 120s |
+| U-ADO-T-007 | 自适应周期：min/max 边界不被突破（[5, 120]） |
+| U-ADO-T-008 | 瓶颈聚焦：评估范围仅含 bottleneck + ±20% ETA 文件 |
+| U-ADO-T-009 | 信息量门控：速度变化 < 10% 时跳过评估 |
+| U-ADO-T-010 | 信息量门控：expected_savings 差 < 5s 时跳过 |
+| U-ADO-T-011 | 全局触发预算：单 controller 决策频率不超过 60 次/分钟 |
+| U-ADO-T-012 | 触发风暴：100 executor 同时 register → dedup 后实际触发次数 ≤ 5 |
+
 ### 10.2 集成测试 with 速度注入（~10）
 
 `SourceSpeedHarness`：可在测试中注入 `(executor, source) → speed` 矩阵随时间变化。
