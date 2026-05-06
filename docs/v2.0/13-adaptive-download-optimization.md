@@ -234,10 +234,26 @@ hysteresis:
 
 每次重新规划写 `optimization_decisions` 表（含输入状态 + 决策 + 预期收益），可事后回放验证算法是否合理。
 
-🔒 **不变量 24：Optimizer 不能跨任务调度**
+🔒 **不变量 24（修订 v2.1, OR-V21-13）：Optimizer 不做跨任务全局最优；但 v2.1 加入最简跨任务公平性兜底**
 
-v2.1 范围内，每个任务独立最优化。跨任务全局最优（多任务竞争同一 executor）是 v2.2 才考虑。
-**Why**：跨任务最优化引入大量复杂度（公平性 / 优先级 / 抢占），先把单任务做扎实。
+**v2.1 范围**：每个任务独立最优化 + **轻量跨任务公平**（不需要全局 LP）：
+
+```python
+def per_task_executor_quota(task: Task, all_active_tasks: list[Task]) -> dict[str, int]:
+    """
+    简单 round-robin：每个任务可用 executor 数 ≤ N_total / N_active_tasks，
+    防止"任务 A 独占 8 executor，任务 B 全部排队"。
+    高优先级任务获 1.5× 配额。
+    """
+    base_quota = max(1, len(healthy_executors) // len(all_active_tasks))
+    priority_factor = {0: 0.7, 1: 1.0, 2: 1.2, 3: 1.5}[task.priority]
+    return int(base_quota * priority_factor)
+```
+
+PlanOptimizer 在 §4.1 fast_path 中加约束：单任务 `len(distinct_executors) ≤ per_task_executor_quota`。
+
+**v2.2 才做的**：完整跨任务全局 LP / 抢占式调度 / Class-of-Service。
+**Why 现在加最简版**：避免显著不公（OR-V21-13），但不引入复杂度。
 
 🔒 **不变量 25：决策最大延迟 ≤ 5 秒**
 
@@ -559,7 +575,7 @@ async def optimize_file(file_id):
 | 防护 | 配置 |
 |------|------|
 | 单文件 cooldown | 60s（不变量 21；hard trigger 也尊重，但 hard 优先级压过 cooldown 的提示告警） |
-| 同类型 hard trigger 去重 | 5s 内同 file + 同 reason 仅算一次 |
+| 同类型 hard trigger 去重 | 5s 内 `(reason, affected_file_set_hash)` 仅算一次（v2.1, DIST-V21-10）—— dedup key **不含** executor_id，使 100 个 executor 同时 register 时仅算 1 次 |
 | Soft trigger 队列合并 | 30s 窗口内同 file 多次 soft 合并为一次 |
 | 全局 trigger 频率上限 | 单 controller 优化决策 ≤ 60 次/分钟 |
 
@@ -914,8 +930,10 @@ CREATE TABLE optimization_decisions (
     state_snapshot  JSONB NOT NULL,                -- V[E][S], P[F], A[F]
     decision        JSONB NOT NULL,                -- {action: switch|split, ...}
     expected_savings_seconds FLOAT,
-    actual_outcome  JSONB,                         -- 30s 后回填实际效果
-    actual_savings_seconds FLOAT
+    actual_outcome  JSONB,                         -- 30s 后回填（near-term）；task 终态时若窗口未到则标 task_terminal_before_window
+    actual_savings_seconds FLOAT,
+    final_savings_seconds FLOAT,                    -- task 完成时回填（OR-V21-16）
+    evaluation_horizon VARCHAR(16)                   -- "30s" / "task_terminal" / "task_terminal_before_window"
 );
 
 CREATE INDEX idx_opt_decision_task ON optimization_decisions(task_id, triggered_at);
@@ -1002,6 +1020,21 @@ PlanOptimizer 周期 CPU 占用（v2.1 修订）：
 🔒 **不变量 38 (v2.1, OR-V21-03)**：slow path 连续超时 ≥ 3 次 → 自动降级为 LP 松弛 + 1s anytime cutoff，永远返回 best feasible 解，不让"slow path 超时 → 无脑回退 fast path"成为永久状态。
 
 如果 active task > 50：考虑分片（按 task_id hash 到多 controller，但这就到 v2.2 横向扩展了）。
+
+### 9.1.1 配置默认值的统计学依据（v2.1, OR-V21-05/09/14/15）
+
+> 把"经验值"升级为有公式可追溯。
+
+| 参数 | v2.0 默认 | v2.1 公式 | 说明 |
+|------|---------|---------|------|
+| `α` (switch_cost 惩罚因子) | 1.5 | **1.0** | 单位转换；`switch_cost / V_avg` 已经是秒。> 1 = risk-aversion，由 chaos 测试反推 |
+| `switch_threshold_savings_pct` | 15% | **2 × CV(speed_estimate)** ≈ 15% | EWMA σ ≈ 7.5%，节省 < 15% 不可信（信噪比） |
+| `SAVINGS_NOISE_THRESHOLD` (信息门控) | 5s 绝对 | **`max(5s, 0.05 × current_eta, 2 × σ(estimate_savings))`** | 30s 任务 5s = 17%（显著）；1h 任务 5s = 0.14%（噪声） |
+| `cooldown_per_file_seconds` | 60s | **`3 × EWMA_window + heartbeat_period`** = 30s + 10s = 40s（保守取 60s） | EWMA τ=10s，3τ 后达 95% 收敛 |
+| `dedup_window` | 5s 绝对 | **`max(5s, 1 × heartbeat_period)`** | 至少覆盖 1 个心跳周期 |
+| `instability_thresholds` (自适应周期) | {high:50, mid:20, low:5} | 基于 1h 滑动窗的 hard+soft trigger 计数；阈值由 chaos 测试反推 | 详见 §10.4 |
+
+📝 **决策**：v2.1 GA 前用 chaos 测试 + α scan {0.5, 1.0, 1.5, 2.0, 3.0} 反推真实 prod 数据下的最佳值，固化到 §4.3.8 配置。
 
 ### 9.2 决策频率成本
 

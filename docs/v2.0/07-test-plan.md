@@ -292,7 +292,7 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 | E2E-SEC-004 | 审计日志：每个 admin 操作有记录 |
 | E2E-SEC-005 | 审计链篡改单行：tampering 检测 |
 
-### 3.5 升级 / 灰度（~5）
+### 3.5 升级 / 灰度（~12，v2.1 扩展 ENT-QA-13）
 
 | ID | 测试 |
 |----|------|
@@ -301,6 +301,39 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 | E2E-UP-003 | DB schema migration：可升可降 |
 | E2E-UP-004 | v1.x 数据导入到 v2.0 后任务可继续 |
 | E2E-UP-005 | active/standby 重启后 advisory_lock 正确切换 |
+| E2E-UP-006 | 5M subtask staging 实测全 alembic 流程耗时（ENT-QA-04 验证） |
+| E2E-UP-007 | 跨版本跳跃 v1.4 → v2.0（不经 v1.5） |
+| E2E-UP-008 | v2.0 → v2.1 在线滚动（mid-flight task 跨版本不中断） |
+| E2E-UP-009 | 回滚后 v2 期间产生的 audit 链如何处理（断点 + 标记） |
+| E2E-UP-010 | Helm chart 双版本共存（v2.0 + v2.1 同 cluster） |
+| E2E-UP-011 | 兼容垫片 4 阶段双写期数据一致性 |
+| E2E-UP-012 | NetworkPolicy 升级期间 WSS 不被误杀 |
+
+### 3.6 配额边界（~6，v2.1 扩展 ENT-QA-11）
+
+| ID | 测试 |
+|----|------|
+| E2E-QT-001 | 配额 99% 时并发创建 10 任务：仅 1 个成功（其他 429） |
+| E2E-QT-002 | 配额刚 reset 那一秒：精确性 |
+| E2E-QT-003 | 跨月边界：billing_period 切换 |
+| E2E-QT-004 | refcount churn：多 child subtask 同时计费 + 完成时 net delta |
+| E2E-QT-005 | quota_snapshots 1min cron 滞后期：is_consistent 标记 |
+| E2E-QT-006 | per-user AI quota 耗尽不影响 tenant 其他用户（AI-SEC-V21-07） |
+
+### 3.7 i18n / 多语言（~10，v2.1 扩展 ENT-QA-12）
+
+| ID | 测试 |
+|----|------|
+| E2E-I18N-001 | Display name 含中文 / 日语 / 韩语 / 阿拉伯语 / emoji 正确显示 |
+| E2E-I18N-002 | UI RTL 渲染（阿拉伯语 / 希伯来语） |
+| E2E-I18N-003 | 4-byte emoji（如 🚀U+1F680）在 display_name 截断处理 |
+| E2E-I18N-004 | zalgo 文本（Combining Mark 大量叠加）渲染不破坏布局 |
+| E2E-I18N-005 | repo_id 含特殊字符正确 escape |
+| AI-EVAL-031 | 中文 query "下载 deepseek-V3 latest 版本" |
+| AI-EVAL-032 | 中英混合 "下载 latest version of Qwen3-72B" |
+| AI-EVAL-033 | 英文 query 跨多 turn |
+| AI-EVAL-034 | 阿拉伯语 query (RTL) |
+| AI-EVAL-035 | 日语 query |
 
 ---
 
@@ -330,6 +363,9 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 |----|------|
 | P-009 | 新版本 vs 上版本：吞吐回归 < 5% |
 | P-010 | 加 100 个 metrics label 不影响 P99 < 200ms |
+| **P-011 (v2.1)** | **1000-executor 容量测试（ENT-QA-06）** | 1000 WSS conn × 1Hz heartbeat × 50 active task；controller CPU < 80%，PG TPS < 5k；GA 阻断项 |
+| **P-012 (v2.1)** | **PR-level micro-benchmark（ENT-QA-10）** | pytest-benchmark + Codspeed；scheduler.assign / SHA256 stream / WS broadcast 三条 hot path；> 3% regression block merge |
+| **P-013 (v2.1)** | 持续 perf regression detection | weekly 全套；nightly micro-bench；asv baseline |
 
 ---
 
@@ -379,7 +415,21 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 
 ## 6. Chaos / GameDay 演练
 
-详见 05 §9。每季度执行一次：
+> v2.1 修订（ENT-QA-22）：季度 GameDay 保留为大型演练；月度加 mini-chaos 自动化（chaos-mesh）。
+
+### 6.1 月度 mini-chaos（自动化，ENT-QA-22）
+
+每月在 staging 跑 1 次自动 chaos-mesh：
+
+| 演练 ID | 场景 | 自动化 |
+|--------|------|------|
+| CH-M-001 | 随机 kill 1 executor pod | chaos-mesh PodChaos |
+| CH-M-002 | PG slow query 注入（fault injection） | chaos-mesh IOChaos |
+| CH-M-003 | corp proxy idle close（WSS 强制断） | NetworkChaos delay/drop |
+| CH-M-004 | source 5xx 突发（10% 5xx 5min） | wiremock fault injection |
+| CH-M-005 | optimizer decision 风暴（人为高频 trigger） | trigger-injector |
+
+### 6.2 季度 GameDay（人工）
 
 | 演练 ID | 场景 | RTO | 验证 |
 |--------|------|-----|------|
@@ -387,6 +437,8 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 | CH-Q2 | HF 全网 429 | N/A | paused_external 自动恢复 |
 | CH-Q3 | PG primary 故障 | ≤ 5min | streaming replica 提升 |
 | CH-Q4 | 网络分区 | N/A | reclaim 不丢数据 |
+| CH-Q5 (v2.1) | 1000 executor 同时 register | N/A | dedup 工作；不变量 27 |
+| CH-Q6 (v2.1) | corp gateway 全 user 401 风暴 | N/A | drain-purge 不抖动 |
 
 ---
 
@@ -423,7 +475,8 @@ Tag release:
 |------|------|
 | 行覆盖 | ≥ 80% |
 | 分支覆盖（关键路径：state machine, fence, recovery） | 100% |
-| Mutation testing（`mutmut`） | ≥ 70% |
+| Mutation testing（`mutmut`） | ≥ 70% 全局 |
+| Mutation testing on critical paths（state machine / fence / recovery / multipart / sanitize） | ≥ 85%（v2.1, ENT-QA-21） |
 
 ### 7.3 测试数据管理
 
@@ -471,6 +524,26 @@ Tag release:
 | U-AI-T-011 | `dlw_list_recent_models`：deepseek-ai 30 天过滤准确 |
 | U-AI-T-012 | `dlw_list_recent_models`：cache 24h 命中 |
 | U-AI-T-013 | `dlw_source_status`：返回所有启用 source |
+
+#### 9.1.1 AI 工具层完整覆盖（v2.1 扩展 — ENT-QA-09）
+
+> 每工具 7 个测试：valid / invalid-arg / RBAC-deny / cross-tenant / quota-exhausted / i18n-cn / i18n-en。13 工具 × 7 ≈ 90 case。
+
+| 工具 | 7-test 覆盖矩阵 |
+|------|--------------|
+| `dlw_search_models` | U-AI-T-S-001..007 |
+| `dlw_get_model_info` | U-AI-T-I-001..007 |
+| `dlw_list_tasks` | U-AI-T-LT-001..007 |
+| `dlw_get_task` | U-AI-T-GT-001..007 |
+| `dlw_get_task_events` | U-AI-T-E-001..007 |
+| `dlw_quota_current` | U-AI-T-Q-001..007 |
+| `dlw_source_status` | U-AI-T-SS-001..007 |
+| `dlw_list_recent_models` | U-AI-T-LR-001..007 |
+| `dlw_create_task` (write) | U-AI-T-CR-001..007 |
+| `dlw_cancel_task` (write) | U-AI-T-CN-001..007 |
+| `dlw_retry_subtasks` (write) | U-AI-T-RT-001..007 |
+| `dlw_upgrade_task` (write) | U-AI-T-UP-001..007 |
+| `dlw_set_priority` (write) | U-AI-T-SP-001..007 |
 
 #### 9.1.2 协议 / SSE（15）
 
@@ -690,7 +763,24 @@ Tag release:
 | U-ADO-015 | child subtask 全完成后 parent 自动 trigger CompleteMultipartUpload |
 | U-ADO-016 | child crash → reclaim → 新 executor 用同 part_number 重传，S3 last-write-wins |
 | U-ADO-017 | actual_savings 与 expected_savings 偏差正确记录 |
-| U-ADO-018 | 跨任务调度场景：v2.1 不会跨任务考虑（不变量 24） |
+| U-ADO-018 | 跨任务调度场景：v2.1 仅做最简 round-robin 公平（不变量 24 修订；OR-V21-13） |
+| U-ADO-019 | LP solver corner: degenerate（多最优解）→ 选稳定者 |
+| U-ADO-020 | LP solver corner: 不可行（约束矛盾）→ slow path 返回 None；fast path 兜底 |
+| U-ADO-021 | LP solver corner: 退化对偶 → 不死循环 |
+| U-ADO-022 | 目标函数 lex 求解：先 makespan 最优 → 再 P95 → 再 weighted flow（OR-V21-01） |
+| U-ADO-023 | switch_loss_factor 6 场景准确取值（S3+Range=0, NFS=1, 等） |
+| U-ADO-024 | α=1.0 与 α=1.5 行为对比（chaos 测试反推） |
+| U-ADO-025 | SAVINGS_NOISE_THRESHOLD relative 公式生效 |
+| U-ADO-026 | cooldown 公式 `3 × EWMA + heartbeat` |
+| U-ADO-027 | optimization_generation fence：旧 generation 上报被丢弃 |
+| U-ADO-028 | reclaim 通过 WSS push 主动通知（不变量 42） |
+| U-ADO-029 | per-task executor quota 限制（OR-V21-13） |
+| U-ADO-030 | priority_factor 高优任务获 1.5× 配额 |
+| U-ADO-031 | actual_savings vs final_savings 双窗口 |
+| U-ADO-032 | task terminal before window: evaluation_horizon='task_terminal_before_window' |
+| U-ADO-033 | optimization_generation 单调递增 |
+| U-ADO-034 | dedup key `(reason, affected_files_hash)` 不含 executor_id（DIST-V21-10） |
+| U-ADO-035 | CUSUM detect_alarm 在 hard threshold 触发时同样捕获（fallback 兼容） |
 
 #### 10.1.1 触发时机 unit（~12，对应 13 §4.3）
 

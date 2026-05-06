@@ -221,8 +221,16 @@ def probe_rate_limit_dimension(target_host: str, executor: Executor) -> RateLimi
     """
     用受控的小流量实验确定限速维度。耗时 ~30s，开销 ~50MB 流量。
     """
-    # Step 1: 单连接基线
-    speed_1conn = measure(executor, target_host, n_connections=1, n_executors=1)
+    # Step 0 (v2.1, ENT-QA-07): 真实 corp gateway 鲁棒性
+    # - 突发宽容：前 8s 不限速（许多 token-bucket gateway 有 burst 配额）
+    # - 测量长尾：丢弃前 8s 数据，再测稳态速度
+    BURST_DISCARD_S = 8
+    STEADY_STATE_DURATION_S = 30
+
+    # Step 1: 单连接基线（仅取稳态）
+    raw = measure(executor, target_host, n_connections=1, n_executors=1,
+                  duration=STEADY_STATE_DURATION_S + BURST_DISCARD_S)
+    speed_1conn = raw.steady_state_avg(discard_first_s=BURST_DISCARD_S)
 
     # Step 2: 同 executor 多连接（v2.1: 多次采样 + paired t-test）
     samples_1conn = [measure(executor, target_host, n_connections=1, n_executors=1)
@@ -253,6 +261,17 @@ def probe_rate_limit_dimension(target_host: str, executor: Executor) -> RateLimi
     if executor.credential_pool.gateway_accounts >= 2:
         speed_2user = measure_with_user_rotation(target_host, executor, accounts=2)
         user_limited = (speed_2user / speed_1conn) > 1.8
+
+    # Step 6 (v2.1, OR-V21-18): 双维度 cross-axis probe
+    # 真实 gateway 常用 token bucket on multiple keys，叠加非线性
+    if connection_limited and ip_limited:
+        # n=2 IP × n=2 conn 是否真接近 4×？
+        speed_2ip_2conn = measure_distributed(target_host, executor_count=2, n_connections=2)
+        cross_axis_factor = speed_2ip_2conn / speed_1conn
+        # 如果 < 3.5（理论 4）说明叠加非线性
+        if cross_axis_factor < 3.5:
+            warnings.append("non-linear multi-axis limit suspected")
+            confidence *= 0.7  # 降低 combined 模式的可信度
 
     return RateLimitProfile(
         target_host=target_host,
@@ -323,6 +342,10 @@ def compute_confidence(samples_1conn, samples_4conn, p_value, concurrent_traffic
   SELECT bytes_used, bytes_limit FROM probe_budget WHERE day = CURRENT_DATE;
   ```
   超额时新探测请求拒绝；既有探测结果继续使用直到过期
+- **预算耗尽期间新 target 处置**（v2.1, ENT-QA-18）：
+  - 优先用最近同 `executor_ip_class` 邻居的 RateLimitProfile（地理 / 网络环境近似）
+  - confidence × 0.5（标记为推断而非测量）
+  - 写入 `rate_limit_probes` 时 `measurement_started_at = NULL`，标志推断结果
 
 ### 2.4 数据模型
 
@@ -741,7 +764,12 @@ console:
   per_client_max_session_minutes: 60
   global_concurrent_clients: 10
   default_level_filter: INFO        # DEBUG 默认隐藏（量太大）
+  warmup_from_loki:
+    enabled: true                    # v2.1, ENT-QA-24
+    fetch_minutes: 5                 # standby 提升后从 Loki 拉最近 5min 预热 ring buffer
 ```
+
+**HA 切换时 Live Console 不丢历史**（ENT-QA-24）：standby 提升时 ring buffer 为空 → 从 Loki tail 最近 5min logs 预热 → 用户 reconnect 后能看到 HA 切换前的事件。
 
 ### 5.5 隐私 / 合规
 
@@ -754,6 +782,22 @@ console:
 ## 6. S3 源切片（已有能力的明确表达）
 
 > 注：S3 源（如 corp_mirror）作为**数据源**的多 executor 多连接切片下载，13 §5 的协议**完全适用**。本节明确说明 UI 输入。
+
+### 6.0 Source 生命周期与作用域（v2.1, X-CONS-12）
+
+> 区分两类 source，避免文档间概念漂移。
+
+| 类型 | 定义位置 | 生命周期 | 作用域 |
+|------|---------|---------|------|
+| **全局 Source** | `sources.yaml` 配置文件（06 §1.12） | 持久；admin 修改后 reload | 全租户 / 全任务 |
+| **Ad-hoc Source**（v2.1 新增） | DB `ad_hoc_sources` 表（01 §4.7.3） | 任务级；task 完成 / 删除时一并清理 | 仅创建该 task 的任务 |
+
+Ad-hoc Source 的关键性质：
+
+- 不写入 `sources.yaml`（避免与全局配置冲突）
+- 仅在 task 创建时指定（详见 §6.1）
+- task 终态后 7 天自动清理（保留窗口便于事后审计 / 回放）
+- 限速画像（§2）共享：ad_hoc 与全局共用 `target_host` key 的 RateLimitProfile（避免重复探测）
 
 ### 6.1 创建任务时指定 S3 源路径
 
@@ -923,7 +967,7 @@ selection_policy:
 
 ---
 
-## 10. 测试要点（详见 [07-test-plan.md](./07-test-plan.md) §13）
+## 10. 测试要点（详见 [07-test-plan.md](./07-test-plan.md) §11）
 
 - 反向通道：WSS 断线后退化到 polling；30 分钟内自动重连成功率 ≥ 99%
 - 限速探测：在合成 gateway 环境下能正确识别三种维度，混合维度 confidence 标记

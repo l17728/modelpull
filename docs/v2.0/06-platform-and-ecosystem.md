@@ -171,7 +171,9 @@ per_model_overrides:
 约束：每个 file 必须从单源下完整（不在文件中部切源）—— 因为流式 SHA256 依赖单线程顺序。
 目标：最小化总耗时 = `max(每个源被分配的总字节 / 该源测速)`
 
-→ 最优分配是经典「multiprocessor scheduling」LPT 启发式：
+→ 用**最长处理时间优先（LPT-style greedy）启发式**做近似分配。
+
+> ⚠️ **OR-V21-04 命名澄清**：经典 LPT 4/3-1/(3m) bound 仅对 **identical machines + non-preemptive** 成立。modelpull 是 **unrelated parallel machines**（速度 V[e][s] 异构）+ **preemptive**（允许中途切换 / 切片）。本算法**不**保证 LPT 最优性 bound；准确称呼是"按文件 size 降序的 greedy 分配启发式"。slow path（详见 13 §4.2）才用 LP 松弛 + rounding 求更紧解。
 
 ```python
 def assign_files_to_sources(files: list[File], source_speeds: dict[str, float]) -> dict[File, str]:
@@ -1008,7 +1010,8 @@ def test_chunk_level_routing_for_large_file():
 | 控制器 active-active | v2.2 | 当前 v2.0 仅 active/standby |
 | SLA 分级（class-of-service） | v2.1 | critical / standard / best-effort，含抢占 |
 | 行为遥测 + 热门模型预热 | v2.1 | 系统自动预下热门模型 |
-| 离线 / 气隙 export bundle | v2.1 | 外网下→打包→内网 import |
+| **Bundle import 最小路径** | **v2.0 GA**（ENT-QA-08） | CLI `dlw bundle import file.tar` → 注册 task=completed；金融/政务最小可用 |
+| 完整 离线 / 气隙 export bundle | v2.1 | 外网下→打包→内网 import 双向闭环 |
 | Sigstore 验签 | v2.2 | 与 HF 上游协同 |
 | 模型量化在线转换 | v2.2 | 下载完直接生成 GGUF/AWQ |
 | 多源 chunk-level + 流式哈希 | v2.2 | 需要 BLAKE3 全面采用 |

@@ -367,14 +367,15 @@ Week 3: 增量 + CLI/SDK
 - [ ] API reference（自动生成自 openapi.yaml）
 - [ ] 升级指南（v1.x → v2.0）
 
-### 4.5 任务分解（3 weeks）
+### 4.5 任务分解（3 weeks，v2.1 修订 — ENT-QA-19）
+
+> **审计链 WORM 提早到 Phase 3**（与多租户配额一起做更自然）；**Sigstore 验签 推迟到 v2.2**（与 06 §9 roadmap 一致）。
 
 ```
-Week 1: 合规与审计
-  ├─ Day 1-2: 审计日志链式哈希 + WORM 导出
-  ├─ Day 3: License 策略 + gated 审批工作流
-  ├─ Day 4: Pickle/trust_remote_code 审批
-  ├─ Day 5: 安全测试套件（OWASP ZAP + 手动）
+Week 1: 合规与审批
+  ├─ Day 1-2: License 策略 + gated 审批工作流
+  ├─ Day 3: Pickle/trust_remote_code 审批
+  ├─ Day 4-5: 安全测试套件（OWASP ZAP + 手动 SC-PEN-*）
 
 Week 2: 运维 + 集成
   ├─ Day 1: Webhook + 重试
@@ -444,7 +445,7 @@ Week 3: 上线准备
 |------|---------|---------|---------|---------|
 | Tech Lead | 1 | 1 | 1 | 1 |
 | 后端 | 2 | 3 | 3 | 3 |
-| 前端 | 1 | 1 | 2 | 2 |
+| 前端 | 1 | 1 | **2 (起)** | **2 + 0.5 设计师** |
 | SRE | 0.5 | 1 | 1 | 1.5 |
 | QA | 1 | 1 | 1 | 1.5 |
 | 安全顾问 | 0 | 0.5 | 0.5 | 1 |

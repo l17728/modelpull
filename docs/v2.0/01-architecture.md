@@ -337,6 +337,24 @@ S3 / OBS 凭证由 Controller 用 `sts:AssumeRole` 换为 1h TTL 临时凭证下
 
 🔒 **不变量 7**：每次状态 transition 必须显式记录 `(from, to, reason, ts)` 到 `executor_status_history` 表，便于追溯。
 
+#### 3.3.1 连接层降级（v2.1, DIST-V21-09）
+
+> 健康状态机（healthy/degraded/suspect/faulty/probationary）描述的是**业务能力**。v2.1 引入 WSS 反向通道后，需要单独的**连接层降级**子维度，与健康状态正交。
+
+```sql
+ALTER TABLE executors ADD COLUMN ws_connection_state VARCHAR(16)
+    NOT NULL DEFAULT 'connected';
+-- connected | reconnecting | wss_disabled (退化到 polling)
+```
+
+| ws_connection_state | 含义 | 健康状态影响 |
+|--------------------|------|-----------|
+| `connected` | WSS 长连正常 | 无 |
+| `reconnecting` | 短暂断线（≤ 30s） | 无（仍按 healthy 评估） |
+| `wss_disabled` | 长期断线（> 30s）退化为 polling | health_score -10 但**不**触发 degraded（仍按心跳评估业务能力） |
+
+**Why 单独维度**：业务能力（task 完成率）和连接层（WSS 在不在）是两个正交问题。corp proxy 中断 WSS 但不影响 HTTPS heartbeat 时不应误判 executor 不健康。
+
 ### 3.4 跃迁矩阵（机器可读）
 
 ```yaml
@@ -891,7 +909,7 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 | 8 | 业务表必须有 `tenant_id` | information_schema 扫描 |
 | 9 | `(executor_id, epoch)` 是因果时钟 | API 测试 |
 | 10 | 同一文件的多 chunk 不分给同 host_id 下不同 executor | 调度器单测 |
-| 11 | HF 永远是 SHA256 真值来源（详见 06 §1.2） | 多源测试 |
+| 11 | HF 永远是 SHA256 真值来源（详见 06 §1.2；例外详见 14 §6.3 + 不变量 13 `trust_non_hf_sha256`） | 多源测试 |
 | 12 | 跨源下载完成后必须比对 HF sha256；不一致则源黑名单 24h | E2E 多源 fault injection |
 | 13 | HF 不可用时默认拒绝下载（除非用户 explicit `trust_non_hf_sha256`） | 多源故障注入测试 |
 | 14 | `(tenant_id, repo_id, revision, filename, sha256)` 在存储中只存一份 | DB UNIQUE 约束 + GC 单测 |
@@ -904,13 +922,13 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 | 21 | 优化决策必须有 hysteresis：触发 30%/15s + 解除 70%/30s + cooldown 60s/file | 抖动测试 ADO-CHAOS-* |
 | 22 | 子分片必须满足 S3 multipart 约束（part 5MB-5GB，总数 ≤10000）；非 S3 backend **不直接子分片，必须走 single-executor 拼装或 S3 staging 中转**（详见 13 §5.5） | 配置加载校验 + 单测 |
 | 23 | 每次重新规划写 `optimization_decisions` 表（输入 + 决策 + 预期 + 实际） | DB 单测 |
-| 24 | v2.1 单任务最优化；跨任务全局调度延后到 v2.2 | scope 限制 |
+| 24 | v2.1 单任务最优化（含轻量 round-robin 公平兜底，OR-V21-13）；跨任务全局 LP / 抢占延后到 v2.2 | PlanOptimizer 入参 schema 强制 `target_files` 单 task；mypy / pydantic 校验 + 单测 U-ADO-018 |
 | 25 | 单次决策 ≤ 5s（超时回退 fast path 启发式） | 性能基线 |
 | 26 | sub-chunk 的 `s3_part_number` 在 multipart 内唯一且稳定（即使 reassign） | 恢复测试 |
 | 27 | Hard trigger（瓶颈速度跌 / executor faulty / source circuit_open / user replan）不被 cooldown 抑制 | trigger 单测 U-ADO-T-* |
 | 28 | 反向 WSS 通道与 HTTPS 心跳通道使用同一组 mTLS + JWT 凭证（不维护双套） | 通道单测 |
 | 29 | 子分片策略必须考虑限速画像（per-conn / per-IP / per-user）；维度未知时不盲目并发 | 限速联动测试 |
-| 30 | 执行器本地凭证池不出本机；controller 仅知 alias，不持具体值 | 配置审计 + 进程内存扫描 |
+| 30 | 执行器本地凭证池不出本机；controller 仅知 alias，不持具体值 | OpenAPI `ExecutorRegisterRequest` schema 强制不允许 secret 字段；middleware 拒收 ≥32 字符 base64-like 模式串；CI gitleaks 扫执行器→controller 心跳 fixture |
 | 31 | alias 删除后正在使用的 in-flight subtask 完成本 chunk 才不再分配；不强制中断 | 凭证轮换测试 |
 | 32 | multipart_upload_id 必须在 PG commit 后才推送到 executor（CAS-then-enqueue 模式） | DIST-V21-01 单测 |
 | 33 | standby 提升后进入 recovery_in_progress；所有心跳响应 503 直到三向对账完成 | DIST-V21-08 集成测试 |
