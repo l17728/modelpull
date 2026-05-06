@@ -824,9 +824,76 @@ Phase 4 末（v2.0 GA 前最后 1 周）可以开**只读小流量**版：
 - 不接入 web_fetch
 - 用于收集真实 query 分布
 
-### 11.3 v2.1 First-class
+### 11.3 v2.1 First-class（含 cn 合规决策）
 
 完整能力（含写操作 + web_fetch + 多 backend）作为 v2.1 主要 feature。
+
+> ⚠️ **cn 数据出境合规（AI-SEC-V21-11，治理决策）**
+
+**问题**：v2.1 默认 backend 是 Anthropic SDK（公网），用户 query 含 task_id / repo_id / 内部用户名经公网到 Anthropic API。中国境内 tenant 触发 **网信办《生成式 AI 服务管理办法》+ 数据出境安全评估办法**。
+
+**v2.1 GA 政策（决策）**：
+
+| Tenant 类型 | AI Copilot 状态 |
+|------------|-----------------|
+| `ai_data_residency_zone='global'` | ✅ 启用 Anthropic / OpenCode / Claude Code 任一 backend |
+| `ai_data_residency_zone='cn'` | 🚫 **v2.1 GA 期间禁用 AI Copilot**；等 v2.2 self-host LLM 落地 |
+| `ai_data_residency_zone='disabled'` | 🚫 显式关闭 |
+
+DB schema：
+
+```sql
+ALTER TABLE tenants ADD COLUMN ai_data_residency_zone VARCHAR(16) NOT NULL DEFAULT 'global';
+-- 取值: global | cn | disabled
+ALTER TABLE tenants ADD COLUMN ai_data_residency_set_by BIGINT REFERENCES users(id);
+ALTER TABLE tenants ADD COLUMN ai_data_residency_set_at TIMESTAMPTZ;
+```
+
+**默认行为**：
+
+```python
+# 新 tenant 创建时
+def determine_default_residency(tenant_region: str) -> str:
+    if tenant_region.startswith("cn-") or tenant_region.startswith("china-"):
+        return "cn"           # 默认禁用，强制 admin 二次确认
+    return "global"
+```
+
+**Admin 切换 cn → global**（需明确审批）：
+
+```
+tenant_admin 在 UI 切换 → 弹窗显示：
+  "切换到 global 模式将允许 AI Copilot 把 task / repo / user metadata 发送到 Anthropic API（境外）。
+   你确认这符合你的合规要求吗？"
+  [取消] [我已与法务确认，切换] (双因素 MFA)
+
+→ audit_log 记录 ai.residency_zone.change(from=cn, to=global, actor, ip, mfa_verified)
+```
+
+**PII redaction layer（v2.1 GA, AI-SEC-V21-11）**：
+
+即使 zone=global，发送到 LLM 前对**敏感字段**做 hash + 双向映射：
+
+```python
+def redact_for_llm(payload: dict) -> tuple[dict, dict]:
+    """
+    返回 (redacted, mapping)
+    任务/用户/repo 等内部 ID hash 后再发；LLM 回复经 mapping 反向解析。
+    """
+    mapping = {}
+    redacted = json.loads(json.dumps(payload))  # deep copy
+    for path in PII_PATHS:  # ['task_id', 'subtask_id', 'user_email', ...]
+        original = jsonpath_get(redacted, path)
+        if original:
+            anon = "anon_" + hashlib.sha256(original.encode()).hexdigest()[:12]
+            mapping[anon] = original
+            jsonpath_set(redacted, path, anon)
+    return redacted, mapping
+```
+
+🔒 **不变量 45 (v2.1, AI-SEC-V21-11)**：cn zone tenant 在 v2.1 GA 期间不允许调 `/api/ai/chat`；切换 zone 必须双因素 MFA + 审计。
+
+📝 **决策记录**：v2.2 落地 self-host LLM（vLLM + 内网模型）后，cn zone 才能启用 AI Copilot。详见 06 §9 v2.2 roadmap。
 
 ### 11.4 v2.2 高级能力
 

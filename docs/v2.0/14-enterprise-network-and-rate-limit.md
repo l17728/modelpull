@@ -173,11 +173,129 @@ network:
 | 模式 | 配置 | 适用 |
 |------|------|------|
 | Transparent proxy | 无需特殊设置 | 网关透明代理 |
-| Explicit HTTP CONNECT | `proxy.url` + auth | 公司常见 squid/forward proxy |
+| Explicit HTTP CONNECT + Basic auth | `proxy.url` + auth_alias (basic) | 公司常见 squid/forward proxy |
+| **NTLMv2** (v2.1, ENT-QA-01) | `auth_type: ntlm` | Windows AD 域内（金融/电信常见） |
+| **Kerberos / SPNEGO** (v2.1, ENT-QA-01) | `auth_type: kerberos` + keytab | 企业级 SSO（金融、运营商） |
 | SOCKS5 | `proxy.url=socks5://...` | 部分企业 |
 | 跳板机 SSH 隧道 | 不在 v2.1 范围 | 极特殊场景 |
 
-### 1.5 安全
+#### 1.4.1 NTLMv2 认证（ENT-QA-01）
+
+```yaml
+# /etc/dlw/credentials.yaml
+gateway_accounts:
+  - alias: corp_user_ntlm
+    auth_type: ntlm
+    domain: CORP                # NT 域名
+    username: jdoe
+    password: ${CORP_PASS}
+```
+
+实现：
+
+- 用 `requests-ntlm2` 或 `httpx-ntlm` 库（前者社区维护，更稳）
+- NTLM challenge-response 在 connection 级（非 request 级），WSS 长连场景适用
+- **Phase 2.5 SPIKE**：在 squid + NTLM proxy 容器栈中跑通 WSS+CONNECT；测试集 I-ENT-AUTH-001..006
+
+#### 1.4.2 Kerberos / SPNEGO（ENT-QA-01）
+
+```yaml
+gateway_accounts:
+  - alias: corp_kerberos
+    auth_type: kerberos
+    keytab: /etc/dlw/corp.keytab
+    principal: dlw@CORP.EXAMPLE.COM
+    krb5_conf: /etc/krb5.conf
+```
+
+实现：
+
+- 用 `requests-kerberos` + `gssapi`（需 system-level libkrb5 + libgssapi-krb5）
+- container 部署需 mount `/etc/krb5.conf` + keytab + DNS 正向 PTR 配 KDC
+- 自动 ticket 续期（默认 8h）
+- **Phase 2.5 SPIKE**：MIT KDC 容器栈 + AD time skew 模拟
+
+#### 1.4.3 测试要求（ENT-QA-01）
+
+新增 `I-ENT-AUTH-001..006`（详见 07 §11.7）：
+
+| ID | 场景 |
+|----|------|
+| I-ENT-AUTH-001 | NTLMv2 challenge-response 完整流程 |
+| I-ENT-AUTH-002 | Kerberos ticket 自动续期 |
+| I-ENT-AUTH-003 | AD time skew > 5min 触发 KRB5KDC_ERR_PREAUTH_FAILED |
+| I-ENT-AUTH-004 | proxy 401 重协商（NTLM 三步握手中间断） |
+| I-ENT-AUTH-005 | 多 alias 中混合 auth_type（basic + ntlm + kerberos）轮换 |
+| I-ENT-AUTH-006 | keytab 文件权限错误 → executor 启动 fail-fast |
+
+### 1.5 在 SSL Inspection 环境下的部署（v2.1, ENT-QA-02）
+
+> Zscaler / Forcepoint / Symantec Web Gateway 等企业 SSL inspection 默认拦截解密所有出站 TLS。这与 04 §2.2 的 mTLS 客户端证书校验**根本互斥** —— proxy 解密后用自己的 CA 重新加密，executor 看到的是 proxy 的 cert，mTLS 失败。
+
+#### 1.5.1 强制 TLS-bypass 列表
+
+部署到此类企业前，必须协调 IT 把以下域名加入 SSL inspection 白名单（**不解密**）：
+
+```
+*.dlw.example.com               # controller HTTPS
+*.dlw-ws.example.com            # WSS reverse channel
+*.huggingface.co                # HF API
+*.hf.co
+*.modelscope.cn                 # ModelScope
+*.hf-mirror.com
+```
+
+Helm value：
+
+```yaml
+network:
+  tls_bypass_required_hosts:
+    - api.dlw.example.com
+    - ws.dlw.example.com
+    - huggingface.co
+    - cdn-lfs.huggingface.co
+    - www.modelscope.cn
+    - hf-mirror.com
+```
+
+#### 1.5.2 检测 mTLS 失效并 fail-fast
+
+executor 启动时必须显式校验：
+
+```python
+def verify_mtls_path():
+    """
+    握手成功后取 server cert，对比预期 SHA-256 fingerprint。
+    若 fingerprint 不匹配（说明被 proxy 解密重签）→ fail-fast，不静默重试。
+    """
+    cert_chain = ssl_socket.getpeercert(binary_form=True)
+    actual_fingerprint = hashlib.sha256(cert_chain).hexdigest()
+    expected = config.controller_cert_fingerprint
+    if actual_fingerprint != expected:
+        log.fatal(
+            "TLS-bypass not configured for controller. "
+            "SSL inspection is decrypting our mTLS — please ask IT to whitelist "
+            f"{config.controller_endpoint} (see docs §1.5)."
+        )
+        sys.exit(1)
+```
+
+#### 1.5.3 测试
+
+新增 **E2E-ENT-SSL-001**：mitmproxy 中转 + 校验 executor 启动时清晰报错（不静默 retry）。
+
+#### 1.5.4 退化方案：纯应用层加密
+
+若 IT 拒绝把域名加入 bypass 列表，可启用**应用层加密**：
+
+- mTLS 退化为单向 TLS（接受 proxy 解密）
+- 心跳 body 增加应用层加密（envelope encryption + per-message AEAD）
+- 所有 secret 在 wire 上**永远** envelope-encrypted（即便 proxy 看到也是密文）
+- 性能代价：每条心跳 +2-5ms 加解密 overhead
+
+🔒 **不变量 44 (v2.1, ENT-QA-02)**：mTLS fingerprint 不匹配时 fail-fast；不允许静默接受 proxy 重签的证书。
+
+### 1.6 安全
 
 WSS 通道复用 mTLS + Executor JWT（04 §2.2）。**ws connect 时 WS 子协议握手携带 JWT**：
 

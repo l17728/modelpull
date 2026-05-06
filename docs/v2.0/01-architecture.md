@@ -252,7 +252,7 @@ S3 / OBS 凭证由 Controller 用 `sts:AssumeRole` 换为 1h TTL 临时凭证下
 - ✅ 拆分 `transferring` / `uploading` 二选一为 **`uploading`**（统一命名，废弃 transferring）
 - ✅ 新增 `verifying_local` / `verifying_remote` 两段校验，明确何时哪个 SHA256 被算
 - ✅ 新增 `paused_external` 状态（HF/S3 全局降级时不进 failed，详见 03 §8）
-- ✅ 新增 `paused_disk_full` 状态（ENOSPC 不当作可重试，详见 03 §3.7）
+- ✅ 新增 `paused_disk_full` 状态（ENOSPC 不当作可重试，详见 03 §9）
 
 #### 3.2.1 子分片 parent / children 拓扑（v2.1，来自 13 §5.2）
 
@@ -768,6 +768,12 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 -- 完整 schema 见 12 §5；本节仅强调 tenant_id 必备字段已正确包含
 -- 修订（X-AI-SEC-V21-06）：ai_messages 改为 ON DELETE RESTRICT 而非 CASCADE，
 -- 防止删 conversation 抹掉审计；archive 时仅保留 hash + redacted excerpt
+
+-- v2.1 数据出境合规（AI-SEC-V21-11，详见 12 §11.3）
+ALTER TABLE tenants ADD COLUMN ai_data_residency_zone VARCHAR(16) NOT NULL DEFAULT 'global';
+ALTER TABLE tenants ADD COLUMN ai_data_residency_set_by BIGINT REFERENCES users(id);
+ALTER TABLE tenants ADD COLUMN ai_data_residency_set_at TIMESTAMPTZ;
+-- 取值约束: global | cn | disabled
 ```
 
 #### 4.7.8 字段引入版本表（v2.1 增量）
@@ -942,6 +948,9 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 | 41 | T2（用户内容）必须 `<external_user_content trust_level="t2">` 边界化 + 8KB 截断 + 强降权指令 | sanitize 单测 |
 | 42 | PlanOptimizer decide + apply（push + DB write + reclaim push）必须在同一 SCHEDULER_LOCK 内完成；reclaim 通过 WSS 主动通知旧 owner | DIST-V21-04 集成测试 |
 | 43 | 同时只有 1 个 controller 是 probe leader（PG advisory lock）；集群级 5GB/天总预算 | DIST-V21-05 集成测试 |
+| 44 | mTLS server cert fingerprint 不匹配时 fail-fast；不允许静默接受 SSL inspection 重签证书 | E2E-ENT-SSL-001 |
+| 45 | cn zone tenant 在 v2.1 GA 期间不允许调 AI Copilot；zone 切换必须双因素 MFA + 审计 | API 中间件 + audit |
+| 46 | P-011 1000-executor 容量测试是 GA 阻断项；不通过则推迟 GA 或下调 SLO（需 tech lead + ops lead 联签） | Phase 4 必跑 |
 
 ---
 

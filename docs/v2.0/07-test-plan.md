@@ -357,13 +357,93 @@ CSV-like 累计：路径、时间、字节解析、ID 生成等。
 | P-007 | 持续：100 并发任务 24h | 无内存泄漏，错误率 < 0.1% |
 | P-008 | Soak：50 并发任务 1 周 | 稳态行为 |
 
-### 4.3 退化检测
+### 4.3 P-011 — 1000-executor 容量测试详细计划（GA 阻断项 — ENT-QA-06）
+
+**目标**：验证 SLO 4.4 "single controller 1000 executor" 不是纸面数字。Phase 4 末必跑；不通过 → block GA。
+
+#### 4.4.1 测试拓扑
+
+```
+                ┌──────────────────┐
+                │  Test Driver     │  k6 / locust
+                │  (load gen)       │
+                └────────┬─────────┘
+                         │ 启动/停止 1000 模拟 executor
+                         ▼
+   ┌───────────────────────────────────────┐
+   │ 1000 simulated executors（容器化）    │
+   │  - 真实 WSS 客户端（python websockets）│
+   │  - 1Hz heartbeat                       │
+   │  - 模拟下载/上传 metrics                │
+   └────────────────┬──────────────────────┘
+                    │ WSS + HTTPS
+                    ▼
+   ┌───────────────────────────────────────┐
+   │ Controller (active + standby)         │
+   │  - vCPU 4 / mem 8GB（生产配置）         │
+   │  - PostgreSQL 16（PG 配置 work_mem=64MB)│
+   └───────────────────────────────────────┘
+```
+
+#### 4.4.2 验收 SLI
+
+每条都必须达标，否则 block GA：
+
+| SLI | 目标 | 测量方式 |
+|-----|------|--------|
+| WSS 连接成功率 | ≥ 99.9% in 1000-conn ramp-up | 模拟 1000 executor 5min 内全部 register + WSS 连上 |
+| Heartbeat 处理延迟 | P99 ≤ 50ms | controller `/api/executors/heartbeat` 处理时间 |
+| Controller CPU | ≤ 80% sustained | prometheus `process_cpu_seconds_total` |
+| Controller memory | ≤ 6GB resident | prometheus `process_resident_memory_bytes` |
+| PG TPS | ≤ 5000 commits/sec（不超 PG 容量） | `pg_stat_database.xact_commit` |
+| PG connection pool | utilization ≤ 80% | `pg_stat_activity` |
+| WS broadcast latency | task progress 推送 P95 ≤ 500ms | client 端时间戳对比 |
+| 50 并发 active task 调度延迟 | scheduler.assign P99 ≤ 200ms | scheduler trace |
+| Optimizer decision rate | ≤ 60/min (不变量配置) | `dlw_optimizer_decisions_total` rate |
+| 持续 1h 无内存泄漏 | RSS 涨幅 ≤ 5% | 持续 1h 监控 |
+| 持续 1h 无连接泄漏 | open file descriptors 稳定 | `proc/N/fd` 计数 |
+
+#### 4.4.3 测试场景（4 阶段）
+
+```
+Phase A — Ramp-up (10 min):
+  0 → 1000 executor，每秒 +2 个 register
+  验证：所有 register 成功 + WSS 建立
+
+Phase B — Steady state (30 min):
+  1000 executor 持续 heartbeat；50 个 active task 正常下载
+  验证：所有 SLI 在目标内
+
+Phase C — Burst (5 min):
+  突发 100 个新任务同时创建
+  验证：调度无饥饿；no PG deadlock
+
+Phase D — Degradation (15 min):
+  随机 kill 10% executor pods
+  验证：reclaim 完成；其他 executor 不受影响
+```
+
+#### 4.4.4 失败处置
+
+如果 P-011 不通过：
+
+1. **诊断瓶颈**：根据 metrics 定位（CPU bound / DB bound / GIL bound）
+2. **可能的扩容路径**：
+   - 升级 controller vCPU 到 8（成本 ↑）
+   - PG vertical scale（IOPS / mem）
+   - 引入 PG read replica（heartbeat 进度查询走 replica）
+   - 多 controller 按 tenant 分片（v2.2 才完整实现）
+3. **降级 SLO**：暂时把 SLO 4.4 调到 500 executor，并在 v2.2 横向扩展后恢复 1000
+
+🔒 **不变量 46 (v2.1, ENT-QA-06)**：P-011 是 GA 阻断项；不通过则推迟 GA 或下调 SLO。决策必须 tech lead + ops lead 联签。
+
+### 4.4 退化检测
 
 | ID | 场景 |
 |----|------|
 | P-009 | 新版本 vs 上版本：吞吐回归 < 5% |
 | P-010 | 加 100 个 metrics label 不影响 P99 < 200ms |
-| **P-011 (v2.1)** | **1000-executor 容量测试（ENT-QA-06）** | 1000 WSS conn × 1Hz heartbeat × 50 active task；controller CPU < 80%，PG TPS < 5k；GA 阻断项 |
+| **P-011 (v2.1)** | **1000-executor 容量测试（ENT-QA-06；GA 阻断项）** | 详见 §4.3 |
 | **P-012 (v2.1)** | **PR-level micro-benchmark（ENT-QA-10）** | pytest-benchmark + Codspeed；scheduler.assign / SHA256 stream / WS broadcast 三条 hot path；> 3% regression block merge |
 | **P-013 (v2.1)** | 持续 perf regression detection | weekly 全套；nightly micro-bench；asv baseline |
 
@@ -922,6 +1002,18 @@ Tag release:
 | I-ENT-CO-004 | console 操作本身写 audit_log（action=console.view） |
 | I-ENT-CO-005 | session 超 60min 自动断开 |
 | I-ENT-CO-006 | 默认 INFO+ 级别过滤；DEBUG 需显式开启 |
+
+### 11.7 NTLM / Kerberos / SSL inspection 认证（~7，v2.1, ENT-QA-01/02）
+
+| ID | 测试 |
+|----|------|
+| I-ENT-AUTH-001 | NTLMv2 challenge-response 完整流程 |
+| I-ENT-AUTH-002 | Kerberos ticket 自动续期（默认 8h） |
+| I-ENT-AUTH-003 | AD time skew > 5min → KRB5KDC_ERR_PREAUTH_FAILED |
+| I-ENT-AUTH-004 | proxy 401 重协商（NTLM 三步握手中间断） |
+| I-ENT-AUTH-005 | 多 alias 中混合 auth_type（basic + ntlm + kerberos）轮换 |
+| I-ENT-AUTH-006 | keytab 文件权限错误 → executor 启动 fail-fast |
+| E2E-ENT-SSL-001 | mitmproxy 中转 + 校验 mTLS fingerprint mismatch fail-fast（不变量 44） |
 
 ### 11.6 S3 直连源切片（~5）
 

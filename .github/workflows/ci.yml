@@ -158,11 +158,34 @@ jobs:
           done
 
   # ============================================================
+  # Invariant + cross-ref lint (v2.1, ENT-QA-17 / X-DOC-16)
+  # Ensures invariant numbers in 01 §7 stay consistent with body declarations
+  # and cross-doc § references resolve.
+  # ============================================================
+  invariant_lint:
+    name: Invariant + cross-ref lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+
+      - name: Run invariant lint
+        run: python tools/lint_invariants.py
+
+      - name: Run invariant lint (strict — fail on cross-ref drift)
+        # 暂时仅作 INFO；待 cross-ref 全部清理后改为 strict 阻断
+        continue-on-error: true
+        run: python tools/lint_invariants.py --strict
+
+  # ============================================================
   # Aggregate gate
   # ============================================================
   ci:
     name: CI Status
-    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json]
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint]
     runs-on: ubuntu-latest
     if: always()
     steps:
