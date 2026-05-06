@@ -656,6 +656,11 @@ CREATE TABLE quota_snapshots (
 | 12 | 跨源下载完成后必须比对 HF sha256；不一致则源黑名单 24h | E2E 多源 fault injection |
 | 13 | HF 不可用时默认拒绝下载（除非用户 explicit `trust_non_hf_sha256`） | 多源故障注入测试 |
 | 14 | `(tenant_id, repo_id, revision, filename, sha256)` 在存储中只存一份 | DB UNIQUE 约束 + GC 单测 |
+| 15 | AI Copilot 不能超越调用用户的 RBAC 权限（详见 12 §6.2） | AI 注入/越权测试 AI-SEC-* |
+| 16 | 所有 AI 触发的写操作必须写 audit_log，含 `actor_kind=ai_copilot` | AI 工具单测 + audit chain 校验 |
+| 17 | AI 写操作必须用户 confirm；read-only 工具可免确认 | 协议测试 U-AI-T-005 |
+| 18 | LLM token 配额与下载流量配额隔离 | quota 单测 I-AI-Q-001 |
+| 19 | 网络查询工具的输出必须 sanitize 后才进 LLM context（含来源标记 + 注入检测） | 安全测试 U-AI-S-001..010 |
 
 ---
 

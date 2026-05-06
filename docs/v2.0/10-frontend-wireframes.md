@@ -180,7 +180,9 @@ const routes = [
 
 ---
 
-## 3. 9 个核心页面 Wireframe
+## 3. 核心页面 Wireframe
+
+> 9 个常规页面 + 1 个 AI Copilot 浮动面板（v2.1）。详见 [12-ai-copilot.md §8](./12-ai-copilot.md)。
 
 ### 3.1 Dashboard / 总览
 
@@ -529,6 +531,8 @@ const routes = [
 
 ### 3.9 系统设置（admin）
 
+（AI Copilot 浮动面板见 §3.10）
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ 系统设置                                                          │
@@ -557,6 +561,52 @@ const routes = [
 │   [进入维护模式]                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### 3.10 AI Copilot 浮动面板（v2.1）
+
+> 入口：右下角浮动 🤖 / `Ctrl+K`。详细设计见 [12-ai-copilot.md §8](./12-ai-copilot.md)。
+
+主要交互：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 🤖 AI Copilot                              [⚙] [─] [✕]     │
+├─────────────────────────────────────────────────────────────┤
+│  你: 下载 DeepSeek 最新发布的 V3 模型                       │
+│                                                             │
+│  🤖 我先查 deepseek-ai 最近 30 天发布的模型...              │
+│  🛠 dlw_list_recent_models(deepseek-ai, days=30) ✓ 找到 3   │
+│  🛠 dlw_get_model_info(DeepSeek-V3, main) ✓ 689 GB / 163    │
+│                                                             │
+│  ┌─ 🛠 创建下载任务 ────────────────────────────────────┐   │
+│  │  Repo: deepseek-ai/DeepSeek-V3                       │   │
+│  │  Revision: abc123def... (resolved from 'main')       │   │
+│  │  预计流量: 689 GB (12.4% 月配额)                     │   │
+│  │  AI 解释：自动多源加速，到默认 storage               │   │
+│  │  [取消] [修改] [✓ 确认]                              │   │
+│  └──────────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────────┤
+│ 输入消息... (Shift+Enter 换行)                       [发送] │
+│ 12,453 tokens · $0.18 · 本月剩余 62%   [清空] [/help]      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+关键前端组件（v2.1 引入）：
+
+| 组件 | 用途 |
+|------|------|
+| `<AICopilotPanel>` | 浮动面板根 |
+| `<AIMessageStream>` | SSE 流式消息渲染（含 thinking / message_delta） |
+| `<AIToolCallCard>` | 工具调用卡片（read-only / pending_confirm 两态） |
+| `<AIConfirmModal>` | 写操作确认弹窗（含 quota impact 估算） |
+| `<AIConversationHistory>` | 历史会话列表（按 last_message_at） |
+| `<AITokenUsage>` | 底部 token / 成本指示 |
+
+状态管理：
+
+- 新增 `useAICopilotStore`（pinia）—— 当前 conversation、待确认 tool calls、token 用量
+- SSE 通过 `EventSource` 而非 WebSocket（单向流式 + 自动重连）
+- 上下文感知：组件挂载时把当前 route + selected entity 注入到 `context` 字段（详见 12 §8.5）
 
 ---
 

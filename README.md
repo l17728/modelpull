@@ -71,6 +71,13 @@ Qwen3-72B-Instruct (BF16)    144 GB / 30 文件
 - K8s Operator + ModelDownload CRD
 - 增量 / 差分下载（仅下变化文件）
 
+### 🤖 AI Copilot（v2.1）
+- 嵌入式聊天面板：`Ctrl+K` 打开，自然语言驱动 modelpull
+- 后端：Claude Code / OpenCode 无头模式，或 Anthropic SDK 直连
+- 工具协议：MCP server 暴露 `dlw_*` 工具 + `web_fetch` 受信源
+- 写操作必须用户确认；所有动作进 audit log
+- 示例 query：「下载 DeepSeek 最新发布的 V3」/「我哪些任务上周失败了？为什么？」/「对比 Qwen3-72B 和 Llama-3.1-70B」
+
 ---
 
 ## 仓库结构
@@ -90,7 +97,8 @@ modelpull/
 │   │   ├── 08-mvp-roadmap.md                    4 Phase 切片 + 任务分解
 │   │   ├── 09-migration.md                      v1.x → v2.0 迁移
 │   │   ├── 10-frontend-wireframes.md            9 个核心页面 wireframe
-│   │   └── 11-cli-and-sdk-spec.md               dlw CLI + Python SDK 规范
+│   │   ├── 11-cli-and-sdk-spec.md               dlw CLI + Python SDK 规范
+│   │   └── 12-ai-copilot.md                     AI Copilot 嵌入聊天 + MCP 工具（v2.1）
 │   └── archive/                                 v1.x 历史版本（已 superseded）
 │
 ├── api/
@@ -132,6 +140,7 @@ modelpull/
 | 🏗️ 平台 / 集成方 | `06` → `02` → `04 §1` → `api/openapi.yaml` |
 | 📅 PM / Tech Lead | `08` → `07 §8` → `09` |
 | 🎨 前端 | `10` → `api/openapi.yaml` |
+| 🤖 AI / 应用 | `12` → `02 §5` (SSE) → `04 §6` (安全) |
 
 入口：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
 
@@ -198,7 +207,7 @@ CI 强制失败任何违反不变量的 PR。
 | 版本 | 内容 |
 |------|------|
 | **v2.0**（设计完成） | 单租户 → 分布式 → 多租户 + 多源 → 生产加固，4 Phase / 13 周 |
-| v2.1 | 跨地域复制 + SLA 分级 + 离线 export bundle + 行为遥测预热 |
+| v2.1 | **AI Copilot first-class** + 跨地域复制 + SLA 分级 + 离线 export bundle + 行为遥测预热 |
 | v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 |
 | v2.3 | 多 controller cluster（按 tenant 分片）|
 

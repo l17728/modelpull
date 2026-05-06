@@ -55,6 +55,11 @@ tags:
     description: System administration
   - name: webhooks
     description: Webhook configuration
+  - name: ai
+    description: |
+      AI Copilot — embedded chat interface backed by Claude/OpenCode in headless
+      mode (v2.1). All write tool calls require explicit user confirmation.
+      Detailed design: docs/v2.0/12-ai-copilot.md.
 
 security:
   - bearerAuth: []
@@ -709,6 +714,130 @@ paths:
       responses:
         '202': {description: Exiting}
 
+  # ========== AI Copilot (v2.1) ==========
+  /ai/chat:
+    post:
+      tags: [ai]
+      summary: Chat with AI Copilot (streaming SSE)
+      description: |
+        Sends a user message to the AI Copilot. Response is server-sent events.
+        Detailed protocol: docs/v2.0/12-ai-copilot.md §4.
+
+        Event types streamed:
+        - `assistant.thinking` — internal reasoning (optional display)
+        - `assistant.message_delta` — final message chunk to user
+        - `tool_call` — read-only tool invocation
+        - `tool_call_pending_confirm` — write tool awaiting confirmation
+        - `tool_result` — tool execution result
+        - `tool_error` — tool failure
+        - `quota_exceeded` — LLM token budget hit
+        - `error` — system error
+        - `done` — terminal event with conversation_id and tokens_used
+      operationId: aiChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AIChatRequest'}
+            examples:
+              newConversation:
+                summary: Start new conversation
+                value:
+                  conversation_id: null
+                  message: 下载 DeepSeek 最新发布的 V3 模型
+                  context:
+                    current_view: /
+              continueWithConfirmation:
+                summary: Reply with tool confirmation
+                value:
+                  conversation_id: 11111111-2222-3333-4444-555555555555
+                  message: null
+                  tool_confirmation:
+                    call_id: call_ghi789
+                    decision: approved
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE-formatted events; see description.
+        '402':
+          description: AI token quota exceeded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+              example:
+                code: AI_QUOTA_EXCEEDED
+                message: Tenant monthly AI token quota exhausted
+                trace_id: c0ffee0123456789
+                details:
+                  metric: ai_tokens_month
+                  current: 2000000
+                  limit: 2000000
+        '503':
+          description: AI backend unavailable (LLM provider down)
+
+  /ai/conversations:
+    get:
+      tags: [ai]
+      summary: List my AI conversations
+      operationId: listAIConversations
+      parameters:
+        - in: query
+          name: archived
+          schema: {type: boolean, default: false}
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/AIConversation'}
+                  next_cursor: {type: string, nullable: true}
+
+  /ai/conversations/{conversationId}:
+    parameters:
+      - in: path
+        name: conversationId
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      tags: [ai]
+      summary: Get conversation with full message history
+      operationId: getAIConversation
+      responses:
+        '200':
+          description: Conversation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AIConversationDetail'}
+    delete:
+      tags: [ai]
+      summary: Archive (soft-delete) conversation
+      operationId: archiveAIConversation
+      responses:
+        '204': {description: Archived}
+
+  /ai/quota:
+    get:
+      tags: [ai]
+      summary: AI token quota current state
+      operationId: getAIQuota
+      responses:
+        '200':
+          description: Quota
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AIQuota'}
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1311,3 +1440,110 @@ components:
           type: array
           items: {type: string, enum: ['*', task.completed, task.failed, task.cancelled, quota.exceeded]}
         secret: {type: string, description: "HMAC secret; envelope-encrypted at rest"}
+
+    # ===== AI Copilot (v2.1) =====
+    AIChatRequest:
+      type: object
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: null to start a new conversation
+        message:
+          type: string
+          nullable: true
+          maxLength: 32768
+          description: User message text. May be null if only sending tool_confirmation.
+        context:
+          type: object
+          description: UI context for grounding (current page, selected entity)
+          properties:
+            current_view: {type: string}
+            selected_task_id: {type: string, format: uuid, nullable: true}
+            current_filter:
+              type: object
+              additionalProperties: true
+        tool_confirmation:
+          type: object
+          nullable: true
+          required: [call_id, decision]
+          properties:
+            call_id: {type: string}
+            decision:
+              type: string
+              enum: [approved, rejected, modified]
+            modified_input:
+              type: object
+              nullable: true
+              description: Patched input when decision=modified
+              additionalProperties: true
+
+    AIConversation:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        last_message_at: {type: string, format: date-time}
+        archived: {type: boolean}
+        backend:
+          type: string
+          enum: [anthropic_sdk, claude_code, opencode]
+        model_name: {type: string}
+        message_count: {type: integer}
+        tokens_total: {type: integer}
+
+    AIConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/AIConversation'
+        - type: object
+          properties:
+            messages:
+              type: array
+              items: {$ref: '#/components/schemas/AIMessage'}
+
+    AIMessage:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        role: {type: string, enum: [user, assistant, system]}
+        content:
+          type: object
+          description: Rich content; may include text, tool_calls, tool_results
+          additionalProperties: true
+        tokens_input: {type: integer}
+        tokens_output: {type: integer}
+        created_at: {type: string, format: date-time}
+        tool_calls:
+          type: array
+          items: {$ref: '#/components/schemas/AIToolCall'}
+
+    AIToolCall:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        tool_name: {type: string}
+        input: {type: object, additionalProperties: true}
+        output: {type: object, nullable: true, additionalProperties: true}
+        error_code: {type: string, nullable: true}
+        requires_confirmation: {type: boolean}
+        confirmation_decision:
+          type: string
+          enum: [approved, rejected, modified]
+          nullable: true
+        confirmed_by_user_id: {type: integer, format: int64, nullable: true}
+        confirmation_at: {type: string, format: date-time, nullable: true}
+        duration_ms: {type: integer, nullable: true}
+        audit_log_id: {type: integer, format: int64, nullable: true}
+        created_at: {type: string, format: date-time}
+
+    AIQuota:
+      type: object
+      properties:
+        tenant_id: {type: integer, format: int64}
+        ai_tokens_used_month: {type: integer, format: int64}
+        ai_tokens_quota_month: {type: integer, format: int64}
+        ai_cost_usd_cents_month: {type: integer}
+        active_conversations: {type: integer}
+        max_concurrent_conversations: {type: integer}
