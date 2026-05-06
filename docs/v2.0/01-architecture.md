@@ -669,6 +669,10 @@ CREATE TABLE quota_snapshots (
 | 25 | 单次决策 ≤ 5s（超时回退 fast path 启发式） | 性能基线 |
 | 26 | sub-chunk 的 `s3_part_number` 在 multipart 内唯一且稳定（即使 reassign） | 恢复测试 |
 | 27 | Hard trigger（瓶颈速度跌 / executor faulty / source circuit_open / user replan）不被 cooldown 抑制 | trigger 单测 U-ADO-T-* |
+| 28 | 反向 WSS 通道与 HTTPS 心跳通道使用同一组 mTLS + JWT 凭证（不维护双套） | 通道单测 |
+| 29 | 子分片策略必须考虑限速画像（per-conn / per-IP / per-user）；维度未知时不盲目并发 | 限速联动测试 |
+| 30 | 执行器本地凭证池不出本机；controller 仅知 alias，不持具体值 | 配置审计 + 进程内存扫描 |
+| 31 | alias 删除后正在使用的 in-flight subtask 完成本 chunk 才不再分配；不强制中断 | 凭证轮换测试 |
 
 ---
 

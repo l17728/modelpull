@@ -732,7 +732,92 @@ Tag release:
 
 ---
 
-## 11. 失败的处理
+## 11. 企业内网 / 限速 / 凭证池 / Live Console 测试（v2.1 引入；详见 [14-enterprise-network-and-rate-limit.md](./14-enterprise-network-and-rate-limit.md)）
+
+### 11.1 反向 WSS 通道（~10）
+
+| ID | 测试 |
+|----|------|
+| U-ENT-WS-001 | Executor 注册后建立 WSS；mTLS 证书校验通过 |
+| U-ENT-WS-002 | WSS 子协议握手携带 JWT；JWT 失效时 401 |
+| U-ENT-WS-003 | WSS push: cancel command 1s 内到达 executor |
+| U-ENT-WS-004 | WSS push: rebalance_chunk 命令携带新 assignment_token |
+| U-ENT-WS-005 | WSS 断线后 1s 内重连，backoff 指数回升至 30s 上限 |
+| U-ENT-WS-006 | WSS ping/pong 防 corp proxy idle 超时（20s 间隔） |
+| U-ENT-WS-007 | WSS + HTTPS 心跳双通道时事件不重复消费 |
+| U-ENT-WS-008 | WSS 完全失效时退化到 60s polling，不丢任务 |
+| I-ENT-WS-009 | corp proxy explicit CONNECT 模式穿透成功 |
+| I-ENT-WS-010 | proxy auth 成功（basic）+ 失败（401）路径 |
+
+### 11.2 限速维度探测（~10）
+
+合成 gateway 模拟器：可注入 per-conn / per-IP / per-user 限速规则。
+
+| ID | 模拟规则 | 期望探测结果 |
+|----|---------|------------|
+| I-ENT-RL-001 | 仅 per-conn 10Mbps | connection_limited=true，其他 false |
+| I-ENT-RL-002 | 仅 per-IP 100Mbps | ip_limited=true |
+| I-ENT-RL-003 | 仅 per-user 50Mbps | user_limited=true |
+| I-ENT-RL-004 | per-conn 10 AND per-IP 50 | 两者 true，confidence ≥ 0.7 |
+| I-ENT-RL-005 | 探测预算 5GB/天耗尽 → 拒绝新探测 |
+| I-ENT-RL-006 | 探测过期（6h）后自动重测 |
+| I-ENT-RL-007 | 触发重测：连续 5min 速度 < 探测预期 50% |
+| I-ENT-RL-008 | rate_limit_probes 表 expires_at 正确设置 |
+| I-ENT-RL-009 | 探测结果联动 PlanOptimizer：connection_limited → multi_conn_single_executor 策略 |
+| I-ENT-RL-010 | 维度未知时 optimizer 退化为保守策略（不盲目并发） |
+
+### 11.3 凭证池 / 别名（~12）
+
+| ID | 测试 |
+|----|------|
+| U-ENT-CR-001 | credentials.yaml 加载：alias 唯一性校验 |
+| U-ENT-CR-002 | credentials 文件权限非 600 → executor 启动失败 |
+| U-ENT-CR-003 | upload 仅 alias 列表到 controller，不上报 secret |
+| U-ENT-CR-004 | 任务下发指定 alias，executor 本地查表取 secret |
+| U-ENT-CR-005 | 401 自动切换下一 alias 重试一次（switch_on_429） |
+| U-ENT-CR-006 | round_robin 选择策略实际轮换 |
+| U-ENT-CR-007 | SIGHUP 重载凭证文件，alias 集合更新到 controller |
+| U-ENT-CR-008 | alias 删除：in-flight subtask 完成本 chunk 才停（不变量 31） |
+| U-ENT-CR-009 | credential_usage_log 写入：含 bytes_through + auth_failures |
+| U-ENT-CR-010 | controller 进程内存 dump 不含 secret（仅 alias） |
+| U-ENT-CR-011 | hf_token alias 不与 controller-managed reverse-proxy token 冲突 |
+| U-ENT-CR-012 | tampering：用户编辑 credentials.yaml 但不重新加载 → executor 仍用旧值（无静默切换） |
+
+### 11.4 别名（~6）
+
+| ID | 测试 |
+|----|------|
+| U-ENT-AL-001 | display_name 在 UI 任务详情/列表/选择器全位置显示 |
+| U-ENT-AL-002 | API 仍按内部 ID（display_name 仅展示） |
+| U-ENT-AL-003 | tenant_admin 修改 executor display_name → audit_log 记录 |
+| U-ENT-AL-004 | tenant_viewer 不能修改别名（403） |
+| U-ENT-AL-005 | 并发 rename 同一对象：last-write-wins + audit |
+| U-ENT-AL-006 | display_name 含 XSS 内容 → UI 渲染时 escape |
+
+### 11.5 Live Console（~6）
+
+| ID | 测试 |
+|----|------|
+| I-ENT-CO-001 | 100 logs/s × 10 客户端：controller 主流程不退化 |
+| I-ENT-CO-002 | filter (component=executor:host-12-w1) 正确生效 |
+| I-ENT-CO-003 | redactor 移除日志中的 token / AK 后才到 console |
+| I-ENT-CO-004 | console 操作本身写 audit_log（action=console.view） |
+| I-ENT-CO-005 | session 超 60min 自动断开 |
+| I-ENT-CO-006 | 默认 INFO+ 级别过滤；DEBUG 需显式开启 |
+
+### 11.6 S3 直连源切片（~5）
+
+| ID | 测试 |
+|----|------|
+| I-ENT-S3-001 | 创建 S3 直连任务 → controller 注册 ad-hoc source |
+| I-ENT-S3-002 | 8 路并发 GetRange，各自的 alias 不同 |
+| I-ENT-S3-003 | 某 part 401 → 自动切换 credential alias 重试 |
+| I-ENT-S3-004 | S3 object metadata x-amz-meta-sha256 用作校验 |
+| I-ENT-S3-005 | S3 内容与 HF sha256 不一致 → 任务 failed |
+
+---
+
+## 12. 失败的处理
 
 ```
 单元测试失败 → block merge
@@ -748,7 +833,7 @@ AI eval 整体通过率 < 80% → block release（视为系统性退化）
 
 ---
 
-## 12. 与其他文档的链接
+## 13. 与其他文档的链接
 
 - 不变量编号：→ [01-architecture.md](./01-architecture.md) §7
 - 协议测试场景：→ [02-protocol.md](./02-protocol.md)
@@ -757,4 +842,5 @@ AI eval 整体通过率 < 80% → block release（视为系统性退化）
 - 多源测试：→ [06-platform-and-ecosystem.md](./06-platform-and-ecosystem.md) §8
 - AI Copilot 设计：→ [12-ai-copilot.md](./12-ai-copilot.md)
 - 自适应下载优化设计：→ [13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)
+- 企业内网 / 限速 / 凭证池：→ [14-enterprise-network-and-rate-limit.md](./14-enterprise-network-and-rate-limit.md)
 - Phase 计划：→ [08-mvp-roadmap.md](./08-mvp-roadmap.md)

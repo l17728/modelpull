@@ -453,6 +453,7 @@ Week 3: 上线准备
 |------|------|------|
 | **AI Copilot（嵌入聊天 + Claude/OpenCode headless）** | **v2.1 first-class** | **详见 [12-ai-copilot.md](./12-ai-copilot.md)；Phase 4 末可灰度小流量只读** |
 | **自适应下载运筹优化 + 子分片 + S3 multipart 多 executor 协作** | **v2.1 first-class** | **详见 [13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)；v2.0 是反应式 baseline** |
+| **企业内网部署：反向 WSS / 限速探测 / 凭证池 / 别名 / Live Console** | **v2.1 first-class** | **详见 [14-enterprise-network-and-rate-limit.md](./14-enterprise-network-and-rate-limit.md)；面向 corp 内网+外网 controller 拓扑** |
 | Active-active controller | v2.1 | 当前仅 active/standby |
 | 跨地域复制 | v2.1 | DR + auto-replicate |
 | SLA 分级（class-of-service）+ 抢占 | v2.1 | 基础优先级在 v2.0 |

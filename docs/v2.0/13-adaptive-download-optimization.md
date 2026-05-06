@@ -253,6 +253,12 @@ def fast_path_decide(f, state):
 
 **子分片决策**：
 
+> 注：v2.1 引入 [14-enterprise-network](./14-enterprise-network-and-rate-limit.md) 后，子分片策略额外接受 `RateLimitProfile` 输入：
+> - per-connection limit → 单 executor 多连接
+> - per-IP limit → 多 executor 机器
+> - per-user limit → 多个 gateway alias 轮换
+> 详见 14 §2.5。下面仅展示算法骨架。
+
 ```python
 def compute_split_plan(f, state, k):
     # 选出 k 个最快的 (executor, source) 组合

@@ -85,6 +85,15 @@ Qwen3-72B-Instruct (BF16)    144 GB / 30 文件
 - 切换前算成本：已下载字节作废 vs 新方案完成时间收益，hysteresis 防抖动
 - 已下载部分默认不动，除非成为整体瓶颈
 - 决策审计表 `optimization_decisions` 可回放、可训练
+- 触发时机自适应：三级（hard / soft / 周期）+ 周期 [5s,120s] + 瓶颈聚焦 + 信息门控
+
+### 🏢 企业内网部署支持（v2.1）
+- **反向控制通道**：Executor 在公司内网无入站 IP；启动后主动开 WSS 到外网 controller，corp proxy 穿透；controller 可近实时推命令（cancel / replan）
+- **限速维度探测**：自动识别 corp gateway 限速是按 connection / IP / user，driving 子分片策略选择
+- **本地凭证池**：每个 executor 配置文件管理多个 gateway 账号 / HF token / S3 AKSK；凭证不出本机（controller 仅知 alias）
+- **别名系统**：执行器 / 存储后端 / 源 / 用户 / 项目 都支持 display_name（"GPU室 A worker 1" / "训练集群 NFS"）
+- **Live Console**：admin 一站式实时日志滚动 UI，含组件 / 任务 / 级别过滤
+- **S3 源直连**：UI 指定 S3 bucket+path 作为源，多 executor 多连接 Range 切片下载，按 alias 选凭证
 
 ---
 
@@ -107,7 +116,8 @@ modelpull/
 │   │   ├── 10-frontend-wireframes.md            9 个核心页面 wireframe
 │   │   ├── 11-cli-and-sdk-spec.md               dlw CLI + Python SDK 规范
 │   │   ├── 12-ai-copilot.md                     AI Copilot 嵌入聊天 + MCP 工具（v2.1）
-│   │   └── 13-adaptive-download-optimization.md 在线运筹优化 + 子分片 + S3 多 executor 协作（v2.1）
+│   │   ├── 13-adaptive-download-optimization.md 在线运筹优化 + 子分片 + S3 多 executor 协作（v2.1）
+│   │   └── 14-enterprise-network-and-rate-limit.md 内网部署 / 限速探测 / 凭证池 / 别名 / Console（v2.1）
 │   └── archive/                                 v1.x 历史版本（已 superseded）
 │
 ├── api/
@@ -151,6 +161,7 @@ modelpull/
 | 🎨 前端 | `10` → `api/openapi.yaml` |
 | 🤖 AI / 应用 | `12` → `02 §5` (SSE) → `04 §6` (安全) |
 | 📐 调度 / 算法 | `13` → `06 §1.6 §1.8`（前期反应式版） → `03 §2`（fence） |
+| 🏢 内网 / 运维 | `14` → `04 §3`（凭证差异） → `05 §1.2`（日志） → `13 §4.1`（限速联动） |
 
 入口：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
 
@@ -217,7 +228,7 @@ CI 强制失败任何违反不变量的 PR。
 | 版本 | 内容 |
 |------|------|
 | **v2.0**（设计完成） | 单租户 → 分布式 → 多租户 + 多源 → 生产加固，4 Phase / 13 周 |
-| v2.1 | **AI Copilot first-class** + **自适应下载运筹优化** + 跨地域复制 + SLA 分级 + 离线 export bundle + 行为遥测预热 |
+| v2.1 | **AI Copilot first-class** + **自适应下载运筹优化** + **企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）** + 跨地域复制 + SLA 分级 + 离线 export bundle + 行为遥测预热 |
 | v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 |
 | v2.3 | 多 controller cluster（按 tenant 分片）|
 
