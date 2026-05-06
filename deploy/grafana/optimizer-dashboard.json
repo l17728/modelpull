@@ -1,0 +1,91 @@
+{
+  "title": "DLW — Adaptive Optimizer",
+  "uid": "dlw-optimizer",
+  "tags": ["dlw", "optimizer", "v2.1"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Decisions/min",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{"expr": "rate(dlw_optimizer_decisions_total[1m]) * 60"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"steps": [{"color": "green"}, {"color": "yellow", "value": 30}, {"color": "red", "value": 60}]}
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Slow path timeouts (10m)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [{"expr": "increase(dlw_optimizer_slow_path_timeout_total[10m])"}]
+    },
+    {
+      "id": 3,
+      "title": "Subdivisions active (split parents)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [{"expr": "count(dlw_subtask_state{state=\"split\"})"}]
+    },
+    {
+      "id": 4,
+      "title": "Trigger sources (per Tier)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{
+        "expr": "sum by (tier) (rate(dlw_optimizer_triggers_total[5m]))",
+        "legendFormat": "{{tier}}"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Decision latency P50/P95/P99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le, path) (rate(dlw_optimizer_decision_seconds_bucket[5m])))", "legendFormat": "{{path}} p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le, path) (rate(dlw_optimizer_decision_seconds_bucket[5m])))", "legendFormat": "{{path}} p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le, path) (rate(dlw_optimizer_decision_seconds_bucket[5m])))", "legendFormat": "{{path}} p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 6,
+      "title": "Expected vs Actual savings (rolling 1h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {"expr": "avg_over_time(dlw_optimizer_expected_savings_seconds[5m])", "legendFormat": "expected"},
+        {"expr": "avg_over_time(dlw_optimizer_actual_savings_seconds[5m])", "legendFormat": "actual (30s window)"},
+        {"expr": "avg_over_time(dlw_optimizer_final_savings_seconds[5m])", "legendFormat": "final (task-end)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 7,
+      "title": "Cooldown skips",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {"expr": "rate(dlw_optimizer_cooldown_skips_total[5m])", "legendFormat": "cooldown"},
+        {"expr": "rate(dlw_optimizer_info_gate_skips_total[5m])", "legendFormat": "info gate"},
+        {"expr": "rate(dlw_optimizer_budget_skips_total[5m])", "legendFormat": "budget"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "WSS push epoch mismatch (DIST-V21-03)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+      "targets": [{
+        "expr": "sum by (executor_id) (rate(dlw_ws_push_epoch_mismatch_total[5m]))",
+        "legendFormat": "{{executor_id}}"
+      }]
+    }
+  ]
+}

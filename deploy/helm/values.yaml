@@ -279,6 +279,17 @@ ui:
       memory: 512Mi
 
 ## ============================================
+## AI Copilot (v2.1)
+## ============================================
+aiCopilot:
+  enabled: false                  # default off; tenant-admin enables explicitly
+  backend: anthropic_sdk          # anthropic_sdk | claude_code | opencode
+  default_model: claude-haiku-4-5
+  mcp:
+    deployment: sandboxed_subprocess  # sandboxed_subprocess | sidecar (强制非 in-process per AI-SEC-V21-04)
+    seccomp_profile: dlw-mcp-default
+
+## ============================================
 ## Maintenance / GameDay
 ## ============================================
 chaos:

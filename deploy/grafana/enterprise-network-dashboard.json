@@ -1,0 +1,96 @@
+{
+  "title": "DLW — Enterprise Network",
+  "uid": "dlw-enterprise",
+  "tags": ["dlw", "enterprise", "v2.1"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "WSS connected executors",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{"expr": "count(dlw_executor_ws_connected == 1)"}]
+    },
+    {
+      "id": 2,
+      "title": "Probe budget remaining today",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [{"expr": "dlw_rate_limit_probe_budget_remaining_bytes"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {"steps": [{"color": "red"}, {"color": "yellow", "value": 524288000}, {"color": "green", "value": 1073741824}]}
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Probe leader",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [{"expr": "dlw_rate_limit_probe_leader_present"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "NO LEADER", "color": "red"}, "1": {"text": "ELECTED", "color": "green"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "WSS reconnect rate (5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{
+        "expr": "sum by (executor_id) (rate(dlw_executor_ws_reconnects_total[5m]))",
+        "legendFormat": "{{executor_id}}"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Rate limit profile by source",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [{
+        "expr": "dlw_rate_limit_profile",
+        "format": "table",
+        "instant": true
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Credential auth failures by alias",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{
+        "expr": "sum by (alias, status) (rate(dlw_credential_auth_failures_total[5m]))",
+        "legendFormat": "{{alias}} {{status}}"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "Live Console concurrent clients",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {"expr": "dlw_console_concurrent_clients", "legendFormat": "active"},
+        {"expr": "dlw_console_max_concurrent_clients", "legendFormat": "max"}
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Bandwidth utilization by gateway alias",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "targets": [{
+        "expr": "sum by (alias) (rate(dlw_credential_bytes_through_total[5m]))",
+        "legendFormat": "{{alias}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    }
+  ]
+}

@@ -204,7 +204,15 @@ Sec-WebSocket-Protocol: bearer.eyJhbGciOiJFZERTQSI...
 
 实际限速可能是组合：例如 "10 Mbps/连接 AND 100 Mbps/IP AND 1 Gbps/user"。
 
-### 2.2 探测算法
+### 2.2 探测算法（v2.1 修订 — OR-V21-07）
+
+> 原版本 ratio 阈值（如 `> 2.5`）在真实速度抖动 ±20% 下误判率 ~7%。v2.1 改为**配对 t-test** + 多次采样 median + 显式 confidence 公式。
+
+**统计学基础**：
+
+- 速度测量含噪声：`speed = μ ± σ`，`σ/μ ≈ 5-25%`（依赖网络）
+- 多次独立测量取 median 比单次 ratio 鲁棒
+- **paired t-test** 比"是否 > 阈值"更准确
 
 启动期 + 周期重测。每个 (target_host, executor_ip_class) 组合维护一份探测结果。
 
@@ -216,9 +224,19 @@ def probe_rate_limit_dimension(target_host: str, executor: Executor) -> RateLimi
     # Step 1: 单连接基线
     speed_1conn = measure(executor, target_host, n_connections=1, n_executors=1)
 
-    # Step 2: 同 executor 多连接
-    speed_4conn = measure(executor, target_host, n_connections=4, n_executors=1)
-    connection_limited = (speed_4conn / speed_1conn) > 2.5    # 接近 4× 说明可叠加
+    # Step 2: 同 executor 多连接（v2.1: 多次采样 + paired t-test）
+    samples_1conn = [measure(executor, target_host, n_connections=1, n_executors=1)
+                     for _ in range(N_SAMPLES)]   # N_SAMPLES = 5
+    samples_4conn = [measure(executor, target_host, n_connections=4, n_executors=1)
+                     for _ in range(N_SAMPLES)]
+    # H0: speed_4conn = speed_1conn × n_conn（无连接限速时成立）
+    # H1: speed_4conn / speed_1conn 显著小于 4
+    from scipy.stats import ttest_rel
+    ratios = [s4 / s1 for s4, s1 in zip(samples_4conn, samples_1conn)]
+    median_ratio = median(ratios)
+    t_stat, p_value = ttest_rel(samples_4conn, [s * 4 for s in samples_1conn])
+    # 拒绝 H0（即 connection_limited=True）当 p_value < 0.05 且 median_ratio < 2.5
+    connection_limited = (p_value < 0.05) and (median_ratio < 2.5)
 
     # Step 3: 同 IP 段、同 user，但开 2 个 executor 进程
     if has_sibling_executor_same_host(executor):
@@ -249,12 +267,62 @@ def probe_rate_limit_dimension(target_host: str, executor: Executor) -> RateLimi
     )
 ```
 
-### 2.3 探测频率
+**Confidence 公式（v2.1 修订）**：
 
-- 启动后第一次：**强制探测**（每个 target_host）
+```python
+def compute_confidence(samples_1conn, samples_4conn, p_value, concurrent_traffic_ratio):
+    """
+    confidence ∈ [0, 1]：探测结果可信程度。
+    - 高样本数、低噪声、低并发干扰 → 高 confidence
+    - 探测期间生产流量混入越多 → 低 confidence
+    """
+    # CV (coefficient of variation) of measurements
+    cv_1 = stdev(samples_1conn) / mean(samples_1conn)
+    cv_4 = stdev(samples_4conn) / mean(samples_4conn)
+    cv_avg = (cv_1 + cv_4) / 2
+
+    # 样本充足度
+    sample_factor = min(1.0, N_SAMPLES / 5)
+
+    # 显著性
+    significance_factor = 1 - p_value if p_value < 0.05 else 0.5
+
+    # 并发干扰扣分
+    interference_penalty = max(0, concurrent_traffic_ratio - 0.1)
+
+    confidence = sample_factor * (1 - cv_avg) * significance_factor * (1 - interference_penalty)
+    return clamp(0, 1, confidence)
+```
+
+`concurrent_traffic_ratio` = 探测期间该 target_host 的真实任务流量 / probe 流量。详见 §2.5 限速画像驱动调度（confidence < 0.6 时退化为保守策略）。
+
+### 2.3 探测频率与集群级协调（v2.1 修订 — DIST-V21-05）
+
+> 原版本"每 controller 每天 5GB" 在多 controller 集群下总预算无控（10 controller × 5GB = 50GB/天）；同时多 controller 同时探测 + 互相挤占造成 measurement contamination。
+
+**集群级协调**：
+
+```
+集群中的 controller 用 PG advisory lock 选 probe leader：
+  SELECT pg_try_advisory_lock(hash('probe_leader'))
+
+当前 leader 负责所有 (target_host, ip_class) 探测；
+其他 controller 仅消费探测结果（从 rate_limit_probes 表读最新行）。
+```
+
+🔒 **不变量 43 (v2.1, DIST-V21-05)**：同时只有 1 个 controller 是 probe leader；leader 异常时通过 advisory lock TTL 自动转移。
+
+**预算与频率**：
+
+- 启动后第一次：**强制探测**（leader 执行；每个 target_host）
 - 周期重测：每 6h
-- 触发重测：连续 5 分钟实测速度 < 探测预期 50%（可能 gateway 策略变化）
-- 探测预算：每 controller 每天总探测流量 ≤ 5GB（避免自身打爆 gateway）
+- 触发重测：leader 收到任一 controller 上报"连续 5 分钟实测速度 < 探测预期 50%"
+- **集群级预算**（不再 per-controller）：每天 ≤ 5GB 总探测流量
+  ```sql
+  -- 详见 01 §4.7.5 probe_budget 表
+  SELECT bytes_used, bytes_limit FROM probe_budget WHERE day = CURRENT_DATE;
+  ```
+  超额时新探测请求拒绝；既有探测结果继续使用直到过期
 
 ### 2.4 数据模型
 
@@ -420,30 +488,77 @@ executor 收到后查本地凭证池表 → 取 secret → 发 HTTPS。
 | 同一文件子分片到 K 个 chunk | controller 给每个 chunk 不同 alias（保证不冲突） |
 | 触发 429 / 401 | executor 自动切下一个 alias 重试一次，并上报"alias X 触发 429" |
 
-### 3.6 凭证轮换 / 删除
+### 3.6 凭证轮换 / 删除（v2.1 修订 — DIST-V21-07）
+
+> 原版本 "alias 删除后完成本 chunk 才停" 在 alias 已被外部 revoke（即时 401）时与"401 自动 fallback to next alias"语义冲突 → 抖动循环。修订为 **drain → purge 两阶段**协议。
 
 凭证轮换流程（无停机）：
 
 ```
 1. admin 在 executor 主机上 admin alias 'corp_user_a' 把 password 改成新值
-2. 重新加载 credentials.yaml （SIGHUP 信号）
-3. executor 通过 WSS 上报 "alias corp_user_a updated"
-4. controller 发起一次轻量探测确认新 alias 工作
+2. 重新加载 credentials.yaml （SIGHUP 信号）— 仅更新 secret，alias 保留
+3. executor 通过 WSS 上报 "alias corp_user_a secret_updated"
+4. controller 发起一次轻量探测确认新 secret 工作
 5. 完成
 ```
 
-删除 alias：
+**Alias 删除两阶段（drain → purge）**：
 
 ```
-1. executor.yaml 移除 alias
-2. SIGHUP 重载
-3. WSS 上报新的 aliases 列表
-4. controller 不再派带该 alias 的任务
+Phase 1: drain
+  ├─ admin 修改 executor.yaml 移除 alias 'corp_user_a'
+  ├─ SIGHUP 触发：executor 不立即从内存删除，而是标记 alias='draining'
+  ├─ executor 通过 WSS 发 {type: 'creds_change_pending',
+  │                         removed_aliases: ['corp_user_a']}
+  ├─ controller ACK 后停止派带该 alias 的新任务
+  └─ executor 等待所有 in-flight 引用该 alias 的 chunk 完成
+
+Phase 2: purge
+  ├─ in-flight 全部完成后，executor 真正从内存清除 secret
+  └─ 通过 WSS 发 {type: 'creds_change_committed',
+                  removed_aliases: ['corp_user_a']}
 ```
 
-🔒 **不变量 31：alias 删除后，正在使用该 alias 的 in-flight subtask 完成本 chunk 后才不再分配；不强制中断**
+🔒 **不变量 31（修订 v2.1, DIST-V21-07）**：alias 移除走 drain→purge 两阶段：
 
-### 3.7 安全审计
+- **drain 阶段**：controller 不再派任务但 in-flight 继续；401 期间不算 alias-failure（避免与下一阶段重复触发）
+- **purge 阶段**：内存中真正清除 secret；后续误派此 alias 的请求立即 fail，触发 reschedule（而非 retry-with-next-alias，因为 alias 已不存在）
+- **drain 期间 alias 被外部 revoke**（admin gateway 端禁用账号 → 401）：executor 检测 401 → 立即 abort 该 chunk → upgrade 到 purge 阶段（不等 in-flight 完成）
+
+### 3.7 集中化凭证管理（v2.1, ENT-QA-05）
+
+> 200+ executor 主机 SSH + 文件改 + SIGHUP 不可扩展。生产部署强烈推荐 **集中化凭证分发**。
+
+支持三种 source：
+
+| source | 描述 | 适用 |
+|--------|------|------|
+| `file` | `/etc/dlw/credentials.yaml` 静态文件（v2.0 默认） | dev / 小集群 |
+| `vault` | Vault Agent sidecar 注入；executor 仅读 cached file | 中型集群（Vault 已有） |
+| `external_secrets` | K8s ExternalSecrets Operator 同步到 Secret → CSI mount | K8s 大集群 |
+
+Helm value：
+
+```yaml
+credentials:
+  source: vault            # file | vault | external_secrets
+  vault:
+    addr: https://vault.corp.example.com
+    role: dlw-executor
+    secret_path: secret/data/dlw/credentials
+    refresh_interval_seconds: 300
+    fallback_to_file: true     # vault 不可达时回退本地 cached file
+```
+
+**自动轮换**：
+
+- Vault 模式：Vault Agent watch secret 变化 → 写本地 cached file → executor 自动 SIGHUP
+- ExternalSecrets：CSI volume 自动更新 → executor inotify 触发 SIGHUP
+- 不再需要 admin 手动 SSH 改文件
+
+🔒 **不变量 30（修订 v2.1, ENT-QA-05）**：本地凭证池可由集中 secret store 派生，但**已派发到 executor 内存的 secret 不上报 controller**（不变量 30 核心约束不变）。
+
+### 3.8 安全审计
 
 每次凭证使用写：
 

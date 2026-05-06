@@ -90,14 +90,33 @@ def enumerate_plans(file: File, storage: StorageBackend) -> list[Plan]:
 > 📝 **决策**：放弃在 §1.3 的 LP 中展开任意切分方式；接受 plan 离散化的"近似最优"代价。实测表明 k ∈ {1,2,3,4,8} 已覆盖 ≥ 95% 真实场景的最优 k 选择。
 > 如需更精细：v2.2 用 column generation 按需展开（详见 §11 roadmap）。
 
-### 1.3 目标函数
+### 1.3 目标函数（v2.1 修订 — OR-V21-01）
 
-最小化任务级 makespan（最长完成时间）：
+> ⚠️ 原版本仅 makespan 在 "99 文件已完成 + 1 文件慢" 时退化为单文件 ETA 最小化（其他文件的分配对目标无影响 → LP 多解 / degenerate）。
+
+修订为**字典序目标**：
 
 ```
-minimize  max over executors e:
-            Σ over assigned files f, plans p, sources s:
-              x[f,e,s,p] × (bytes_remaining(f, p) / V(t)[e][s])
+lex_minimize:
+  1. makespan    = max over e: Σ x[f,e,s,p] × bytes_remaining / V[e][s]
+  2. P95_completion_time(per file)
+  3. Σ w_f × C_f                # weighted flow time，w_f = file size or tenant priority
+```
+
+LP 实现：
+
+- 先求 `makespan` 的最优值 `T*`
+- 加约束 `makespan ≤ T*`（或 `T* × 1.01` 容差）
+- 在此约束下最小化 P95
+- 重复直到 weighted flow time
+
+实践简化（fast path）：直接用 weighted flow time `Σ w_f × C_f`（含 makespan 信息且无退化），slow path 才走完整 lex。
+
+```
+fast_path:  minimize  Σ over f: w_f × completion_time(f)
+            其中 completion_time(f) = max over e: Σ x[f,e,s,p] × bytes/V[e][s]
+
+slow_path:  lex_minimize  (makespan, P95, weighted_flow_time)
 ```
 
 约束：
@@ -157,13 +176,53 @@ a. 当前文件成为 **整体 makespan 瓶颈**（最长 ETA 文件）
 b. 切换方案能让该文件 ETA 减少 ≥ `switch_threshold_ratio`（默认 50%）
 c. 用户显式 force-rebalance
 
-🔒 **不变量 21：决策窗口必须有 hysteresis（迟滞）**
+🔒 **不变量 21（修订 v2.1, OR-V21-08）：决策必须有 hysteresis；优先用 CUSUM 而非硬阈值**
 
-避免抖动：
+**为什么不用硬阈值**：30%/15s 触发是经验值，false-alarm rate 与 detection-delay 无显式控制。生产环境应使用 CUSUM（cumulative sum control chart）或 SPRT（Sequential Probability Ratio Test）。
 
-- 触发切换：速度跌至基线 < 30% 且持续 ≥ 15 秒
-- 解除切换状态（恢复正常）：速度回升至 > 70% 且持续 ≥ 30 秒
-- 单文件最多每 60s 切换一次（cooldown）
+**CUSUM 检测公式**：
+
+```python
+def cusum_detect(speed_history, baseline, k_threshold=0.5, h_alarm=4):
+    """
+    检测速度持续偏离基线。
+    k_threshold: drift 容忍度（基线的 k 倍 σ 内不计）
+    h_alarm: 累积偏离上限，超过即触发
+    返回：是否报警 + 累积偏离值
+    """
+    cs_low = 0    # 检测下偏（速度跌）
+    sigma = stdev(speed_history) or baseline * 0.1
+    for s in speed_history:
+        cs_low = max(0, cs_low - (s - (baseline - k_threshold * sigma)))
+        if cs_low > h_alarm * sigma:
+            return True, cs_low
+    return False, cs_low
+```
+
+**优势**：
+
+- 显式控制 false-alarm rate `α` 与 mean-time-to-detection（取决于 k 与 h）
+- 对持续小幅偏离敏感（硬阈值会漏）
+- 对单点 outlier 不敏感（硬阈值会误判）
+
+**v2.1 默认参数**（基于 EWMA τ=10s）：
+
+```yaml
+hysteresis:
+  algorithm: cusum                  # cusum | sprt | hard_threshold (legacy)
+  cusum:
+    k_drift_tolerance_sigma: 0.5    # 0.5σ drift 内视为正常
+    h_alarm_sigma: 4                 # 累积偏离 4σ 触发
+    min_samples_before_alarm: 3
+    backoff_after_alarm_seconds: 60  # cooldown
+  hard_threshold:                    # 仅作为退化路径
+    drop_pct: 30
+    drop_duration_s: 15
+    recovery_pct: 70
+    recovery_duration_s: 30
+```
+
+**单文件 cooldown**：保留 60s（不变量 21 子条款）。详见 §9.2 配置默认值的统计学依据。
 
 🔒 **不变量 22：子分片必须满足 S3 multipart 约束**
 
@@ -440,7 +499,60 @@ def should_actually_evaluate(file, state, last_state):
 
 `SAVINGS_NOISE_THRESHOLD` 默认 5 秒（小于这就是噪声）。
 
-#### 4.3.4 Trigger 抖动抑制
+#### 4.3.4 串行化与 generation fence（v2.1, DIST-V21-04）
+
+> 仅有 SCHEDULER_LOCK 保护 decide 阶段是不够的：apply 阶段（push 到 executor + 写 DB）也可能被并发决策污染。
+
+**Generation number 协议**：
+
+```python
+class FileOptimizationState:
+    file_id: UUID
+    optimization_generation: int = 0    # 单调递增；每次 PlanOptimizer 决策 +1
+    expected_executor_set: set[str]     # 当前期望的 executor 集合
+```
+
+每次 `decide()` + `apply()`（**整个**）必须在同一全局锁内：
+
+```python
+async def optimize_file(file_id):
+    async with SCHEDULER_LOCK:
+        state = load_state(file_id)
+        new_gen = state.optimization_generation + 1
+
+        decision = decide(state)
+        if not decision: return
+
+        # 持久化 generation
+        await db.execute(
+            "UPDATE file_subtasks SET optimization_generation = $1 WHERE parent_subtask_id = $2",
+            new_gen, file_id
+        )
+
+        # 同 lock 内 apply：通过 WSS push 到 executor，每条 push 携带 new_gen
+        for exec_id, assignment in decision.assignments.items():
+            await ws_push(exec_id, {
+                "type": "assign",
+                "target_executor_epoch": ...,
+                "optimization_generation": new_gen,        # ← fence
+                ...
+            })
+
+        # 同 lock 内 reclaim：旧 owner 通过 WSS abort 通知（不只是写 DB）
+        for old_exec in decision.reclaim_targets:
+            await ws_push(old_exec, {
+                "type": "abort",
+                "subtask_id": ...,
+                "reason": "reclaimed_by_optimizer",
+                "old_optimization_generation": state.optimization_generation,
+            })
+```
+
+**Executor 端校验**：上报 part 完成时携带 `optimization_generation`；controller 校验 `received_gen == file.optimization_generation`，不等就 stale，丢弃上报。
+
+🔒 **不变量 42 (v2.1, DIST-V21-04)**：PlanOptimizer 的 decide + apply（push + DB write + reclaim notification）必须在同一 SCHEDULER_LOCK 内完成；reclaim 必须通过 WSS push 主动通知旧 owner，不能仅写 DB。
+
+#### 4.3.5 Trigger 抖动抑制
 
 同一文件短时间内反复触发：
 
@@ -451,7 +563,7 @@ def should_actually_evaluate(file, state, last_state):
 | Soft trigger 队列合并 | 30s 窗口内同 file 多次 soft 合并为一次 |
 | 全局 trigger 频率上限 | 单 controller 优化决策 ≤ 60 次/分钟 |
 
-#### 4.3.5 决策预算（Cost-Bounded Triggering）
+#### 4.3.6 决策预算（Cost-Bounded Triggering）
 
 PlanOptimizer 自身 CPU 也是有限资源。当 controller 同时管理大量任务时，触发预算分配：
 
@@ -464,7 +576,7 @@ budget(task) = base_quota
 
 低预算任务的 soft trigger 直接丢弃；保证整体 controller 不爆 CPU（详见 §9.1 容量）。
 
-#### 4.3.6 触发流程总图
+#### 4.3.7 触发流程总图
 
 ```
                 ┌──────────────────────────────────────┐
@@ -512,7 +624,7 @@ budget(task) = base_quota
                   └─────────────────────────────┘
 ```
 
-#### 4.3.7 配置默认值
+#### 4.3.8 配置默认值
 
 ```yaml
 trigger:
@@ -544,7 +656,7 @@ trigger:
   bottleneck_proximity_pct: 20          # ETA 在瓶颈 ±20% 内才参与评估
 ```
 
-#### 4.3.8 v2.2 进阶：预测性触发（Predictive Triggering）
+#### 4.3.9 v2.2 进阶：预测性触发（Predictive Triggering）
 
 v2.1 的所有 trigger 都是 **reactive**——速度变了才反应。v2.2 引入 **predictive**：
 
@@ -556,7 +668,7 @@ v2.1 的所有 trigger 都是 **reactive**——速度变了才反应。v2.2 引
 
 📝 **决策**：v2.1 只用 reactive；predictive 收集决策历史 30 天后（v2.2）启用，先验证模型准确度。
 
-#### 4.3.9 已知失效模式
+#### 4.3.10 已知失效模式
 
 | 场景 | 失效 | 缓解 |
 |------|------|------|

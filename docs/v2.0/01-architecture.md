@@ -902,7 +902,7 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 | 19 | **任何外部 origin** 的内容（web_fetch / hf_model_card / **dlw_* 工具 output 中含外部字段如 description/readme/auto_map**）必须 sanitize 后才进 LLM context；含来源标记 + Unicode NFKC + Cf 移除 + confusables + 语义模式检测 | U-AI-S-001..023 |
 | 20 | 已下载字节默认不参与重新规划（除非该文件成为 makespan 瓶颈或切换收益 ≥50%）（详见 13 §2.1） | 决策回放 + chaos 测试 |
 | 21 | 优化决策必须有 hysteresis：触发 30%/15s + 解除 70%/30s + cooldown 60s/file | 抖动测试 ADO-CHAOS-* |
-| 22 | 子分片必须满足 S3 multipart 约束（part 5MB-5GB，总数 ≤10000）；非 S3 backend 禁用 | 配置加载校验 + 单测 |
+| 22 | 子分片必须满足 S3 multipart 约束（part 5MB-5GB，总数 ≤10000）；非 S3 backend **不直接子分片，必须走 single-executor 拼装或 S3 staging 中转**（详见 13 §5.5） | 配置加载校验 + 单测 |
 | 23 | 每次重新规划写 `optimization_decisions` 表（输入 + 决策 + 预期 + 实际） | DB 单测 |
 | 24 | v2.1 单任务最优化；跨任务全局调度延后到 v2.2 | scope 限制 |
 | 25 | 单次决策 ≤ 5s（超时回退 fast path 启发式） | 性能基线 |
@@ -919,6 +919,11 @@ CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
 | 36 | 外部内容必须 NFKC + Cf 移除 + confusables + 语义模式 sanitize 后才进 LLM context | U-AI-S-013..023 |
 | 37 | MCP server 沙箱进程不继承 controller 敏感凭证内存（KEK / HF Token / S3 AKSK） | 进程内存扫描测试 |
 | 38 | PlanOptimizer slow path 连续超时 ≥ 3 次自动降级 LP 松弛 + anytime；不允许永久 fallback fast path | OR-V21-03 集成测试 |
+| 39 | Conversation context 严格 per-conversation 构建；不跨 conversation 拼接 history / summary | AI-SEC-MT-005, MT-008 |
+| 40 | `modified_input` 提交前必须重跑全部 service-layer 前置校验（license / gated / quota）；审计区分 ai_proposed vs user_final | 单测 + AI-SEC-MT-007 |
+| 41 | T2（用户内容）必须 `<external_user_content trust_level="t2">` 边界化 + 8KB 截断 + 强降权指令 | sanitize 单测 |
+| 42 | PlanOptimizer decide + apply（push + DB write + reclaim push）必须在同一 SCHEDULER_LOCK 内完成；reclaim 通过 WSS 主动通知旧 owner | DIST-V21-04 集成测试 |
+| 43 | 同时只有 1 个 controller 是 probe leader（PG advisory lock）；集群级 5GB/天总预算 | DIST-V21-05 集成测试 |
 
 ---
 

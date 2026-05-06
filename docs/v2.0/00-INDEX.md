@@ -59,21 +59,27 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 
 ## 按角色推荐阅读路径
 
-**👨‍💻 架构师 / 评审者**：01 → 03 → 04 → 02 → 05 → 06 → 08（roadmap）
+**👨‍💻 架构师 / 评审者**：01 → 03 → 04 → 02 → 05 → 06 → 12 → 13 → 14 → 08（roadmap）
 
-**🔨 后端实现者**：08 → 01 → 02 → 03 → 04 → 05 → 07
+**🔨 后端实现者**：08 → 01 → 02 → 03 → 04 → 13 → 14 → 05 → 07
 
-**🧪 QA**：07 → 02 → 03（理解状态机）→ 09（升级测试）
+**🧪 QA**：07 → 02 → 03（理解状态机）→ 09（升级测试）→ 12-14（v2.1 测试）
 
-**🛡️ 安全审计**：04 → 02 → 01 §3 状态机 → 05 §10 优雅停机
+**🛡️ 安全审计**：04 → 02 → 01 §3 状态机 → 05 §10 优雅停机 → **12 §6 AI 安全** → **14 §3 凭证池**
 
-**🚨 SRE / on-call**：05（全部）→ 09 → 03 §3 恢复语义 → 04 §6 DoS
+**🚨 SRE / on-call**：05（全部）→ 09 → 03 §3 恢复语义 → 04 §6 DoS → **14 §1 反向通道** → **14 §5 Live Console**
 
-**👤 用户 / 算法工程师**：06 §5 CLI/SDK → 02 §1 协议总览
+**👤 用户 / 算法工程师**：06 §5 CLI/SDK → 02 §1 协议总览 → **12 §8 AI Copilot UX**
 
 **🏗️ 平台 / 集成方**：06 → 02 → 04 §1 租户 → openapi.yaml
 
 **📅 PM / Tech Lead**：08（4 Phase 全部）→ 07 §8 测试与 Phase 对应 → 09
+
+**🤖 AI / 应用**：12 → 02 §5 (SSE) → 04 §6 (安全)
+
+**📐 调度 / 算法**：13 → 06 §1.6 §1.8（前期反应式版） → 03 §2（fence）
+
+**🏢 内网 / 运维**：14 → 04 §3（凭证差异） → 05 §1.2（日志） → 13 §4.1（限速联动）
 
 ---
 
@@ -140,3 +146,4 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 | 2026-05-06 | v2.0.6 | 13 §4.3 触发时机展开：三级触发 + 自适应周期 + 瓶颈聚焦 + 信息门控 + 触发预算；不变量 27 |
 | 2026-05-06 | v2.0.7 | 加入 14-enterprise-network-and-rate-limit.md（反向 WSS 通道 + 限速维度探测 + 本地凭证池 + 别名 + Live Console + S3 直连切片）；不变量 28-31；07 §11 新增 ~50 测试 |
 | 2026-05-06 | v2.0.8 | **5 reviewer 综合 review** 后修复 12 项 Critical（PR 1）：01 §4.7 v2.1 数据模型同步（5 表+多列+全部加 tenant_id）；不变量 2/19 措辞修订 + 新增 32-38（multipart 持久化/recovery 屏障/CompleteMultipartUpload 校验/WSS push epoch fence/Unicode sanitize/MCP 沙箱/anytime LP）；01 §3.2.1 引入 split parent 状态机；OpenAPI 补 5 v2.1 端点；OR §1.2 plan 离散化 + §1.4 switch_loss_factor 分场景 + §5.4 三向对账 + §5.5 part_number bump；12 §6.1 加 Unicode NFKC + Cf 移除 + confusables 防御层；audit_search 从 MCP 暴露面下架；07 §9 新增 11 个 Unicode 注入测试 |
+| 2026-05-06 | v2.0.9 | **PR 2** 修 22 项强烈建议：AI 安全（cross-conv 隔离/modified_input 重检查/LLM 输出审计/per-user 配额/web_fetch T1-T2 分层/multi-turn 测试），OR（lex 目标函数/paired t-test/CUSUM hysteresis），分布式（optimization_generation fence/probe leader election/credentials drain-purge 2-phase），一致性（INDEX 阅读路径/不变量 22 措辞），roadmap（Phase 1 4w→5w 总线 13w→14w），集中化凭证管理（Vault/ExternalSecrets），部署物料（Alertmanager v2.1 12 告警/3 份 Grafana dashboard/NetworkPolicy 含 WSS+AI），不变量 39-43（含 conversation 隔离/modified_input 重校验/T2 边界/lock 覆盖 apply/probe leader） |

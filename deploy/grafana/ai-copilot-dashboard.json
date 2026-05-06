@@ -1,0 +1,90 @@
+{
+  "title": "DLW — AI Copilot",
+  "uid": "dlw-ai-copilot",
+  "tags": ["dlw", "ai", "v2.1"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "query": "label_values(dlw_ai_conversations_active, tenant_id)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active conversations",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{"expr": "sum(dlw_ai_conversations_active{tenant_id=~\"$tenant\"})"}]
+    },
+    {
+      "id": 2,
+      "title": "Tokens used (this month)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [{"expr": "sum(dlw_ai_tokens_used_month{tenant_id=~\"$tenant\"})"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 3,
+      "title": "Cost (24h, USD cents)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [{"expr": "sum(increase(dlw_ai_cost_usd_cents_total{tenant_id=~\"$tenant\"}[24h]))"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {"steps": [{"color": "green"}, {"color": "yellow", "value": 1000}, {"color": "red", "value": 10000}]}
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Tool calls/sec by tool",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{
+        "expr": "sum by (tool_name) (rate(dlw_ai_tool_calls_total{tenant_id=~\"$tenant\"}[5m]))",
+        "legendFormat": "{{tool_name}}"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Sanitize warnings (security signals)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [{
+        "expr": "sum by (warning) (rate(dlw_ai_sanitize_warnings_total{tenant_id=~\"$tenant\"}[5m]))",
+        "legendFormat": "{{warning}}"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "TTFT (first token) P50/P95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(dlw_ai_ttft_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(dlw_ai_ttft_seconds_bucket[5m])))", "legendFormat": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 7,
+      "title": "Confirmation outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{
+        "expr": "sum by (decision) (rate(dlw_ai_confirmations_total{tenant_id=~\"$tenant\"}[5m]))",
+        "legendFormat": "{{decision}}"
+      }]
+    }
+  ]
+}

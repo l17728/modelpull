@@ -29,13 +29,15 @@ spec:
       ports:
         - port: 8000
         - port: 8001
-    # Executor pods（同 namespace）
+    # Executor pods（同 namespace）— 含反向 WSS（v2.1）
     - from:
         - podSelector:
             matchLabels:
               {{- include "dlw.executor.selectorLabels" . | nindent 14 }}
       ports:
         - port: 8000
+        - port: 8001    # WSS reverse channel（v2.1, 14 §1.2）
+        - port: 8443    # WSS TLS port (alt)
 ---
 # Controller 出站：DB / HF / Storage / Vault
 apiVersion: networking.k8s.io/v1
@@ -73,6 +75,39 @@ spec:
               - 169.254.0.0/16    # AWS metadata
       ports:
         - port: 443
+---
+# AI Copilot 出站：仅 LLM 提供商 API（v2.1）
+{{- if .Values.aiCopilot.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dlw.fullname" . }}-ai-copilot-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dlw.controller.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ai-copilot     # 同进程时仍归 controller
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+    # 仅允许配置的 LLM 提供商（按 FQDN 白名单 — 需 Cilium / Calico FQDN policy）
+    # api.anthropic.com / api.openai.com / 自托管 LLM
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - port: 443
+{{- end }}
 ---
 # Executor 入站：仅 Prometheus 抓 metrics
 apiVersion: networking.k8s.io/v1

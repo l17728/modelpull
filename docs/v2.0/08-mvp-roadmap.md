@@ -26,7 +26,9 @@
 
 ---
 
-## 1. Phase 1 — 单租户 PoC（4 weeks）
+## 1. Phase 1 — 单租户 PoC（**5 weeks**，v2.1 修订 — ENT-QA-03）
+
+> ⚠️ 原版本 4 周不现实：5.5 FTE × 4 周 = 22 工程师周，但 fence token + recovery 三联校验 + multipart + UI + E2E + DB schema migration 实际需要约 27 工程师周。改为 5 周（含 1 周 buffer），总线 13 → **14 周**。
 
 ### 1.1 目标
 
@@ -91,7 +93,7 @@
 - [ ] 架构 review：与 v2.0 设计偏差清单
 - [ ] 容量基线初测（P-001 部分基线）
 
-### 1.6 Phase 1 任务分解（4 weeks）
+### 1.6 Phase 1 任务分解（5 weeks）
 
 ```
 Week 1: 骨架
@@ -109,7 +111,12 @@ Week 3: Executor + UI
 Week 4: 校验 + 联调
   ├─ Day 1-2: 流式 SHA256 + 任务级最终校验
   ├─ Day 3-4: E2E-001 联调
-  ├─ Day 5: 内部 alpha demo
+
+Week 5 (buffer): 收尾 + 内部 alpha
+  ├─ Day 1-2: 修复 Week 1-4 发现的问题
+  ├─ Day 3: 性能基线 P-005（PG TPS）
+  ├─ Day 4: 出场标准对账
+  └─ Day 5: 内部 alpha demo
 ```
 
 ### 1.7 Phase 1 风险
@@ -443,7 +450,7 @@ Week 3: 上线准备
 | 安全顾问 | 0 | 0.5 | 0.5 | 1 |
 | **总计 FTE** | **5.5** | **7.5** | **8.5** | **10** |
 
-13 周（~3 个月）总人月 ≈ **22-25 PM**。
+**14 周**（~3.5 个月）总人月 ≈ **24-27 PM**（v2.1 修订；含 Phase 1 buffer week）。
 
 ---
 

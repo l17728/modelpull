@@ -183,3 +183,117 @@ groups:
         annotations:
           summary: "Audit log chain integrity check failed"
           description: "Possible tampering attempt"
+
+  # ============================================
+  # v2.1 — AI Copilot / Optimizer / Enterprise Network
+  # ============================================
+  - name: dlw_v21_alerts
+    rules:
+      # AI Copilot
+      - alert: AICostPerTenantSurge
+        expr: |
+          rate(dlw_ai_cost_usd_cents_total[1h]) * 24 > 500   # > $5/day projected
+        for: 30m
+        labels: {severity: work-hours, category: cost}
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} AI cost surge: projected ${{ $value | humanize }}/day"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-AI-COST
+
+      - alert: AIQuotaExhaustedHighRate
+        expr: rate(dlw_ai_quota_exhausted_total[10m]) > 0.1
+        for: 5m
+        labels: {severity: work-hours, category: quota}
+        annotations:
+          summary: "AI quota exhausted on {{ $labels.tenant_id }} (scope={{ $labels.scope }})"
+
+      - alert: AIPromptInjectionDetected
+        expr: increase(dlw_ai_sanitize_warnings_total{warning="injection_pattern"}[15m]) > 5
+        for: 5m
+        labels: {severity: work-hours, category: security}
+        annotations:
+          summary: "AI Copilot detected {{ $value }} prompt injection attempts in 15m"
+
+      # Optimizer
+      - alert: OptimizerDecisionStorm
+        expr: rate(dlw_optimizer_decisions_total[1m]) > 1   # > 60/min
+        for: 5m
+        labels: {severity: work-hours, category: performance}
+        annotations:
+          summary: "Optimizer decision rate too high (>{{ $value | humanize }}/sec)"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-OPT-STORM
+
+      - alert: OptimizerSlowPathTimeoutSurge
+        expr: rate(dlw_optimizer_slow_path_timeout_total[10m]) > 0.05
+        for: 10m
+        labels: {severity: work-hours, category: performance}
+        annotations:
+          summary: "Optimizer slow path timeout > 5%; falling back to LP relaxation"
+
+      - alert: OptimizerActualVsExpectedDeviation
+        # 决策 actual_savings 显著低于 expected → 算法系统性高估
+        expr: |
+          (avg_over_time(dlw_optimizer_actual_savings_seconds[1h])
+            / avg_over_time(dlw_optimizer_expected_savings_seconds[1h])) < 0.5
+        for: 1h
+        labels: {severity: ticket, category: algorithm}
+        annotations:
+          summary: "Optimizer expected vs actual savings deviation > 50%"
+
+      # Enterprise Network
+      - alert: WSSReconnectStorm
+        expr: |
+          rate(dlw_executor_ws_reconnects_total[5m]) > 0.1   # > 6 reconnects/min cluster-wide
+        for: 5m
+        labels: {severity: work-hours, category: availability}
+        annotations:
+          summary: "WSS reconnect rate spike: corp proxy / network instability suspected"
+
+      - alert: WSSAllExecutorsDisconnected
+        expr: |
+          count(dlw_executor_ws_connected == 1) == 0
+          and count(dlw_executors_count{status="healthy"}) > 0
+        for: 2m
+        labels: {severity: page, category: availability}
+        annotations:
+          summary: "All executors lost WSS connection but heartbeats still active"
+
+      - alert: CredentialPool401Surge
+        # 单 alias 401 率激增 → 凭证可能被外部 revoke
+        expr: |
+          rate(dlw_credential_auth_failures_total{status="401"}[10m]) > 0.05
+        for: 10m
+        labels: {severity: work-hours, category: security}
+        annotations:
+          summary: "Credential alias {{ $labels.alias }} 401 rate {{ $value | humanizePercentage }}"
+
+      - alert: RateLimitProbeBudgetExhausted
+        expr: |
+          dlw_rate_limit_probe_budget_remaining_bytes < 524288000   # < 500MB left
+        for: 5m
+        labels: {severity: ticket, category: capacity}
+        annotations:
+          summary: "Rate-limit probe daily budget < 500MB remaining"
+
+      - alert: RateLimitProbeLeaderLost
+        expr: dlw_rate_limit_probe_leader_present == 0
+        for: 10m
+        labels: {severity: ticket, category: availability}
+        annotations:
+          summary: "No probe leader elected; new probes blocked"
+
+      # Multipart upload integrity
+      - alert: MultipartCompleteInvalidPart
+        expr: rate(dlw_multipart_complete_invalid_part_total[15m]) > 0
+        for: 5m
+        labels: {severity: work-hours, category: integrity}
+        annotations:
+          summary: "S3 CompleteMultipartUpload InvalidPart errors detected"
+          description: "Possible part_number race; check DIST-V21-02 fence"
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-MP-INTEGRITY
+
+      - alert: WSSPushEpochMismatchHighRate
+        expr: rate(dlw_ws_push_epoch_mismatch_total[10m]) > 0.01
+        for: 10m
+        labels: {severity: ticket, category: integrity}
+        annotations:
+          summary: "WSS push epoch mismatch > 1%; possible stale ws_session leak"
