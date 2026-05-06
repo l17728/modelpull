@@ -637,7 +637,85 @@ Tag release:
 
 ---
 
-## 10. 失败的处理
+## 10. 自适应下载优化测试（v2.1 引入；详见 [13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)）
+
+> 测试核心：决策正确性 + makespan 改进 + 稳定性。需要可控速度注入 fixture（`SourceSpeedHarness`）。
+
+### 10.1 决策正确性 unit（~20）
+
+| ID | 测试 |
+|----|------|
+| U-ADO-001 | 已下 95% 时不切换（不变量 20）：即使新方案速度 10x，仍保持当前 |
+| U-ADO-002 | Cooldown 60s 内不重新决策同一文件（不变量 21） |
+| U-ADO-003 | 切换收益 < 15% 时返回 None（threshold 检查） |
+| U-ADO-004 | hysteresis：速度跌至 30% 但仅持续 10s → 不触发；持续 15s+ → 触发 |
+| U-ADO-005 | 子分片：file_size < 5MB × k → 拒绝（S3 part 最小约束） |
+| U-ADO-006 | 子分片：part 数 > 10000 → 拒绝（S3 总数约束） |
+| U-ADO-007 | 子分片：storage backend = local FS → 不允许（不变量 22） |
+| U-ADO-008 | 子分片：storage backend = S3 → 允许 |
+| U-ADO-009 | 子分片：part_number 在重新分配后保持不变（不变量 26） |
+| U-ADO-010 | LP 求解超时 5s → fallback fast path（不变量 25） |
+| U-ADO-011 | 触发条件覆盖：周期 / executor 状态变 / source 状态变 / user replan |
+| U-ADO-012 | optimizer_frozen=true 任务被 PlanOptimizer 跳过 |
+| U-ADO-013 | 决策审计：每次决策都写 optimization_decisions 表 |
+| U-ADO-014 | parent subtask 状态机：split → verifying_remote → verified |
+| U-ADO-015 | child subtask 全完成后 parent 自动 trigger CompleteMultipartUpload |
+| U-ADO-016 | child crash → reclaim → 新 executor 用同 part_number 重传，S3 last-write-wins |
+| U-ADO-017 | actual_savings 与 expected_savings 偏差正确记录 |
+| U-ADO-018 | 跨任务调度场景：v2.1 不会跨任务考虑（不变量 24） |
+
+### 10.2 集成测试 with 速度注入（~10）
+
+`SourceSpeedHarness`：可在测试中注入 `(executor, source) → speed` 矩阵随时间变化。
+
+| ID | 场景 |
+|----|------|
+| I-ADO-001 | 启动后 source 突变 → optimizer 30s 内反应 |
+| I-ADO-002 | 多源场景：HF Mirror 限流 → 优化器把剩余字节迁到 ModelScope |
+| I-ADO-003 | 单大文件慢 + 闲置 executor → 触发子分片 |
+| I-ADO-004 | 子分片完成后 CompleteMultipartUpload 成功 |
+| I-ADO-005 | 子分片中途 1 个 child crash → 重新分配同 part_number 给 healthy executor |
+| I-ADO-006 | Controller crash 期间多个 multipart 进行中 → 启动恢复正确接管 |
+| I-ADO-007 | 用户调用 /api/tasks/{id}/replan → optimizer 立即触发（不等周期） |
+| I-ADO-008 | optimizer_frozen task 即使瓶颈也不动 |
+| I-ADO-009 | LP solver 超时 → fallback 与 fast path 结果一致 |
+| I-ADO-010 | optimization_decisions 表 30 天 TTL + parquet 归档 |
+
+### 10.3 端到端 makespan 改进（~5）
+
+每个 case 用 `SourceSpeedHarness` 制造场景，对比 v2.0（反应式）vs v2.1（运筹）的总耗时。
+
+| ID | 场景描述 | 期望 |
+|----|--------|------|
+| E2E-ADO-001 | 5 个 17GB 文件 + HF 中途 429 + ModelScope 健康 | v2.1 makespan ≤ v2.0 × 0.6 |
+| E2E-ADO-002 | 单 100GB 文件 + 10 个 executor + 子分片到 8 路 | makespan ≤ 单 executor × 0.2 |
+| E2E-ADO-003 | 50 个小文件（<100MB）+ 多源不稳 | makespan ≤ v2.0 × 0.8（小文件子分片收益小） |
+| E2E-ADO-004 | 任务进行中 add 新 executor → optimizer 利用之 | 新 executor 加入 60s 内承担工作 |
+| E2E-ADO-005 | 任务进行中 1 个 source 全断 → 仅剩 1 源时不再切换 | 不进入抖动；继续单源完成 |
+
+### 10.4 稳定性 / chaos（~5）
+
+| ID | 注入 | 验证 |
+|----|------|------|
+| ADO-CHAOS-001 | 随机 ±50% 速度抖动持续 10 分钟 | 单文件切换次数 < 3 |
+| ADO-CHAOS-002 | optimizer 异常抛错 | 任务继续按当前分配跑（不阻塞） |
+| ADO-CHAOS-003 | optimization_decisions 表写入失败 | 决策仍 apply（审计 best-effort） |
+| ADO-CHAOS-004 | 100 个并发任务同时 replan | controller CPU 不爆（< 80%） |
+| ADO-CHAOS-005 | 极端：所有 source 都 throttled | optimizer 不进入死循环；任务进 paused_external |
+
+### 10.5 算法决策 review（人工）
+
+每月 sample 10 个真实任务的 `optimization_decisions` 序列，人工 review：
+
+- 决策是否合理？
+- expected vs actual 偏差是否可解释？
+- 是否有"应切换但没切"或"不该切但切了"的 case？
+
+发现系统性偏差 → 算法迭代 ticket。
+
+---
+
+## 11. 失败的处理
 
 ```
 单元测试失败 → block merge
@@ -653,7 +731,7 @@ AI eval 整体通过率 < 80% → block release（视为系统性退化）
 
 ---
 
-## 11. 与其他文档的链接
+## 12. 与其他文档的链接
 
 - 不变量编号：→ [01-architecture.md](./01-architecture.md) §7
 - 协议测试场景：→ [02-protocol.md](./02-protocol.md)
@@ -661,4 +739,5 @@ AI eval 整体通过率 < 80% → block release（视为系统性退化）
 - 安全测试映射：→ [04-security-and-tenancy.md](./04-security-and-tenancy.md)
 - 多源测试：→ [06-platform-and-ecosystem.md](./06-platform-and-ecosystem.md) §8
 - AI Copilot 设计：→ [12-ai-copilot.md](./12-ai-copilot.md)
+- 自适应下载优化设计：→ [13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)
 - Phase 计划：→ [08-mvp-roadmap.md](./08-mvp-roadmap.md)

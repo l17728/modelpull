@@ -41,6 +41,7 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 | **[10-frontend-wireframes.md](./10-frontend-wireframes.md)** | 9 个核心页面 wireframe + Vue3/Pinia 组件设计 | 前端 / UI |
 | **[11-cli-and-sdk-spec.md](./11-cli-and-sdk-spec.md)** | `dlw` CLI + Python SDK 完整规范 | CLI/SDK / 文档作者 / 用户 |
 | **[12-ai-copilot.md](./12-ai-copilot.md)** | AI Copilot 嵌入式聊天 + 无头 Agent + MCP 工具（v2.1 first-class） | AI/产品 / 后端 / 前端 / 安全 |
+| **[13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)** | 在线运筹优化：成本建模 / 子分片 / S3 multipart 多 executor 协作（v2.1） | 调度 / 后端 / 算法 |
 | **[../../api/openapi.yaml](../../api/openapi.yaml)** | 完整 OpenAPI 3.1 spec（可生成 client） | 前端 / SDK / QA |
 
 ### 部署物料（生产可用）
@@ -134,3 +135,4 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 | 2026-04-28 | v2.0.2 | 加入 deploy/（Helm + Prometheus + Grafana + Runbook 脚本）|
 | 2026-04-28 | v2.0.3 | 上线 GitHub 仓库 l17728/modelpull；加入 CI workflow（8 jobs 全绿）+ Issue/PR 模板 + CONTRIBUTING.md |
 | 2026-05-06 | v2.0.4 | 加入 12-ai-copilot.md（嵌入式 AI 聊天 + Claude/OpenCode headless + MCP 工具）；07 §9 新增 AI 测试矩阵（unit 80 / mock-LLM 50 / LLM-as-judge 30 / 安全注入 20 / 性能 6）；不变量 15-19 |
+| 2026-05-06 | v2.0.5 | 加入 13-adaptive-download-optimization.md（在线运筹优化 + 子分片 + S3 multipart 多 executor 协作）；不变量 20-26；06 §1.8 标记为反应式 baseline，被 13 替代 |

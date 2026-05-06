@@ -376,6 +376,9 @@ def _solve_optimal_combination(matrix, files, sources) -> SourceCombination:
 
 #### 阶段 B：下载中持续校准（task=downloading 时）
 
+> ⚠️ **本节是 v2.0 的反应式简化版**。v2.1 升级为完整的运筹优化（含成本建模 / 子分片 / 多 executor 协作上传），详见 **[13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)**。
+> 本节策略仅作为 v2.0 GA 的 baseline，被 v2.1 替换。
+
 启动后每 60 秒：
 
 1. 把已完成 chunk 的实际速度（`bytes_done / duration`）写回 `source_speed_samples` + EWMA

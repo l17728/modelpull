@@ -661,6 +661,13 @@ CREATE TABLE quota_snapshots (
 | 17 | AI 写操作必须用户 confirm；read-only 工具可免确认 | 协议测试 U-AI-T-005 |
 | 18 | LLM token 配额与下载流量配额隔离 | quota 单测 I-AI-Q-001 |
 | 19 | 网络查询工具的输出必须 sanitize 后才进 LLM context（含来源标记 + 注入检测） | 安全测试 U-AI-S-001..010 |
+| 20 | 已下载字节默认不参与重新规划（除非该文件成为 makespan 瓶颈或切换收益 ≥50%）（详见 13 §2.1） | 决策回放 + chaos 测试 |
+| 21 | 优化决策必须有 hysteresis：触发 30%/15s + 解除 70%/30s + cooldown 60s/file | 抖动测试 ADO-CHAOS-* |
+| 22 | 子分片必须满足 S3 multipart 约束（part 5MB-5GB，总数 ≤10000）；非 S3 backend 禁用 | 配置加载校验 + 单测 |
+| 23 | 每次重新规划写 `optimization_decisions` 表（输入 + 决策 + 预期 + 实际） | DB 单测 |
+| 24 | v2.1 单任务最优化；跨任务全局调度延后到 v2.2 | scope 限制 |
+| 25 | 单次决策 ≤ 5s（超时回退 fast path 启发式） | 性能基线 |
+| 26 | sub-chunk 的 `s3_part_number` 在 multipart 内唯一且稳定（即使 reassign） | 恢复测试 |
 
 ---
 
