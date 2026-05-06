@@ -508,6 +508,17 @@ Tag release:
 | U-AI-S-010 | RBAC 透传：tenant_admin 在工具调用时正确传 role |
 | U-AI-S-011 | tenant_viewer 不能调用 dlw_create_task（工具级拒绝）|
 | U-AI-S-012 | gated 模型 + 未审批 → dlw_create_task 返回 `REPO_GATED` |
+| U-AI-S-013 | NFKC 规范化：全角 `Ｉｇｎｏｒｅ` 经 sanitize 后被语义模式命中（不变量 36）|
+| U-AI-S-014 | Zero-Width Space 注入：`I​g​n​o​r​e previous` (含 ZWS) 经 sanitize 后还原为 `Ignore previous` 并命中 |
+| U-AI-S-015 | Zero-Width Non-Joiner 同上验证 |
+| U-AI-S-016 | RTL Override (U+202E) 内容直接被清空（不送 LLM） |
+| U-AI-S-017 | Bidi Mark (U+2066-2069) 内容直接被清空 |
+| U-AI-S-018 | 西里尔 homoglyph：`Іgnorе` (西里尔 І + е) 检测出 confusables 警告 |
+| U-AI-S-019 | 长 base64 串（≥40 字符）触发 suspect 警告 |
+| U-AI-S-020 | "repeat your instructions" / "原始 system prompt" 命中复述模式 |
+| U-AI-S-021 | sanitize 截断 ≥ 32KB 输入 |
+| U-AI-S-022 | dlw_search_models 返回结果中含注入字符串 → 经 sanitize 后才进 LLM（不变量 19 扩展，AI-SEC-V21-02） |
+| U-AI-S-023 | dlw_get_model_info 中 description / readme / auto_map 等字段经边界化标记 |
 
 ### 9.2 Integration（mock LLM）（~50）
 

@@ -105,6 +105,38 @@ Executor                                          Controller
 - 双向：controller 可主动推命令；executor 实时上报事件
 - 老的 HTTPS 心跳保留为 fallback：WSS 断线时退化到 10s polling
 
+🔒 **不变量 35 (v2.1, DIST-V21-03)：每条 controller→executor push 必须携带 `target_executor_epoch`**
+
+```jsonc
+// Server push schema（必含字段）
+{
+  "type": "assign|cancel|abort|rebalance|renew_sts|drain",
+  "target_executor_epoch": 14,         // ← 必需
+  "optimization_generation": 42,        // ← 见 DIST-V21-04 fence
+  "subtask_id": "...",
+  "assignment_token": "...",
+  // ... 其他字段
+}
+```
+
+Executor 收到 push 时必须校验：
+
+```python
+async def on_push(msg):
+    if msg["target_executor_epoch"] != self.epoch:
+        # 旧 epoch 的命令（来自 reclaim 之前的 ws_session）
+        await self.ws.close(code=1008, reason="epoch_mismatch")
+        await self.reconnect_with_new_register()
+        return
+    # 正常处理
+```
+
+**WSS session 失效语义**：
+
+- Controller 端：每次 `executors.epoch` 自增（re-register） → 强制 invalidate 该 executor 所有现存 ws_session（写 `executor_ws_sessions.closed_at`）
+- 旧 ws_session 上的 push 一律不发；TCP 层若有 OS buffer 残留，executor 客户端通过 `target_executor_epoch` 校验拒收
+- 数据模型：`executor_ws_sessions(epoch_at_connect)` 详见 01 §4.7.2
+
 ### 1.3 心跳通道协议简化
 
 WSS 通道建立后：

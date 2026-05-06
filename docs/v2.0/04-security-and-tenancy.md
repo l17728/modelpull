@@ -157,7 +157,8 @@ Executor 之间不通信。Controller 也不主动反向连 Executor。
 
 ### 3.1 HF Token：Reverse Proxy（解决 SEC-02）
 
-🔒 **不变量 2**：HF Token 永不离开 Controller。
+🔒 **不变量 2**：**Tenant-级** HF Token（`tenants.hf_tokens`）永不离开 Controller。
+> 例外（v2.1）：Executor 可通过本地凭证池持有 OOB 私有 HF Token 用于绕 HF per-user 限速。这是**独立凭证体系**：（a）不入 Controller DB；（b）作用域仅本机；（c）与 tenant-级 reverse-proxy token 不互相替代；（d）独立 lint 类别防混用。详见 14 §3.1 与不变量 30。
 
 **实现**：
 

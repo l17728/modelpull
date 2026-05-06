@@ -65,16 +65,30 @@ A(t)[f]                                 文件 f 当前的执行器分配（可�
 
 ### 1.2 决策变量
 
+> ⚠️ **v2.1 修订（OR-V21-02）**：原版本 `Plans(f)` 是所有 byte-range 切分组合，规模 ~2^chunks，**指数级**，LP 不可直接展开。修订为**离散预生成 plan 集合**。
+
 ```
 x[f, e, s, plan] ∈ {0, 1}     是否把文件 f 的 plan（分片方案）分给 (e, s)
-plan ∈ Plans(f)                 文件 f 的可行分片方案集
+plan ∈ Plans(f)                 文件 f 的可行分片方案集（离散，预生成）
 ```
 
-`Plans(f)` 是文件 f 的所有合法切分方式：
+`Plans(f)` **限定为离散小集合**：
 
-- `single`：完整文件分给 1 个 (executor, source)
-- `split(k)`：切成 k 个 sub-chunk，分给 k 个 (executor, source)
-- 受 §5.3 约束：sub-chunk size ∈ [5MB, 5GB]，部件数 ≤ 10000（S3 限制）
+```python
+def enumerate_plans(file: File, storage: StorageBackend) -> list[Plan]:
+    plans = [Plan(k=1, mode="single")]                    # 总有 single
+    if storage.is_s3_compatible() and file.size >= 100 * 1024 * 1024:
+        for k in [2, 3, 4, 8]:                            # 离散候选
+            sub_size = file.size / k
+            if 5 * MB <= sub_size <= 5 * GB and k <= 10000:
+                plans.append(Plan(k=k, mode="split"))
+    return plans
+```
+
+**总变量数上界**：`|F| × |E| × |S| × |Plans| ≤ N × M × K × 5`。100 文件 × 10 executor × 3 source × 5 plan = **15,000 变量**，对 LP solver（CBC / linprog）规模可接受。
+
+> 📝 **决策**：放弃在 §1.3 的 LP 中展开任意切分方式；接受 plan 离散化的"近似最优"代价。实测表明 k ∈ {1,2,3,4,8} 已覆盖 ≥ 95% 真实场景的最优 k 选择。
+> 如需更精细：v2.2 用 column generation 按需展开（详见 §11 roadmap）。
 
 ### 1.3 目标函数
 
@@ -101,12 +115,23 @@ minimize  max over executors e:
 
 ```
 switch_cost(f, old, new) =
-  P[f] × switch_loss_factor
-  where switch_loss_factor:
-    1.0   # 不同 executor → 已下字节作废
-    0.0   # 同一 executor 仅切换 source（很罕见）
-    1.0   # 同一 executor 但切了 chunk plan（split）→ 也作废
+  P[f] × switch_loss_factor(scenario)
 ```
+
+> ⚠️ **v2.1 修订（OR-V21-06）**：原版本 `switch_loss_factor=1.0` 过度悲观。HTTP Range request 支持 byte-offset 续传，S3 multipart 已上传 part 不丢；只有非 S3 backend 全局重做。
+
+**分场景 loss_factor**：
+
+| 场景 | factor | 说明 |
+|------|--------|------|
+| **S3 backend + Range 支持源 + 部分 part 已 uploaded** | `0.0` | 已 upload 的 part 保留；新 executor 只下未 uploaded 部分 |
+| **S3 backend + Range 支持源 + 当前 chunk 进度 < 一个 part 大小** | `P_unflushed / P[f]` | 仅丢失"未 flush 到 S3 part"的字节 |
+| **S3 backend + 不支持 Range 的源**（罕见，例如不支持 byte-range 的 mirror） | `1.0` | 必须重下整段 |
+| **NFS / local backend**（无 multipart） | `1.0` | 单 executor 拼装；切 executor = 全丢 |
+| **同 executor 仅切 source（保留 .parts/）** | `0.0` | 续传到现有文件偏移 |
+| **plan 改变（k 路 split）** | `1.0` 但仅对当前 executor 已下载部分 | k=1 → k=4 时已下数据需要重组成 part 提交，简化为重下 |
+
+**优化**：v2.1 实现可保守用 `0.0 / 0.5 / 1.0` 三档；`P_unflushed/P` 精度依赖 executor 上报的 last-flushed offset，复杂度高，留 v2.2。
 
 **带切换成本的目标函数**：
 
@@ -114,7 +139,9 @@ switch_cost(f, old, new) =
 minimize  makespan(t+Δ)  +  α × Σ over switched files: switch_cost(f, old, new) / V_avg
 ```
 
-`α` 是惩罚因子（默认 1.5）：让"重新下载浪费的时间"也算入完成时间，防止激进切换。
+`α` 是惩罚因子（默认 1.0）—— 单位转换：让等价时间损失 1:1 计入完成时间。> 1 是"惩罚切换"的 risk-aversion，v2.1 chaos 测试反推合理范围（OR-V21-05 修复）。
+
+（旧的"带切换成本的目标函数"段落已合并到 §1.4 上方。）
 
 ---
 
@@ -555,6 +582,13 @@ Controller 决定切分: k=3, byte ranges & part numbers
    - executor-2: bytes [1GB..2GB),  part_number=2
    - executor-3: bytes [2GB..3GB),  part_number=3
 
+🔒 不变量 32 (v2.1, DIST-V21-01):
+   Controller MUST persist (file_subtasks.multipart_upload_id, multipart_initiator_epoch)
+   to PG and COMMIT **before** sending assignments to executors.
+   This is the same "CAS-then-enqueue" pattern as 03 §2.3.
+
+Controller --[INSERT INTO file_subtasks ... multipart_upload_id=abc... ]--> PG
+Controller --[COMMIT]--> PG                   ← 必须先 commit
 Controller --[heartbeat response: subtask assignments + multipart_upload_id]--> Executors
 
 ─────────── Phase 2: Parallel download + upload ───────────
@@ -619,23 +653,54 @@ S3 multipart 协议：
 
 **Controller crash 后恢复（衔接 03 §3）**：
 
-`recovery_routine` 已有"清理孤儿 multipart"逻辑。多 executor 多 part 情形下：
+`recovery_routine` 已有"清理孤儿 multipart"逻辑。多 executor 多 part 情形下，启动时强制走"recovery 屏障"：
 
-1. 启动时扫描所有 status=`split` 或含 `multipart_upload_id` 的 subtask
-2. 检查 S3 上 upload_id 的 part 列表
-3. 状态对账：DB 标 part_uploaded 但 S3 没收到 → 重新分配该 part；DB 没记录但 S3 有 → 记入 DB
-4. 若 parts 集齐 → 调 `s3:CompleteMultipartUpload`
-5. 24h 未完成 → abort 整个 multipart upload
+🔒 **不变量 33 (v2.1, DIST-V21-08)**：standby 提升后**先**进入 `recovery_in_progress=true`，**所有**心跳响应返回 `503 RECOVERY_IN_PROGRESS`，executor 收到后暂停 in-flight UploadPart（保留 .parts/ 不丢），直到对账完成方解除。
+
+详细对账步骤：
+
+1. 扫描 DB 所有 `multipart_upload_id IS NOT NULL AND status NOT IN (verified, failed_permanent, cancelled)` 的 subtask
+2. **同时扫 S3**：调 `s3:ListMultipartUploads(bucket, prefix)` 拿到该 bucket 所有未完成 multipart upload
+3. **三向对账**（DB ↔ S3 ↔ 各 executor 心跳上报）：
+   - DB 有 upload_id 但 S3 没 → 视为 controller crash 前未真正成功发起；重 CreateMultipartUpload，刷新 DB
+   - S3 有 upload_id 但 DB 没（孤儿）→ 调 `s3:AbortMultipartUpload` 清理
+   - 双方都有 → 进入 part 级对账
+4. **Part 级对账**：对每个 (upload_id, part_number)：
+   - `s3:ListParts(upload_id)` 拿到 S3 端真实 ETag 集合
+   - 与 DB 中 `file_subtasks.s3_etag` 对比
+   - DB 有但 S3 没 → 该 part 重新分配
+   - S3 有但 DB 没 → 该 part 记入 DB（接受 S3 真相）
+   - 双方都有但 ETag 不同 → 以 S3 为准（最新 PUT 胜出，DIST-V21-02 边界）
+5. 若 parts 集齐 → 调 `s3:CompleteMultipartUpload`，**Complete 之前必须先调 `s3:ListParts` 二次确认 ETag 集合与 Complete 提交一致**
+6. 24h 未完成 → abort 整个 multipart upload
+7. 解除 `recovery_in_progress`，开始正常接受心跳
 
 **Executor crash**（仅一个子任务执行器挂）：
 
+⚠️ **DIST-V21-02 修正**：v2.0 设想"S3 last-write-wins on PartNumber"在 split-brain 边界下不安全 —— 旧 executor 的 TCP 流可能在 reclaim 之后才到达 S3，导致 controller 已记录的 ETag 与 S3 端最终 ETag 不一致，`s3:CompleteMultipartUpload` 报 `InvalidPart`。
+
+**正确协议（v2.1 修订）**：
+
 1. Controller 检测到（心跳超时） → reclaim 该 executor 的 sub-chunk subtask
-2. 把这个 sub-chunk（具体 byte range + part_number）重新分配给其他 executor
-3. 新 executor 用同一个 `multipart_upload_id`、同一个 `part_number` 上传 → S3 自动覆盖（last-writer-wins on PartNumber）
+2. **Bump part_number**：把原 `part_number=N` 改为 `part_number=N + 1000`（或 N + 1000×reclaim_count），保留旧 part 为孤儿
+3. 把 sub-chunk 重新分配给其他 executor，使用 **新 part_number** + 同一个 `multipart_upload_id`
+4. Controller DB 中 `file_subtasks.s3_part_number` 更新为新值；旧值废弃但保留为 audit
+5. **Complete 前**：调 `s3:ListParts(upload_id)` 拿真实 part 列表 → 仅取 DB 中"current part_number"对应的 part → 提交 `CompleteMultipartUpload(parts=[{N+1000, ETag_new}, ...])`
+6. 旧的 part_number=N（如果旧 executor 最终上传成功）成为孤儿，不影响 Complete；24h 后由 lifecycle 清理或 abort 单个 part 不可（S3 限制）→ 接受为孤儿，最终 abort 整个 multipart 时被一并清理
 
-🔒 **不变量 26：sub-chunk 的 `part_number` 在 multipart_upload 内唯一且稳定**
+🔒 **不变量 26（修订 v2.1）**：sub-chunk 的 `part_number` 在 multipart_upload 内**首次分配后稳定，仅在 reclaim 时 bump**。
 
-即使 reassign 给新 executor，part_number 不变。这保证了重传不会破坏 part 顺序。
+🔒 **不变量 34 (v2.1, DIST-V21-02)**：`s3:CompleteMultipartUpload` 调用前必须执行：
+```python
+s3_parts = s3.list_parts(upload_id).Parts        # 真实 ETag
+db_parts = db.fetch_current_part_etags(subtask_parent_id)  # 当前期望
+parts_to_complete = [
+    {"PartNumber": p.PartNumber, "ETag": p.ETag}
+    for p in s3_parts
+    if (p.PartNumber, p.ETag) in db_parts        # 严格匹配
+]
+assert len(parts_to_complete) == expected_part_count, "ETag mismatch — abort and retry"
+```
 
 ### 5.5 非 S3 backend：退化模式
 
@@ -815,11 +880,14 @@ CREATE INDEX idx_opt_decision_task ON optimization_decisions(task_id, triggered_
 
 ### 9.1 Controller CPU
 
-PlanOptimizer 周期 CPU 占用：
+PlanOptimizer 周期 CPU 占用（v2.1 修订）：
 
-- Fast path：O(N × M × K)，N 文件 × M executor × K source。100 文件 × 10 executor × 3 source = 3000 ops，<10ms
-- Slow path（LP）：O(N × M × K) 变量 + 约束；linprog 通常 <2s for 这个规模
-- 实测 CPU 上限：单 controller 可同时管理 ~50 个 active task
+- **Fast path**：O(N × M × K × |Plans|)。N 文件 × M executor × K source × 5 plan 候选 = 100 × 10 × 3 × 5 = **15,000 ops**，预计 < 50ms
+- **Slow path（LP）**：变量数同上 ~15K，约束数 O(M + K + N)；CBC / linprog 实测 <3s（含模型构建 + presolve + simplex），5s 超时阈值留 67% 缓冲
+- **慢路径降级**：连续 N 次超时 → 自动改 LP 松弛（去整数约束）保证 anytime 解（OR-V21-03 修复）
+- **实测 CPU 上限**：单 controller 可同时管理 ~50 个 active task。超过则建议多 controller 按 tenant 分片（详见 v2.2 roadmap）
+
+🔒 **不变量 38 (v2.1, OR-V21-03)**：slow path 连续超时 ≥ 3 次 → 自动降级为 LP 松弛 + 1s anytime cutoff，永远返回 best feasible 解，不让"slow path 超时 → 无脑回退 fast path"成为永久状态。
 
 如果 active task > 50：考虑分片（按 task_id hash 到多 controller，但这就到 v2.2 横向扩展了）。
 

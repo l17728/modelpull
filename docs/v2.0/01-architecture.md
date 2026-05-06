@@ -117,8 +117,10 @@
 🔒 **不变量 1：UI 永不直连 HuggingFace API**
 v1.0 中 UI 与 Controller 都可能调 HF API，安全模型不清晰。v2.0 只允许 Controller 调用，UI 仅通过 `/api/models/search` 间接搜索。
 
-🔒 **不变量 2：HF Token 不离开 Controller**
-v1.0 中 HF Token 在心跳响应里下发到 Executor。v2.0 中 Controller 作为 reverse-proxy（详见 04-security §3.1），Executor 通过 `https://controller/hf-proxy/...` 走代理，永不持有 HF Token 明文。
+🔒 **不变量 2：Tenant-级 HF Token 不离开 Controller**
+v1.0 中 HF Token 在心跳响应里下发到 Executor。v2.0 中 Controller 作为 reverse-proxy（详见 04-security §3.1），Executor 通过 `https://controller/hf-proxy/...` 走代理，永不持有 tenant-级 HF Token 明文。
+
+> ⚠️ **不变量 2 例外**（v2.1 引入）：Executor 可通过本地凭证池（14 §3.2）持有 OOB 的私有 HF Token（`hf_user_team_a` 等）用于绕 HF per-user 限速；此类 token 范围仅本机有效、不入 Controller DB、与 tenants.hf_tokens（reverse-proxy 用）是**两套独立凭证体系**。详见 04 §3.1 与 14 §3.1。
 
 🔒 **不变量 3：Executor 不直接持有长期对象存储凭证**
 S3 / OBS 凭证由 Controller 用 `sts:AssumeRole` 换为 1h TTL 临时凭证下发，过期主动续签。
@@ -252,6 +254,36 @@ S3 / OBS 凭证由 Controller 用 `sts:AssumeRole` 换为 1h TTL 临时凭证下
 - ✅ 新增 `paused_external` 状态（HF/S3 全局降级时不进 failed，详见 03 §8）
 - ✅ 新增 `paused_disk_full` 状态（ENOSPC 不当作可重试，详见 03 §3.7）
 
+#### 3.2.1 子分片 parent / children 拓扑（v2.1，来自 13 §5.2）
+
+> v2.1 引入子分片：单个文件可切成多个 sub-chunk，由不同 executor 分别下载并以 S3 multipart upload 各自上传。
+
+**两类 subtask**：
+
+| 类别 | `parent_subtask_id` | 含义 |
+|------|--------------------|----|
+| Parent (协调实体) | NULL | 文件级；负责发起 multipart + Complete |
+| Child (实际下载) | 指向 parent | 单个 byte range；行为同普通 subtask 单 chunk |
+
+**Parent 状态机扩展**（仅 v2.1 子分片场景生效）：
+
+```
+   pending ──► split ──► verifying_remote ──► verified
+                  │              │
+                  │              └─ S3 ChecksumSHA256 失败 ──► failed_permanent
+                  │
+                  └─ 任一 child failed_permanent ──► failed_permanent
+```
+
+**关键转换语义**：
+
+- `pending → split`：optimizer 决定切 k 路；创建 k 个 child + 1 个 multipart_upload_id；写 DB commit 后才 enqueue（不变量 32，详见 03 §5）
+- `split → verifying_remote`：所有 child `verified` 后触发；parent 调 `s3:CompleteMultipartUpload`
+- `verifying_remote → verified`：远端 ChecksumSHA256 与 expected_sha256 匹配
+- Child 行为：照常 `pending → assigned → downloading → verifying_local → uploading → verified`，但 uploading 调用的是 `s3:UploadPart` 而非 PutObject
+
+**Child 失败的传播**：单个 child `failed_permanent` 立即把 parent 推到 `failed_permanent`，并触发 `s3:AbortMultipartUpload` 清理已上传 part。
+
 🔒 **不变量 6**：`assigned` → `downloading` 必须携带 `assignment_token`（详见 03 §2），否则 controller 拒绝。这是防双发的核心。
 
 ### 3.3 节点健康状态机（ExecutorProfile.status）
@@ -328,7 +360,55 @@ illegal_transitions: # 必须 CI 断言为不可达
   - {from: cancelled, to: ANY}
 ```
 
-`subtasks.yaml` / `executors.yaml` 同样格式。CI 中 `pytest tests/test_state_machine.py` 必须断言所有不在 `transitions` 列表的跃迁都被实现拒绝。
+```yaml
+# subtasks.yaml — 子任务状态机（含 v2.1 split 扩展）
+state_machine: file_subtask
+states:
+  - pending
+  - assigned
+  - downloading
+  - verifying_local
+  - uploading
+  - verifying_remote
+  - verified              # terminal-success
+  - failed_permanent      # terminal
+  - paused_external
+  - paused_disk_full
+  - cancelling
+  - cancelled             # terminal
+  # v2.1 子分片 parent 专属（child 不会进入此状态）
+  - split                 # parent: 已切 k 路，等待 children 全 verified
+
+terminal: [verified, failed_permanent, cancelled]
+
+transitions:
+  # 单 chunk subtask（行为同 v2.0）
+  - {from: pending,           to: assigned,         on: scheduler.cas_assign}
+  - {from: assigned,          to: downloading,      on: executor.start_download}
+  - {from: downloading,       to: verifying_local,  on: bytes_complete}
+  - {from: verifying_local,   to: uploading,        on: local_sha_match}
+  - {from: uploading,         to: verifying_remote, on: multipart_complete}
+  - {from: verifying_remote,  to: verified,         on: remote_checksum_match}
+  # v2.1 子分片：parent 状态
+  - {from: pending,           to: split,            on: optimizer.subdivide,        applies_to: parent_subtask}
+  - {from: split,             to: verifying_remote, on: all_children.verified,      applies_to: parent_subtask}
+  - {from: split,             to: failed_permanent, on: any_child.failed_permanent, applies_to: parent_subtask}
+  # 失败 / 降级路径
+  - {from: '*',               to: paused_external,  on: source_circuit_open}
+  - {from: '{downloading,uploading}', to: paused_disk_full, on: enospc}
+  - {from: '*',               to: failed_permanent, on: license_or_auth_permanent_error}
+  - {from: '*',               to: cancelling,       on: user.cancel}
+  - {from: cancelling,        to: cancelled,        on: chunk_handled}
+
+illegal_transitions:
+  - {from: verified,          to: ANY}
+  - {from: failed_permanent,  to: ANY}
+  - {from: cancelled,         to: ANY}
+  # split 状态仅 parent 可入；child 入 split 视为非法
+  - {from: ANY, to: split, applies_to: child_subtask}
+```
+
+`executors.yaml` 同样格式。CI 中 `pytest tests/test_state_machine.py` 必须断言所有不在 `transitions` 列表的跃迁都被实现拒绝。
 
 ---
 
@@ -534,6 +614,165 @@ CREATE TABLE quota_snapshots (
 - `file_subtasks.local_path` —— 改为 executor 本地 .parts/ 目录的运行时变量，不持久化到 DB
 - `file_subtasks.transferring` 状态 —— 与 `uploading` 二选一，统一为 `uploading`
 
+### 4.7 v2.1 数据模型扩展（权威同步）
+
+> 本节是 12/13/14 章引入的所有新表与 ALTER 的**单一权威汇总**。
+> 不变量 8（业务表必须有 tenant_id）适用于全部新表。
+
+#### 4.7.1 子任务扩展（来自 13 §5.2）
+
+```sql
+ALTER TABLE file_subtasks ADD COLUMN parent_subtask_id UUID REFERENCES file_subtasks(id);
+ALTER TABLE file_subtasks ADD COLUMN s3_part_number INT;          -- v2.1; 不变量 26
+ALTER TABLE file_subtasks ADD COLUMN byte_range_start BIGINT;
+ALTER TABLE file_subtasks ADD COLUMN byte_range_end BIGINT;       -- inclusive
+ALTER TABLE file_subtasks ADD COLUMN s3_etag VARCHAR(128);
+ALTER TABLE file_subtasks ADD COLUMN multipart_initiator_epoch BIGINT;  -- 防 standby 接管时双 upload_id
+ALTER TABLE file_subtasks ADD COLUMN optimization_generation BIGINT NOT NULL DEFAULT 0;  -- DIST-V21-04 fence
+
+CREATE INDEX idx_subtask_parent ON file_subtasks(parent_subtask_id) WHERE parent_subtask_id IS NOT NULL;
+```
+
+#### 4.7.2 Executor 扩展（来自 13 §5.4 + 14 §3.3 + §4.2）
+
+```sql
+ALTER TABLE executors ADD COLUMN display_name VARCHAR(128);
+ALTER TABLE executors ADD COLUMN location VARCHAR(128);
+ALTER TABLE executors ADD COLUMN tags JSONB DEFAULT '[]';
+ALTER TABLE executors ADD COLUMN credential_pool JSONB DEFAULT '{}';
+-- credential_pool schema: {gateway_aliases:[...], hf_token_aliases:[...], s3_credential_aliases:[{alias, source_id}]}
+
+-- WSS session 表（DIST-V21-03 fence）
+CREATE TABLE executor_ws_sessions (
+    id              BIGSERIAL PRIMARY KEY,
+    executor_id     VARCHAR(64) NOT NULL REFERENCES executors(id) ON DELETE CASCADE,
+    epoch_at_connect BIGINT NOT NULL,
+    connected_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_ping_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at       TIMESTAMPTZ,
+    close_reason    VARCHAR(32)
+);
+CREATE INDEX idx_ws_sessions_active ON executor_ws_sessions(executor_id) WHERE closed_at IS NULL;
+```
+
+#### 4.7.3 Storage / Source 扩展（来自 14 §4.2 + §6.1）
+
+```sql
+ALTER TABLE storage_backends ADD COLUMN display_name VARCHAR(128);
+ALTER TABLE storage_backends ADD COLUMN destination_label VARCHAR(256);
+
+-- 任务级 ad-hoc source（v2.1 临时直连 S3 等场景）
+CREATE TABLE ad_hoc_sources (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       BIGINT NOT NULL REFERENCES tenants(id),
+    task_id         UUID NOT NULL REFERENCES download_tasks(id) ON DELETE CASCADE,
+    driver_type     VARCHAR(32) NOT NULL,        -- s3_direct
+    config_json     JSONB NOT NULL,               -- {bucket, prefix, region, credential_alias}
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ad_hoc_source_tenant ON ad_hoc_sources(tenant_id);
+```
+
+#### 4.7.4 优化决策审计（来自 13 §6.5）
+
+```sql
+CREATE TABLE optimization_decisions (
+    id              BIGSERIAL PRIMARY KEY,
+    tenant_id       BIGINT NOT NULL REFERENCES tenants(id),    -- 修复 X-CONS-05；不变量 8
+    task_id         UUID NOT NULL REFERENCES download_tasks(id),
+    triggered_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    trigger_reason  VARCHAR(64) NOT NULL,
+    state_snapshot  JSONB NOT NULL,
+    decision        JSONB NOT NULL,
+    expected_savings_seconds FLOAT,
+    actual_outcome  JSONB,                          -- 30s 后回填（near-term）
+    actual_savings_seconds FLOAT,                   -- near-term
+    final_savings_seconds FLOAT,                    -- 文件完成时回填（OR-V21-16）
+    evaluation_horizon VARCHAR(16),                 -- "30s" / "task_terminal"
+    optimization_generation BIGINT NOT NULL          -- 用于 DIST-V21-04 fence
+);
+CREATE INDEX idx_opt_decision_task ON optimization_decisions(task_id, triggered_at);
+CREATE INDEX idx_opt_decision_tenant ON optimization_decisions(tenant_id, triggered_at);
+```
+
+#### 4.7.5 限速探测（来自 14 §2.4）
+
+```sql
+CREATE TABLE rate_limit_probes (
+    id                    BIGSERIAL PRIMARY KEY,
+    tenant_id             BIGINT REFERENCES tenants(id),       -- 不变量 8（系统级探测可为 NULL）
+    target_host           VARCHAR(256) NOT NULL,
+    executor_ip_class     VARCHAR(64),
+    user_account_alias    VARCHAR(64),
+    connection_limited    BOOLEAN,
+    ip_limited            BOOLEAN,
+    user_limited          BOOLEAN,
+    per_conn_speed_bps    BIGINT,
+    per_ip_speed_bps      BIGINT,
+    per_user_speed_bps    BIGINT,
+    confidence            FLOAT,                                 -- 公式见 14 §2.4
+    measured_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at            TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_rl_probe_lookup ON rate_limit_probes(target_host, executor_ip_class, expires_at);
+
+-- 探测预算（集群级，DIST-V21-05）
+CREATE TABLE probe_budget (
+    day             DATE PRIMARY KEY,
+    bytes_used      BIGINT NOT NULL DEFAULT 0,
+    bytes_limit     BIGINT NOT NULL DEFAULT 5368709120  -- 5 GB
+);
+```
+
+#### 4.7.6 凭证使用日志（来自 14 §3.7）
+
+```sql
+CREATE TABLE credential_usage_log (
+    id              BIGSERIAL PRIMARY KEY,
+    tenant_id       BIGINT NOT NULL REFERENCES tenants(id),    -- 不变量 8
+    executor_id     VARCHAR(64) NOT NULL,
+    alias           VARCHAR(64) NOT NULL,
+    alias_type      VARCHAR(16) NOT NULL,                       -- gateway / hf_token / s3
+    subtask_id      UUID,
+    bytes_through   BIGINT NOT NULL DEFAULT 0,
+    auth_failures   INT NOT NULL DEFAULT 0,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at        TIMESTAMPTZ
+) PARTITION BY RANGE (started_at);                             -- ENT-QA-23 月分区
+
+CREATE INDEX idx_cred_log_tenant ON credential_usage_log(tenant_id, started_at);
+```
+
+#### 4.7.7 AI Copilot（来自 12 §5）
+
+```sql
+-- ai_conversations / ai_messages / ai_tool_calls / ai_token_usage
+-- 完整 schema 见 12 §5；本节仅强调 tenant_id 必备字段已正确包含
+-- 修订（X-AI-SEC-V21-06）：ai_messages 改为 ON DELETE RESTRICT 而非 CASCADE，
+-- 防止删 conversation 抹掉审计；archive 时仅保留 hash + redacted excerpt
+```
+
+#### 4.7.8 字段引入版本表（v2.1 增量）
+
+| 字段 / 表 | 引入版本 | 备注 |
+|---|---|---|
+| `file_subtasks.parent_subtask_id` | v2.1 | 子分片 parent / children 拓扑 |
+| `file_subtasks.s3_part_number` | v2.1 | S3 multipart；不变量 26 |
+| `file_subtasks.byte_range_start/end` | v2.1 | 子分片 byte 范围 |
+| `file_subtasks.s3_etag` | v2.1 | upload_part 返回 ETag |
+| `file_subtasks.multipart_initiator_epoch` | v2.1 | DIST-V21-01 fence |
+| `file_subtasks.optimization_generation` | v2.1 | DIST-V21-04 fence |
+| `executors.display_name / location / tags` | v2.1 | 别名系统 |
+| `executors.credential_pool` | v2.1 | alias 列表（不持 secret） |
+| `executor_ws_sessions` 表 | v2.1 | DIST-V21-03 WSS fence |
+| `storage_backends.display_name / destination_label` | v2.1 | 别名 |
+| `ad_hoc_sources` 表 | v2.1 | task-scoped 临时 source |
+| `optimization_decisions` 表 | v2.1 | 不变量 23 |
+| `rate_limit_probes` 表 | v2.1 | 限速画像 |
+| `probe_budget` 表 | v2.1 | 集群级探测预算 |
+| `credential_usage_log` 表 | v2.1 | 凭证审计 |
+| `ai_conversations / ai_messages / ai_tool_calls / ai_token_usage` 表 | v2.1 | AI Copilot |
+
 ---
 
 ## 5. 模块职责边界
@@ -643,7 +882,7 @@ CREATE TABLE quota_snapshots (
 | ID | 内容 | 验证方式 |
 |----|------|---------|
 | 1 | UI 永不直连 HF API | 网络策略 + UI 静态扫描 |
-| 2 | HF Token 不离开 Controller | 代码 lint：禁 `Authorization: Bearer hf_` 出现在 executor 代码 |
+| 2 | **Tenant-级** HF Token 不离开 Controller（reverse-proxy）；Executor-本地 OOB token 池为例外（详见 14 §3） | 代码 lint：禁 `tenants.hf_token` 字段出现在 executor 包；executor 仅可读 `/etc/dlw/credentials.yaml` 中本机 alias |
 | 3 | Executor 不持长期 storage 凭证 | 配置扫描 + 运行时审计 |
 | 4 | Controller 不主动反向连接 Executor | 网络策略 + 代码扫描 |
 | 5 | 任务级最终校验必须比对 `expected_sha256 == actual_sha256` | 单测 |
@@ -660,7 +899,7 @@ CREATE TABLE quota_snapshots (
 | 16 | 所有 AI 触发的写操作必须写 audit_log，含 `actor_kind=ai_copilot` | AI 工具单测 + audit chain 校验 |
 | 17 | AI 写操作必须用户 confirm；read-only 工具可免确认 | 协议测试 U-AI-T-005 |
 | 18 | LLM token 配额与下载流量配额隔离 | quota 单测 I-AI-Q-001 |
-| 19 | 网络查询工具的输出必须 sanitize 后才进 LLM context（含来源标记 + 注入检测） | 安全测试 U-AI-S-001..010 |
+| 19 | **任何外部 origin** 的内容（web_fetch / hf_model_card / **dlw_* 工具 output 中含外部字段如 description/readme/auto_map**）必须 sanitize 后才进 LLM context；含来源标记 + Unicode NFKC + Cf 移除 + confusables + 语义模式检测 | U-AI-S-001..023 |
 | 20 | 已下载字节默认不参与重新规划（除非该文件成为 makespan 瓶颈或切换收益 ≥50%）（详见 13 §2.1） | 决策回放 + chaos 测试 |
 | 21 | 优化决策必须有 hysteresis：触发 30%/15s + 解除 70%/30s + cooldown 60s/file | 抖动测试 ADO-CHAOS-* |
 | 22 | 子分片必须满足 S3 multipart 约束（part 5MB-5GB，总数 ≤10000）；非 S3 backend 禁用 | 配置加载校验 + 单测 |
@@ -673,6 +912,13 @@ CREATE TABLE quota_snapshots (
 | 29 | 子分片策略必须考虑限速画像（per-conn / per-IP / per-user）；维度未知时不盲目并发 | 限速联动测试 |
 | 30 | 执行器本地凭证池不出本机；controller 仅知 alias，不持具体值 | 配置审计 + 进程内存扫描 |
 | 31 | alias 删除后正在使用的 in-flight subtask 完成本 chunk 才不再分配；不强制中断 | 凭证轮换测试 |
+| 32 | multipart_upload_id 必须在 PG commit 后才推送到 executor（CAS-then-enqueue 模式） | DIST-V21-01 单测 |
+| 33 | standby 提升后进入 recovery_in_progress；所有心跳响应 503 直到三向对账完成 | DIST-V21-08 集成测试 |
+| 34 | s3:CompleteMultipartUpload 前必须 ListParts 严格匹配 DB 期望 ETag 集合 | DIST-V21-02 单测 |
+| 35 | 每条 WSS push 必含 target_executor_epoch；mismatch 时 close 重连 | DIST-V21-03 集成测试 |
+| 36 | 外部内容必须 NFKC + Cf 移除 + confusables + 语义模式 sanitize 后才进 LLM context | U-AI-S-013..023 |
+| 37 | MCP server 沙箱进程不继承 controller 敏感凭证内存（KEK / HF Token / S3 AKSK） | 进程内存扫描测试 |
+| 38 | PlanOptimizer slow path 连续超时 ≥ 3 次自动降级 LP 松弛 + anytime；不允许永久 fallback fast path | OR-V21-03 集成测试 |
 
 ---
 

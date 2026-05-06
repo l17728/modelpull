@@ -101,19 +101,28 @@ modelpull-mcp/
 │   ├── upgrade_task.py
 │   ├── quota_current.py
 │   ├── source_status.py
-│   └── audit_search.py     # admin only
+│   └── audit_search.py     # ⚠️ v2.1 下架：不通过 MCP 暴露给 AI（AI-SEC-V21-13；改为仅 UI/CLI）
 └── server.py
 ```
 
-部署形态：
+部署形态（v2.1 修订 — AI-SEC-V21-04）：
 
-- **In-process MCP**（默认）：Controller 进程内启动 MCP server，listen Unix socket / loopback
-- **Sidecar MCP**（K8s 部署）：单独 pod，HTTP/2 通信
-- 工具实现**不再走 HTTP 自调用**；直接调 service layer，节省一跳
+> ⚠️ v2.1 之前曾设想 In-process MCP 默认部署。修订后 **In-process 与 Sandboxed Sub-process 都不允许在 controller 主进程内运行无沙箱的工具代码**。
+
+- **Sandboxed sub-process**（v2.1 默认）：MCP server 跑在独立子进程中，启用 seccomp/AppArmor profile，禁 `fork/exec/network`（除显式白名单：localhost loopback to controller PG/Redis/HTTP），通过 Unix socket 与 controller 通信。控制器进程的 KEK / HF Token 解密结果**不进** MCP 子进程地址空间
+- **Sidecar MCP**（K8s 部署）：单独 pod，HTTP/2 通信，已天然隔离
+- 第三方 MCP 仍**仅** sidecar pod + tenant_admin 显式启用 + 单独 NetworkPolicy
+
+🔒 **不变量 37 (v2.1, AI-SEC-V21-04)**：MCP server 进程不得继承 controller 主进程的敏感凭证内存（KEK / HF Token / S3 long-term AKSK）。CI 加进程内存扫描测试。
+
+**audit_search 工具下架（v2.1, AI-SEC-V21-13）**：
+
+`audit_search` **不**通过 MCP 暴露给 AI。原因：admin 用户被注入时，AI 可被诱导用 admin 身份查别人的审计日志（即便 RBAC tenant_match 限制，仍能推断 enrollment_secret 命名模式 / 跨 tenant 行为）。审计查询保留为人工 UI / CLI 路径。
 
 **Why 用 MCP 而不是直接函数调用**：
 - 标准协议，未来可让用户的 IDE（Cursor / Claude Desktop）直接连 modelpull
 - Backend 可替换（不绑死 Anthropic SDK）
+- 沙箱化的天然分界（v2.1 修订强制此优势）
 
 ---
 
@@ -121,16 +130,18 @@ modelpull-mcp/
 
 ### 3.1 Read-only 工具（默认免确认）
 
-| 工具 | 说明 | 内部实现 |
-|------|------|---------|
-| `dlw_search_models(query, source?, limit?)` | 跨源搜索模型 | 调 `/api/models/search`；可选 source 限定 HF/ModelScope/etc. |
-| `dlw_get_model_info(repo_id, revision?)` | 模型详情（文件清单 + sha + 多源覆盖） | 调 `/api/models/{repo_id}/info` |
-| `dlw_list_tasks(filter?)` | 列任务（按 status / project / created_after） | 调 `/api/tasks` |
-| `dlw_get_task(task_id)` | 任务详情 + 进度 + 源分配 | `/api/tasks/{id}` + source-allocation |
-| `dlw_get_task_events(task_id, since?)` | 任务事件日志 | `/api/tasks/{id}/events` |
-| `dlw_quota_current()` | 当前租户配额 | `/api/quota/current` |
-| `dlw_source_status()` | 各 source 健康 + 速度 | `/api/sources/health` |
-| `dlw_list_recent_models(repo_owner, days?)` | 某 org 最近 N 天发布的模型（如 deepseek-ai） | HF/MS API + 过滤 |
+| 工具 | 说明 | 内部实现 | 含外部 origin 字段（须 sanitize） |
+|------|------|---------|---------------|
+| `dlw_search_models(query, source?, limit?)` | 跨源搜索模型 | 调 `/api/models/search`；可选 source 限定 HF/ModelScope/etc. | repo_id, description, tags, license_name |
+| `dlw_get_model_info(repo_id, revision?)` | 模型详情（文件清单 + sha + 多源覆盖） | 调 `/api/models/{repo_id}/info` | description, readme, card_data, auto_map |
+| `dlw_list_tasks(filter?)` | 列任务（按 status / project / created_after） | 调 `/api/tasks` | （internal — 无外部字段） |
+| `dlw_get_task(task_id)` | 任务详情 + 进度 + 源分配 | `/api/tasks/{id}` + source-allocation | error_message（来自 executor 上报） |
+| `dlw_get_task_events(task_id, since?)` | 任务事件日志 | `/api/tasks/{id}/events` | event message（部分含外部源） |
+| `dlw_quota_current()` | 当前租户配额 | `/api/quota/current` | （internal） |
+| `dlw_source_status()` | 各 source 健康 + 速度 | `/api/sources/health` | （internal） |
+| `dlw_list_recent_models(repo_owner, days?)` | 某 org 最近 N 天发布的模型（如 deepseek-ai） | HF/MS API + 过滤 | repo_id, description, license_name |
+
+🔒 **不变量 19（修订 v2.1, AI-SEC-V21-02）**：上表"含外部 origin 字段"列出的字段在送入 LLM context 前**必须**经 §6.1 第 6 条的 `sanitize_external()` 处理。MCP server 在序列化 tool output 时**自动**对这些字段递归扫描，开发者不能选择性跳过。
 
 ### 3.2 写操作工具（默认需确认）
 
@@ -412,7 +423,59 @@ CREATE INDEX idx_ai_usage_tenant_time ON ai_token_usage(tenant_id, occurred_at);
 2. **指令禁区**：system prompt 里列出禁止操作的关键词，外部内容里出现一律告警
 3. **写操作仍需用户确认**：哪怕 AI 真的被诱导，写操作也必须用户点 Confirm。这是兜底
 4. **危险 token 检测**：sanitize 时检测 `ignore previous` / `system:` / `</external>` 等注入特征
-5. **限制单次 turn 工具调用次数**：max 10 次，防止 AI 被诱导陷入无限工具调用
+5. **限制单次 turn 工具调用次数**：read-only ≤ 30 / 单次 turn 写工具 ≤ 3（v2.1 修订，原 max 10 全局过松）
+6. **Unicode 规范化与混淆字符防御（v2.1 新增）**：
+   - **NFKC 规范化**：所有外部输入先 `unicodedata.normalize("NFKC", text)`
+   - **移除 Cf 类字符**：`Zero-Width Space (U+200B)`、`Zero-Width Non-Joiner (U+200C)`、`Zero-Width Joiner (U+200D)`、`Right-to-Left Override (U+202E)`、`Bidi Marks` 等
+   - **Confusables 检测**：用 `confusable_homoglyphs` 库检测拉丁/西里尔/希腊字母混淆（如全角 `Ｉｇｎｏｒｅ` / 西里尔 `Іgnorе`）
+   - **危险模式**改为**语义类**而非字面字符串：检测"祈使句 + 工具名共现"（如 `(call|invoke|run|execute|use|run)\s+(dlw_\w+|cancel|delete|create_task)`）+ "复述指令"模式（`repeat above`、`echo your instructions`、`原始 system prompt`）
+   - **Bidi 攻击**：拒绝任何含 RTL/LTR override 字符的外部内容片段
+   - **疑似 base64 / 编码注入**：检测 ≥40 字符纯 base64 段，标记可疑
+
+🔒 **不变量 36 (v2.1, AI-SEC-V21-01)**：所有外部内容必须经 Unicode NFKC + Cf 移除 + confusables 检测 + 语义模式扫描后才进 LLM context。
+
+```python
+import unicodedata
+import re
+from confusable_homoglyphs.confusables import is_confusable
+
+CF_CATEGORIES = {"Cf"}    # Format characters (zero-width 类)
+RTL_OVERRIDE_RE = re.compile(r"[‪-‮⁦-⁩]")
+SUSPECT_BASE64_RE = re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b")
+INJECTION_SEMANTIC_RE = re.compile(
+    r"(?:(call|invoke|run|execute|use)\s+(?:dlw_\w+|cancel|delete|create_task))"
+    r"|(?:(repeat|echo)\s+(?:above|previous|instructions))"
+    r"|(?:原始\s*(?:system\s*)?prompt)",
+    re.IGNORECASE
+)
+
+def sanitize_external(text: str, source: str) -> tuple[str, list[str]]:
+    warnings = []
+    # 1. NFKC normalize
+    text = unicodedata.normalize("NFKC", text)
+    # 2. Remove Cf characters (zero-width 等)
+    cf_count = sum(1 for c in text if unicodedata.category(c) in CF_CATEGORIES)
+    if cf_count > 0:
+        warnings.append(f"removed {cf_count} format chars")
+        text = "".join(c for c in text if unicodedata.category(c) not in CF_CATEGORIES)
+    # 3. Bidi override
+    if RTL_OVERRIDE_RE.search(text):
+        warnings.append("contains RTL override; refusing")
+        return "", warnings   # 直接清空，不送 LLM
+    # 4. Confusables
+    if is_confusable(text, greedy=False):
+        warnings.append("homoglyph confusables detected")
+    # 5. 语义模式
+    if INJECTION_SEMANTIC_RE.search(text):
+        warnings.append("imperative + tool-name pattern detected")
+    # 6. base64 长串
+    if SUSPECT_BASE64_RE.search(text):
+        warnings.append("suspect base64 payload")
+    # 7. 截断到 32KB
+    text = text[:32768]
+    # 8. 边界化
+    return f"<external_content source=\"{source}\">{text}</external_content>", warnings
+```
 
 ⚠️ **承认的局限**：100% 防御提示词注入是开放问题；最终防线是用户确认 + 审计 + 配额硬阻断。
 

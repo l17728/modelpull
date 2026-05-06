@@ -139,3 +139,4 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 | 2026-05-06 | v2.0.5 | 加入 13-adaptive-download-optimization.md（在线运筹优化 + 子分片 + S3 multipart 多 executor 协作）；不变量 20-26；06 §1.8 标记为反应式 baseline，被 13 替代 |
 | 2026-05-06 | v2.0.6 | 13 §4.3 触发时机展开：三级触发 + 自适应周期 + 瓶颈聚焦 + 信息门控 + 触发预算；不变量 27 |
 | 2026-05-06 | v2.0.7 | 加入 14-enterprise-network-and-rate-limit.md（反向 WSS 通道 + 限速维度探测 + 本地凭证池 + 别名 + Live Console + S3 直连切片）；不变量 28-31；07 §11 新增 ~50 测试 |
+| 2026-05-06 | v2.0.8 | **5 reviewer 综合 review** 后修复 12 项 Critical（PR 1）：01 §4.7 v2.1 数据模型同步（5 表+多列+全部加 tenant_id）；不变量 2/19 措辞修订 + 新增 32-38（multipart 持久化/recovery 屏障/CompleteMultipartUpload 校验/WSS push epoch fence/Unicode sanitize/MCP 沙箱/anytime LP）；01 §3.2.1 引入 split parent 状态机；OpenAPI 补 5 v2.1 端点；OR §1.2 plan 离散化 + §1.4 switch_loss_factor 分场景 + §5.4 三向对账 + §5.5 part_number bump；12 §6.1 加 Unicode NFKC + Cf 移除 + confusables 防御层；audit_search 从 MCP 暴露面下架；07 §9 新增 11 个 Unicode 注入测试 |

@@ -264,6 +264,35 @@ paths:
       responses:
         '204': {description: Accepted}
 
+  /tasks/{taskId}/replan:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: Force adaptive download optimizer to replan (v2.1)
+      description: |
+        Force PlanOptimizer (13 §4.3) to evaluate this task immediately,
+        bypassing periodic tick. Subject to per-user replan rate limit
+        (6/h) and global cooldown.
+      operationId: replanTask
+      responses:
+        '202':
+          description: Replan triggered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [decision_id, triggered_at]
+                properties:
+                  decision_id: {type: integer, format: int64}
+                  triggered_at: {type: string, format: date-time}
+                  expected_savings_seconds: {type: number, nullable: true}
+        '429':
+          description: Rate limited (per-user replan budget)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+
   /tasks/{taskId}/upgrade:
     parameters:
       - $ref: '#/components/parameters/TaskId'
@@ -714,6 +743,59 @@ paths:
       responses:
         '202': {description: Exiting}
 
+  /admin/console/stream:
+    get:
+      tags: [admin]
+      summary: Live Console — real-time log stream (v2.1)
+      description: |
+        Server-Sent Events stream of recent logs. Filterable by component / level / task_id.
+        Detailed protocol: 14 §5.3.
+
+        Per-client rate limited to 100 logs/sec; max 10 concurrent clients per controller.
+      operationId: consoleStream
+      parameters:
+        - in: query
+          name: components
+          schema:
+            type: array
+            items: {type: string}
+            example: [controller, "executor:host-12-w1", optimizer, hf_proxy]
+          style: form
+          explode: false
+        - in: query
+          name: level
+          schema:
+            type: string
+            enum: [DEBUG, INFO, WARN, ERROR]
+            default: INFO
+        - in: query
+          name: task_id
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: SSE log stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE events format:
+                  event: log
+                  data: {timestamp, component, level, event, trace_id, ...}
+        '429':
+          description: Rate limited or too many concurrent clients
+
+  # ========== Reverse-channel WSS (v2.1) ==========
+  # Note: WSS endpoints are not formally part of OpenAPI 3.1; documented inline here
+  # See 14 §1.2 for full protocol.
+  #
+  # WSS /ws/v1/executor
+  #   Subprotocol: bearer.<executor_jwt>
+  #   Headers: same as REST mTLS
+  #   Server pushes: {type: assign|cancel|abort|rebalance|renew_sts|drain, target_executor_epoch, ...}
+  #   Client events: {type: progress|subtask_complete|rate_limit_probe_result|creds_change_pending|creds_change_committed}
+  #   Heartbeat: ping/pong every 20s
+
   # ========== AI Copilot (v2.1) ==========
   /ai/chat:
     post:
@@ -1014,6 +1096,19 @@ components:
         upgrade_from_revision: {type: string, pattern: '^[0-9a-f]{40}$', nullable: true}
         download_bytes_limit: {type: integer, format: int64, nullable: true}
         trust_non_hf_sha256: {type: boolean, default: false}
+        s3_direct_source:
+          type: object
+          nullable: true
+          description: |
+            Use S3-compatible bucket as direct source (v2.1; see 14 §6.1).
+            Creates ad-hoc source for this task only; not added to global sources.yaml.
+          required: [bucket, prefix, region]
+          properties:
+            bucket: {type: string, maxLength: 256}
+            prefix: {type: string, maxLength: 1024}
+            region: {type: string}
+            credential_alias: {type: string, description: "alias from executor credential pool"}
+            parallel_downloads: {type: integer, minimum: 1, maximum: 32, default: 8}
 
     TaskCreatedResponse:
       type: object
@@ -1115,6 +1210,11 @@ components:
         executor_id_proposal: {type: string}
         tenant_id: {type: integer, format: int64, nullable: true}
         parent_executor_id: {type: string, nullable: true}
+        display_name: {type: string, maxLength: 128, nullable: true}
+        location: {type: string, maxLength: 128, nullable: true}
+        tags:
+          type: array
+          items: {type: string}
         capabilities:
           type: object
           properties:
@@ -1125,6 +1225,25 @@ components:
             storage_backends:
               type: array
               items: {type: integer}
+        credential_pool_summary:
+          type: object
+          description: |
+            Aliases only; secrets stay on executor (invariant 30, v2.1).
+            See 14 §3.3 for full protocol.
+          properties:
+            gateway_aliases:
+              type: array
+              items: {type: string}
+            hf_token_aliases:
+              type: array
+              items: {type: string}
+            s3_credential_aliases:
+              type: array
+              items:
+                type: object
+                properties:
+                  alias: {type: string}
+                  source_id: {type: string}
         client_csr:
           type: string
           description: X.509 CSR PEM
@@ -1165,6 +1284,36 @@ components:
         failed_subtasks:
           type: array
           items: {$ref: '#/components/schemas/SubtaskFailureReport'}
+        rate_limit_probe_results:
+          type: array
+          description: v2.1; results from probing performed since last heartbeat
+          items:
+            type: object
+            properties:
+              target_host: {type: string}
+              executor_ip_class: {type: string, nullable: true}
+              user_account_alias: {type: string, nullable: true}
+              connection_limited: {type: boolean}
+              ip_limited: {type: boolean}
+              user_limited: {type: boolean}
+              per_conn_speed_bps: {type: integer, format: int64, nullable: true}
+              per_ip_speed_bps: {type: integer, format: int64, nullable: true}
+              per_user_speed_bps: {type: integer, format: int64, nullable: true}
+              confidence: {type: number, minimum: 0, maximum: 1}
+              measurement_started_at: {type: string, format: date-time}
+              bytes_consumed_for_probe: {type: integer, format: int64}
+        credential_change_event:
+          type: object
+          nullable: true
+          description: v2.1; reports SIGHUP credential reload (drain phase per DIST-V21-07)
+          properties:
+            phase: {type: string, enum: [pending, committed]}
+            added_aliases:
+              type: array
+              items: {type: string}
+            removed_aliases:
+              type: array
+              items: {type: string}
 
     ExecutorSystemReport:
       type: object
@@ -1290,7 +1439,7 @@ components:
 
     SubtaskAssignment:
       type: object
-      required: [subtask_id, task_id, filename, expected_size, source_id, executor_epoch, assignment_token, deadline_at]
+      required: [subtask_id, task_id, filename, expected_size, source_id, executor_epoch, target_executor_epoch, assignment_token, deadline_at]
       properties:
         subtask_id: {type: string, format: uuid}
         task_id: {type: string, format: uuid}
@@ -1301,8 +1450,28 @@ components:
         alternate_sources:
           type: array
           items: {type: string}
-        executor_epoch: {type: integer, format: int64}
+        executor_epoch:
+          type: integer
+          format: int64
+          description: deprecated alias for target_executor_epoch
+        target_executor_epoch:
+          type: integer
+          format: int64
+          description: |
+            v2.1 (DIST-V21-03 fence): executor must verify push.target_executor_epoch == self.epoch
+            before applying. Mismatch → close ws and reconnect.
+        optimization_generation:
+          type: integer
+          format: int64
+          description: v2.1 (DIST-V21-04 fence) — must echo back in part complete reports
         assignment_token: {type: string, format: uuid}
+        credential_aliases:
+          type: object
+          description: v2.1 (14 §3.4) — controller dispatches which alias to use
+          properties:
+            gateway_alias: {type: string, nullable: true}
+            hf_token_alias: {type: string, nullable: true}
+            s3_credential_alias: {type: string, nullable: true}
         deadline_at: {type: string, format: date-time}
         chunk_plan:
           type: array
