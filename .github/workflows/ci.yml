@@ -26,17 +26,17 @@ jobs:
 
       - name: Setup Node
         uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'           # CODE-17 修复 (v2.0.16): npm cache
+        with: {node-version: '20'}
 
-      - name: Cache npm global packages
+      # CODE-17 修复 (v2.0.16): 缓存 ~/.npm 全局缓存（不依赖 setup-node 的 cache=npm，
+      # 因为我们没有 lock 文件；直接缓存 npm 下载目录）
+      - name: Cache npm packages
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-cache-${{ runner.os }}-spectral6-swagger-cli
+          key: npm-${{ runner.os }}-spectral6-swagger-cli
           restore-keys: |
-            npm-cache-${{ runner.os }}-
+            npm-${{ runner.os }}-
 
       - name: Install spectral + swagger-cli (cached if hit)
         run: |
@@ -179,9 +179,14 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+
+      # CODE-17 修复 (v2.0.16): 缓存 pip 下载目录（无 requirements.txt 时不能用 setup-python 的 cache=pip）
+      - name: Cache pip packages
+        uses: actions/cache@v4
         with:
-          python-version: '3.12'
-          cache: 'pip'         # CODE-17 修复 (v2.0.16): pip cache
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-pytest
 
       - name: Install pytest
         run: pip install pytest
