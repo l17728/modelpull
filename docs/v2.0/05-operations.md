@@ -325,27 +325,73 @@ inhibit_rules:
 
 **症状**：`ControllerDown` page
 
+> v2.0.13 修订 (OPS-V21-04 + V21-09)：原 RTO ≤ 10min 在凌晨首次未演练 oncall 实际 25-40min。修订增加：(a) 前置 checklist；(b) 立刻置 status page = degraded；(c) UI banner；(d) `--force` 决策树。
+
+**前置 checklist（30 秒过一遍）**：
+
+- [ ] VPN 已连
+- [ ] `kubectl get ns dlw-prod` 通
+- [ ] `DLW_TOKEN` 已 export
+- [ ] 已确认 active 真死（不是网络分区造成 oncall 看不到）
+- [ ] 工具齐全：`jq`、`bc` 不强求（v2.0.13 promote-standby.sh 已去 bc 依赖）
+
 **步骤**：
 
-```
-1. 立即 ssh 到 controller standby
-2. 检查 standby 状态：
-   $ systemctl status dlw-controller-standby
-   $ pg_isready -h localhost
-3. 确认 active 不可达：
-   $ curl https://controller-active.dlw/health
-4. 提升 standby（详见 §6.1）
-5. 切换 DNS / VIP：
-   $ ./scripts/promote-standby.sh
-6. 验证新 active：
-   $ curl https://controller.dlw/health
-   # 应返回 {"status": "healthy", "role": "active"}
-7. 检查 recovery_routine 完成（log "recovery routine complete"）
-8. 通知 stakeholders（Slack #incidents）
-9. 创建事故复盘单（24h 内）
+```bash
+# Step 0 (v2.0.13 新增): 立刻置 status page + UI banner
+# 用户视角不能"任务无故卡住"
+kubectl patch configmap status-page \
+  --patch '{"data":{"current_status":"degraded","message":"Recovering, in-flight tasks paused, ETA 10min"}}'
+# 触发 UI 推送 banner
+curl -X POST https://api.dlw/api/admin/banner \
+  -H "Authorization: Bearer $DLW_TOKEN" \
+  -d '{"level":"warn","message":"系统正在故障恢复，进行中任务已暂停，预计 10 分钟内恢复","duration_minutes":15}'
+
+# Step 1: 立即 ssh 到 controller standby
+# 检查 standby 状态
+systemctl status dlw-controller-standby
+pg_isready -h localhost
+
+# Step 2: 确认 active 不可达
+curl https://controller-active.dlw/health
+
+# Step 3: 决策 --force 是否使用
+# - active health 完全无响应 + 30s+ → 不需 --force
+# - active 部分响应（如 PG 健康但 API 5xx）→ 可能 split-brain，需要先 fence
+# - replication lag > 60s → 用 --force 会丢 ≤60s 数据；评估接受度
+LAG=$(psql -tAc "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))" -p $STANDBY_PORT)
+echo "Standby lag: ${LAG}s"
+
+# Step 4: 提升 standby（详见 §6.1）
+./scripts/promote-standby.sh
+# 或带 force
+# ./scripts/promote-standby.sh --force
+
+# Step 5: 切换 DNS / VIP（脚本里包含）
+
+# Step 6: 验证新 active
+curl https://controller.dlw/health
+# 应返回 {"status": "healthy", "role": "active"}
+
+# Step 7: 检查 recovery_routine 完成（log "recovery routine complete"）
+kubectl logs -l app.kubernetes.io/component=controller --tail=100 \
+  | grep "recovery routine complete"
+
+# Step 8: 解除 status page degraded
+kubectl patch configmap status-page \
+  --patch '{"data":{"current_status":"operational","message":""}}'
+curl -X POST https://api.dlw/api/admin/banner/dismiss \
+  -H "Authorization: Bearer $DLW_TOKEN"
+
+# Step 9: 通知 stakeholders（Slack #incidents）
+# Step 10: 创建事故复盘单（24h 内）
+
+# Escalate to: ops lead → tech lead → CTO（如果 step 4 失败 / lag > 5min）
 ```
 
-**RTO 目标**：≤ 10min
+**RTO 目标**：≤ 10min（well-rehearsed 团队，需要 4-6 次 GameDay 演练才能稳定达成）
+
+**新人 oncall 第一次 page 实际预期**：25-40min（reviewer FEAS-04 + OPS-V21-04 实测）。建议 onboarding 期 2 周影子值班 + staging RB-01 至少跑通 1 次。
 
 ### 4.2 RB-02 — Executor 替换 / 全部下线
 
@@ -378,22 +424,67 @@ inhibit_rules:
 6. 如果是凭证问题，按 RB-08
 ```
 
-### 4.3 RB-03 — DataIntegrityFailure（SHA256 不匹配）
+### 4.3 RB-03 — DataIntegrityFailure（SHA256 不匹配）⚠️ P0
 
+> v2.0.13 修订 (OPS-V21-03)：原 5 步是"先查再决定"，但 P0 数据完整性事件应**先冻结再排查**。
+
+```bash
+# Step 0 (v2.0.13 新增): 30 秒内冻结 — 防同模式连发
+# 找出所有最近 1h 触发 checksum mismatch 的 source_id
+psql -tAc "SELECT DISTINCT source_id FROM file_subtasks
+           WHERE last_error LIKE '%CHECKSUM%' AND created_at > now()-'1h'" \
+  | while read SRC; do
+      echo "Quarantining source: $SRC"
+      curl -X POST -H "Authorization: Bearer $DLW_TOKEN" \
+        https://api.dlw/api/admin/sources/$SRC/quarantine
+  done
+
+# Step 1: abort 受影响的 multipart upload（如有）
+psql -tAc "SELECT multipart_upload_id, task_id FROM file_subtasks
+           WHERE last_error LIKE '%CHECKSUM%' AND created_at > now()-'1h'
+             AND multipart_upload_id IS NOT NULL" \
+  | while read UPLOAD_ID TASK_ID; do
+      # 查 storage backend
+      BUCKET_INFO=$(psql -tAc "SELECT sb.config_encrypted, dt.path_template
+                               FROM download_tasks dt JOIN storage_backends sb ON dt.storage_id=sb.id
+                               WHERE dt.id='$TASK_ID'")
+      # ... aws s3api abort-multipart-upload ...
+      echo "Aborted multipart $UPLOAD_ID"
+  done
+
+# Step 2: 调查触发的 subtask
+psql -tAc "SELECT id, task_id, filename, source_id, expected_sha256, actual_sha256, last_error
+           FROM file_subtasks
+           WHERE last_error LIKE '%CHECKSUM%' AND created_at > now()-'1h'
+           ORDER BY created_at DESC LIMIT 50" > /tmp/integrity-incident-$(date +%s).log
+
+# Step 3: 检查 source_id 分布判断根因
+psql -tAc "SELECT source_id, count(*) FROM file_subtasks
+           WHERE last_error LIKE '%CHECKSUM%' AND created_at > now()-'1h'
+           GROUP BY source_id ORDER BY count(*) DESC"
+# - 单一源 → 该源被污染（已 quarantine）
+# - 分布在多源 → HF 上游可能有问题；等 HF 修复后解 quarantine
+
+# Step 4: 检查 fingerprint 表是否有不一致历史（同 repo+revision 二次下不一致）
+psql -tAc "SELECT * FROM file_fingerprints WHERE repo_id=... AND filename=..."
+
+# Step 5: 如果是自托管 mirror — 检查 mirror 同步状态
+
+# Step 6: 生成 affected blob 报表（哪些已上传到 storage 的对象需 redownload）
+psql -tAc "SELECT subtask_id, remote_storage_uri, sb.name as storage
+           FROM file_subtasks fs
+           JOIN download_tasks dt ON fs.task_id=dt.id
+           JOIN storage_backends sb ON dt.storage_id=sb.id
+           WHERE fs.last_error LIKE '%CHECKSUM%'" > /tmp/affected-blobs-$(date +%s).csv
+
+# Step 7: 通知 affected tenants（webhook 或邮件模板）
+# 模板：data integrity incident detected; tasks X/Y/Z affected;
+#       please re-create with explicit revision sha; we have quarantined source ABC
+
+# Step 8: 文档化 — 一定写 postmortem；标 timeline + impact + RCA
 ```
-1. 立即调查触发的 subtask：
-   SELECT id, task_id, filename, source_id, expected_sha256, actual_sha256
-   FROM file_subtasks
-   WHERE status='failed_permanent' AND last_error LIKE '%CHECKSUM%'
-   ORDER BY created_at DESC LIMIT 20;
-2. 检查 source_id 分布：是否集中在某一个源？
-   - 若是单一源 → 临时拉黑该源（admin UI），可能源被污染
-   - 若分布在多源 → HF 上游可能有问题，等 HF 修复
-3. 检查 fingerprint 表是否有不一致历史：
-   SELECT * FROM file_fingerprints WHERE repo_id=... AND filename=...;
-4. 如果是自托管 mirror：检查 mirror 同步是否最新
-5. 通知用户重建任务（用具体 sha 而非 main）
-```
+
+**为何升级到 P0 step 0**：v2.0 原版本 step 1 直接查 SQL，期间同 source 可能继续产生新 checksum failure；正确响应是 30 秒内冻结同源新任务，再排查。
 
 ### 4.4 RB-04 — HF 限流 / 不可达
 

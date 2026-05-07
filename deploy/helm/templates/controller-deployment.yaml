@@ -118,7 +118,12 @@ spec:
             preStop:
               exec:
                 # Graceful shutdown: drain LB then exit (详见 05 §10.1)
-                command: ["/bin/sh", "-c", "sleep 30 && /app/bin/graceful_stop.py"]
+                # CODE-04 修复 (v2.0.13): sleep 30 magic 改为 helm value
+                # graceful_stop.py 自带 timeout < (TGPS - drain - 5)
+                command:
+                  - /bin/sh
+                  - -c
+                  - "sleep {{ .Values.controller.preStop.lbDrainSeconds }} && /app/bin/graceful_stop.py --timeout {{ sub (sub (int .Values.controller.terminationGracePeriodSeconds) (int .Values.controller.preStop.lbDrainSeconds)) 5 }}"
       volumes:
         - name: secrets-store
           csi:
@@ -134,5 +139,5 @@ spec:
             name: {{ include "dlw.fullname" . }}-controller-config
         - name: tmp
           emptyDir: {}
-      terminationGracePeriodSeconds: 180
+      terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds }}
 {{- end }}

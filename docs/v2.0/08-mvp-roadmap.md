@@ -26,9 +26,13 @@
 
 ---
 
-## 1. Phase 1 — 单租户 PoC（**5 weeks**，v2.1 修订 — ENT-QA-03）
+## 1. Phase 1 — 单租户 PoC（**6 weeks**，v2.0.13 修订 — FEAS-01 + ENT-QA-03）
 
-> ⚠️ 原版本 4 周不现实：5.5 FTE × 4 周 = 22 工程师周，但 fence token + recovery 三联校验 + multipart + UI + E2E + DB schema migration 实际需要约 27 工程师周。改为 5 周（含 1 周 buffer），总线 13 → **14 周**。
+> ⚠️ 修订历史：
+> - 原版本 4 周（v2.0）不现实（5.5 FTE × 4w = 22 工程师周 vs 实际 27 需求）
+> - v2.1 ENT-QA-03 改 5 周（含 buffer）
+> - **v2.0.13 FEAS-01 再延 1 周到 6 周**：reviewer 实测 5.5 FTE × 5w 名义 27.5 工程师周，按真实产能 (60-65%) = 17-18，但实际需要 22-24（含 dev infra / fixture / docker-compose dev profile / 自托管 CI runner / OIDC bootstrap / mTLS bootstrap CLI 等"被遗忘的工程任务" 4-6 工程师周）
+> - **总线 14 周 → 15 周**；P90 仍约 19-20 周（详见 §10）
 
 ### 1.1 目标
 
@@ -93,7 +97,7 @@
 - [ ] 架构 review：与 v2.0 设计偏差清单
 - [ ] 容量基线初测（P-001 部分基线）
 
-### 1.6 Phase 1 任务分解（5 weeks）
+### 1.6 Phase 1 任务分解（6 weeks，v2.0.13 修订）
 
 ```
 Week 1: 骨架
@@ -112,8 +116,14 @@ Week 4: 校验 + 联调
   ├─ Day 1-2: 流式 SHA256 + 任务级最终校验
   ├─ Day 3-4: E2E-001 联调
 
-Week 5 (buffer): 收尾 + 内部 alpha
-  ├─ Day 1-2: 修复 Week 1-4 发现的问题
+Week 5: 被遗忘的工程任务（FEAS-06 修复）
+  ├─ Day 1-2: dev infra — docker-compose dev profile + fixture generator
+  ├─ Day 3: 自托管 CI runner setup（GH-hosted 跑大文件 E2E 不现实）
+  ├─ Day 4: dlw admin bootstrap CLI（FEAS-04）+ executor enrollment-token CLI（FEAS-03）
+  └─ Day 5: OIDC IdP setup 文档 + 第一个 demo dataset
+
+Week 6 (buffer): 收尾 + 内部 alpha
+  ├─ Day 1-2: 修复 Week 1-5 发现的问题
   ├─ Day 3: 性能基线 P-005（PG TPS）
   ├─ Day 4: 出场标准对账
   └─ Day 5: 内部 alpha demo
@@ -252,7 +262,9 @@ Week 3: mTLS + Active/Standby
 
 - Phase 2 出场标准全满足
 - 1 个 staging 环境跑了 1 周 phase-2 stable
-- 团队增加：前端 ×1（CLI 不算前端）
+- **团队前端 ≥2 FTE**（v2.0.13 修订 — FEAS-05；与 §6 表格对齐）—— Phase 3 同时上多租户 UI + 多源可视化 + CLI 集成，1 个前端 4 周不可能完成
+- CLI 不算前端工作量
+- 后端 +1（共 3 FTE）
 
 ### 3.5 出场标准
 
@@ -451,7 +463,8 @@ Week 3: 上线准备
 | 安全顾问 | 0 | 0.5 | 0.5 | 1 |
 | **总计 FTE** | **5.5** | **7.5** | **8.5** | **10** |
 
-**14 周**（~3.5 个月）总人月 ≈ **24-27 PM**（v2.1 修订；含 Phase 1 buffer week）。
+**15 周**（~3.7 个月）总人月 ≈ **26-29 PM**（v2.0.13 修订；含 Phase 1 6 周 + buffer week）。
+**P90 risk-adjusted：~19-20 周**，见 §10 风险评估。
 
 ---
 
@@ -459,7 +472,7 @@ Week 3: 上线准备
 
 | 主题 | 计划 | 说明 |
 |------|------|------|
-| **AI Copilot（嵌入聊天 + Claude/OpenCode headless）** | **v2.1 first-class** | **详见 [12-ai-copilot.md](./12-ai-copilot.md)；Phase 4 末可灰度小流量只读** |
+| **AI Copilot（嵌入聊天 + Claude/OpenCode headless）** | **v2.1 独立 4-6 周里程碑** | **详见 [12-ai-copilot.md](./12-ai-copilot.md)；v2.0.13 修订 — FEAS-07 砍 Phase 4 末 canary，避免挤压 K8s Operator / Sigstore / chaos 等关键项** |
 | **自适应下载运筹优化 + 子分片 + S3 multipart 多 executor 协作** | **v2.1 first-class** | **详见 [13-adaptive-download-optimization.md](./13-adaptive-download-optimization.md)；v2.0 是反应式 baseline** |
 | **企业内网部署：反向 WSS / 限速探测 / 凭证池 / 别名 / Live Console** | **v2.1 first-class** | **详见 [14-enterprise-network-and-rate-limit.md](./14-enterprise-network-and-rate-limit.md)；面向 corp 内网+外网 controller 拓扑** |
 | Active-active controller | v2.1 | 当前仅 active/standby |
@@ -489,6 +502,29 @@ Week 3: 上线准备
 - 哪些测试在 review 时漏了？补到 07 中
 - 哪些不变量需要新增 / 调整？
 - 团队反馈：流程 / 工具 / 协作
+
+---
+
+## 10. Risk-adjusted 估算（v2.0.13, FEAS-01）
+
+> 来自 round 3 reviewer：纸面 14 周计划在 5+ 个 0→GA 项目历史下 P50 ≈ 17 周，P90 ≈ 20-22 周。
+
+| 因素 | 调整 |
+|------|------|
+| 名义计划（v2.0.13 修订） | **15 周** |
+| FEAS-04 OIDC bootstrap 加 0.5 周 | +0.5 |
+| FEAS-09 新人 ramp-up（Phase 2/3 加人时净产能 -20%） | +1 |
+| 14 周内必有 1 次 incident / 设计返工（保守） | +1.5 |
+| 自托管 CI runner 调试（FEAS-06 已纳入但首次易超） | +0.5 |
+| **risk-adjusted P90** | **≈ 18-19 周（4.5 个月）** |
+
+> 给 manager 的诚实回答：15 周是 P40；如果硬上线，质量门必崩。**建议对外沟通用 18 周作为承诺**，15 周是 stretch goal。
+
+**减少 P90 偏差的措施**：
+
+- Phase 1 提前 2 周招募并启动；Phase 2/3 加入的成员提前 1 周 shadow（不算 FTE）
+- 每个 Phase 末必须有 1 个 buffer day 用于 retrospective + plan adjust
+- 不变量 / 状态机 / 数据模型设计变更必须当 Phase 内事件，不延期到下 Phase
 
 ---
 

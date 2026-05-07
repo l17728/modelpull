@@ -81,11 +81,26 @@ LAG=$(kubectl -n "$NAMESPACE" exec "$STANDBY_POD" -- psql -U postgres -t -c \
   "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()));" | tr -d ' ')
 
 log "Standby lag: ${LAG}s"
-if (( $(echo "$LAG > 60" | bc -l) )); then
+# CODE-12 修复 (v2.0.13): 去 bc 依赖（macOS oncall 笔记本通常没装），用 awk
+if awk -v l="$LAG" 'BEGIN{exit !(l>60)}'; then
   warn "Lag is >60s. Some recent commits may be lost."
   if [[ "$FORCE" != "true" ]]; then
     fail "Refusing to fail over with high lag (use --force to override)"
   fi
+fi
+
+# Step 2.5 (v2.0.13, CODE-12): Fence old primary BEFORE promoting standby
+# 防止 split-brain: 即使 active 网络分区再恢复后也写不进 PG
+log "Step 2.5/5: fencing old primary to prevent split-brain"
+OLD_PRIMARY_NAME="${ACTIVE_POD#pod/}"
+# 把 service selector 摘除，让旧 primary 收不到任何客户端连接
+kubectl -n "$NAMESPACE" label pod "$OLD_PRIMARY_NAME" \
+  dlw-fenced=true --overwrite || warn "Could not fence pod (may already be down)"
+# 同时 cordon node（如果是 node-level 故障）
+NODE=$(kubectl -n "$NAMESPACE" get pod "$OLD_PRIMARY_NAME" -o jsonpath='{.spec.nodeName}' 2>/dev/null) || true
+if [[ -n "$NODE" ]]; then
+  kubectl cordon "$NODE" || warn "Could not cordon node $NODE"
+  log "Cordoned node $NODE; pods on this node won't be rescheduled here"
 fi
 
 # Step 3: promote standby

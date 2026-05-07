@@ -815,14 +815,18 @@ v2.0 GA 范围不含 AI Copilot。原因：
 - 设计 / 测试成本高（LLM eval 需要时间）
 - 成本不可控（先把核心系统跑稳，再开 AI 给团队加成）
 
-### 11.2 Phase 4 末小流量
+### 11.2 ~~Phase 4 末小流量~~（v2.0.13 修订 — FEAS-07: 砍掉）
 
-Phase 4 末（v2.0 GA 前最后 1 周）可以开**只读小流量**版：
+> ⚠️ **v2.0.13 决策**：**v2.0 GA 不带 AI Copilot canary**。
 
-- 仅暴露 read-only 工具（search / list / info）
-- 仅默认 tenant 启用
-- 不接入 web_fetch
-- 用于收集真实 query 分布
+理由（reviewer FEAS-07）：
+
+- Phase 4 三周已塞满 K8s Operator + MLflow + audit chain + Sigstore + 6 runbook + chaos 自动化
+- AI canary 即便只 read-only 也涉及：MCP server 沙箱（不变量 37）+ Anthropic SDK 集成 + TokenBudgetGuard + AuditEmitter + UI 聊天面板 + 5 工具实现 + 测试 ≈ **2-3 工程师周**
+- 挤掉 chaos 演练或 K8s Operator 风险高于"早 1 周看到 query 分布"收益
+
+**新决策**：AI Copilot 整体推到 **v2.1 独立 4-6 周里程碑**，包含完整能力 + 配套测试（07 §9 全部 ~190 case）。
+v2.0 GA 期间在 staging 内部 dogfooding 收集 query 分布（非用户可见）。
 
 ### 11.3 v2.1 First-class（含 cn 合规决策）
 

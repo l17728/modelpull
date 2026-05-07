@@ -172,6 +172,12 @@ jobs:
         uses: actions/setup-python@v5
         with: {python-version: '3.12'}
 
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Unit tests for lint_invariants.py (CODE-08, v2.0.13)
+        run: python -m pytest tools/test_lint_invariants.py -v
+
       - name: Run invariant lint
         run: python tools/lint_invariants.py
 

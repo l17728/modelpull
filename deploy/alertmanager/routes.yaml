@@ -2,23 +2,54 @@ global:
   resolve_timeout: 5m
 
 # 抑制规则：上游 down 时压制下游
+# v2.0.13 修订 (OPS-V21-05): 扩展到全 v2.1 主题 — Controller down 时凌晨不再 8 个 PD 同时炸
 inhibit_rules:
   - source_matchers:
       - alertname="ControllerDown"
     target_matchers:
-      - alertname=~"TaskStuck|HighErrorRate|HFGlobalThrottle|ControllerDBSlow"
+      # 扩展：v2.0 + 全部 v2.1 下游告警
+      - alertname=~"TaskStuck|HighErrorRate|HFGlobalThrottle|ControllerDBSlow|DataIntegrityFailure|OptimizerDecisionStorm|OptimizerSlowPathTimeoutSurge|OptimizerActualVsExpectedDeviation|AICostPerTenantSurge|AIQuotaExhaustedHighRate|AIPromptInjectionDetected|MultipartCompleteInvalidPart|RateLimitProbeBudgetExhausted|RateLimitProbeLeaderLost|SLOAvailabilityFastBurn|SLOAvailabilitySlowBurn"
     equal: []
 
   - source_matchers:
       - alertname="AllExecutorsOffline"
     target_matchers:
-      - alertname=~"ExecutorOffline|ExecutorDegraded|DiskSpaceLow|PartsDirHigh"
+      - alertname=~"ExecutorOffline|ExecutorDegraded|DiskSpaceLow|PartsDirHigh|WSSReconnectStorm|WSSAllExecutorsDisconnected|WSSPushEpochMismatchHighRate|CredentialPool401Surge"
     equal: []
 
   - source_matchers:
       - alertname="HFCompletelyDown"
     target_matchers:
       - alertname="HFGlobalThrottle"
+    equal: []
+
+  # v2.1 新增：WSSAllExecutorsDisconnected 抑制下游 WSS 相关
+  - source_matchers:
+      - alertname="WSSAllExecutorsDisconnected"
+    target_matchers:
+      - alertname=~"WSSReconnectStorm|WSSPushEpochMismatchHighRate"
+    equal: []
+
+  # v2.1 新增：probe leader 没了 → 不要再喊 budget
+  - source_matchers:
+      - alertname="RateLimitProbeLeaderLost"
+    target_matchers:
+      - alertname="RateLimitProbeBudgetExhausted"
+    equal: []
+
+  # v2.1 新增：source 整源 quarantine 时不再喊单独 5xx / checksum
+  - source_matchers:
+      - alertname="HFCompletelyDown"
+    target_matchers:
+      - alertname=~"DataIntegrityFailure|StorageS3High5xx"
+    equal:
+      - source_id
+
+  # v2.1 新增：OptimizerSlowPathTimeoutSurge → DecisionStorm 下游
+  - source_matchers:
+      - alertname="OptimizerSlowPathTimeoutSurge"
+    target_matchers:
+      - alertname="OptimizerDecisionStorm"
     equal: []
 
 # 路由

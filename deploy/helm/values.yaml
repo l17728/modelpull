@@ -19,6 +19,12 @@ controller:
     tag: "2.0.0"
     pullPolicy: IfNotPresent
 
+  # CODE-04 修复 (v2.0.13): preStop sleep / TGPS 改为 value 化
+  # lbDrainSeconds 应对齐 ingress controller sync interval（nginx-ingress 默认 30s）
+  preStop:
+    lbDrainSeconds: 30
+  terminationGracePeriodSeconds: 180  # 必须 > lbDrainSeconds + graceful_stop timeout + 5s buffer
+
   resources:
     requests:
       cpu: 2000m

@@ -49,10 +49,30 @@ SECTION_RE = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\.?\s+", re.MULTILINE)
 def main() -> int:
     failures: list[str] = []
 
+    # CODE-03 修复 (v2.0.13): 友好处理空目录/缺文件
+    if not DOCS_DIR.exists():
+        print(f"WARN: {DOCS_DIR} not found; skipping invariant lint", file=sys.stderr)
+        return 0
+    md_files = sorted(DOCS_DIR.glob("*.md"))
+    if not md_files:
+        print(f"WARN: no .md files in {DOCS_DIR}; skipping", file=sys.stderr)
+        return 0
+    if not INDEX_DOC.exists():
+        print(f"FAIL: index doc {INDEX_DOC} missing (other md files exist)", file=sys.stderr)
+        return 1
+
     # --- Collect invariant declarations across all docs ---
+    # CODE-08: cache file content (avoid re-reading 3 times in this function)
+    file_cache: dict[Path, str] = {}
+    for md in md_files:
+        try:
+            file_cache[md] = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            failures.append(f"Cannot read {md.relative_to(ROOT)}: {e}")
+            continue
+
     decl_locations: dict[int, list[tuple[Path, int]]] = defaultdict(list)
-    for md in sorted(DOCS_DIR.glob("*.md")):
-        text = md.read_text(encoding="utf-8")
+    for md, text in file_cache.items():
         for m in DECL_RE.finditer(text):
             num = int(m.group(1))
             line_no = text[: m.start()].count("\n") + 1
@@ -73,7 +93,7 @@ def main() -> int:
                 )
 
     # --- Check 2: every declared invariant has a row in §7 table ---
-    index_text = INDEX_DOC.read_text(encoding="utf-8")
+    index_text = file_cache.get(INDEX_DOC, "") or INDEX_DOC.read_text(encoding="utf-8")
     # Locate the §7 invariant table
     sec7_match = re.search(
         r"## 7\.\s*关键不变量索引[\s\S]+?(?=^## \d+\.|\Z)",
@@ -115,19 +135,17 @@ def main() -> int:
     # --- Check 4: cross-doc references resolve to existing sections ---
     # Build map: doc_number_prefix → set of section numbers
     doc_sections: dict[str, set[str]] = defaultdict(set)
-    for md in sorted(DOCS_DIR.glob("*.md")):
+    for md, text in file_cache.items():
         # Extract prefix like "01" from "01-architecture.md"
         m = re.match(r"^(\d{2})-", md.name)
         if not m:
             continue
         prefix = m.group(1)
-        text = md.read_text(encoding="utf-8")
         for sec_m in SECTION_RE.finditer(text):
             doc_sections[prefix].add(sec_m.group(2))
 
     ref_failures: list[str] = []
-    for md in sorted(DOCS_DIR.glob("*.md")):
-        text = md.read_text(encoding="utf-8")
+    for md, text in file_cache.items():
         for m in CROSS_REF_RE.finditer(text):
             target_doc = m.group(1)
             target_sec = m.group(2)
