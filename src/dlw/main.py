@@ -30,6 +30,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     from dlw.api.tasks import router as tasks_router
     app.include_router(tasks_router)
+    from dlw.api.executors import router as executors_router
+    app.include_router(executors_router)
     return app
 
 
