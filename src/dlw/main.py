@@ -11,8 +11,14 @@ from dlw.api.health import router as health_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Lifespan hook — wire up shared resources here in later phases."""
+    """Lifespan hook — dispose shared engine on shutdown.
+
+    Engine is created lazily by get_engine() (lru_cached singleton); we only
+    need to clean it up on shutdown.
+    """
     yield
+    from dlw.db.session import reset_engine
+    await reset_engine()
 
 
 def create_app() -> FastAPI:

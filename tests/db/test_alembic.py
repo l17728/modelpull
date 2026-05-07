@@ -36,13 +36,14 @@ def _find_uv() -> str:
             candidate = None
     if candidate:
         return candidate
-    # 2. Known WinGet install path
+    # 2. Known WinGet install path under the current user's home directory
     winget_uv = (
-        r"C:\Users\HW\AppData\Local\Microsoft\WinGet\Packages"
-        r"\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\uv.exe"
+        Path.home()
+        / "AppData/Local/Microsoft/WinGet/Packages"
+        / "astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe/uv.exe"
     )
-    if Path(winget_uv).exists():
-        return winget_uv
+    if winget_uv.exists():
+        return str(winget_uv)
     raise RuntimeError("uv.exe not found; install uv or set PATH appropriately")
 
 

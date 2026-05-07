@@ -18,14 +18,16 @@ async def live() -> dict[str, str]:
 
 @router.get("/ready")
 async def ready() -> dict[str, str]:
-    """Readiness — DB-dependent (used by k8s readinessProbe + LB)."""
+    """Readiness — DB-dependent (used by k8s readinessProbe + LB).
+
+    Engine is shared (lru_cached); disposing per-request would race with
+    concurrent probes under realistic k8s 1s intervals.
+    """
     engine = get_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
             await session.execute(text("SELECT 1"))
-        return {"status": "ready", "db": "ok"}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"db unreachable: {exc}") from exc
-    finally:
-        await engine.dispose()
+    return {"status": "ready", "db": "ok"}
