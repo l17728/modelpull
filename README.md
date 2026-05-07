@@ -33,6 +33,50 @@
 
 ---
 
+## 🚀 Quickstart (Phase 1 dev only)
+
+> Phase 1 已落地：FastAPI controller + PG schema + 健康检查。
+> **不能下载模型**；这是 Week 2-6 的实施基础。
+
+需要：Python 3.12、`uv`、本地 PG 16+（或用 docker-compose 起一个）。
+
+```bash
+# 1. 拉代码
+git clone https://github.com/l17728/modelpull && cd modelpull
+
+# 2. 装 uv（如未装）
+curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS/Linux
+# winget install astral-sh.uv                          # Windows
+
+# 3. 装 deps
+uv sync
+
+# 4a. 起 PG（本机已装 PG 跳过此步，设 DLW_DB_HOST/PORT 环境变量即可）
+docker compose -f docker-compose.dev.yml up -d         # PG 16 on :5432
+# 或者使用本机 PG：export DLW_DB_PORT=5433（按你实际端口）
+
+# 5. 建 dlw 数据库（一次性）
+psql -h $DLW_DB_HOST -p ${DLW_DB_PORT:-5432} -U ${DLW_DB_USER:-postgres} \
+     -d postgres -c "CREATE DATABASE dlw"
+
+# 6. 跑 migration
+uv run alembic upgrade head    # 创建 8 张表
+
+# 7. 起 controller
+uv run uvicorn dlw.main:app --host 0.0.0.0 --port 8000
+
+# 8. 测试 endpoints（另开终端）
+curl http://localhost:8000/health/live    # → {"status":"healthy"}
+curl http://localhost:8000/health/ready   # → {"status":"ready","db":"ok"}
+
+# 9. 跑 tests
+uv run pytest -v               # 18 tests, 应全绿
+```
+
+完整开发计划：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
+
+---
+
 ## 为什么做这个
 
 ```

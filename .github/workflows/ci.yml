@@ -203,11 +203,74 @@ jobs:
         run: python tools/lint_invariants.py --strict
 
   # ============================================================
+  # Python: pytest with PG service container (Phase 1 foundation)
+  # ============================================================
+  pytest:
+    name: pytest (Phase 1 foundation)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DLW_TEST_PG_HOST: localhost
+      DLW_TEST_PG_PORT: "5432"
+      DLW_TEST_PG_USER: postgres
+      DLW_TEST_PG_PASSWORD: postgres
+      DLW_TEST_PG_ADMIN_DB: postgres
+      DLW_DB_HOST: localhost
+      DLW_DB_PORT: "5432"
+      DLW_DB_USER: postgres
+      DLW_DB_PASSWORD: postgres
+      DLW_DB_NAME: dlw
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with: {version: '0.11.9'}
+
+      - name: Install deps via uv
+        run: uv sync --all-groups
+
+      - name: Create dlw database (for alembic + health-ready test)
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE dlw"
+
+      - name: Run pytest with coverage
+        run: |
+          uv run pytest tests/ \
+            --cov=src/dlw \
+            --cov-report=term-missing \
+            --cov-report=xml
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ============================================================
   # Aggregate gate
   # ============================================================
   ci:
     name: CI Status
-    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint]
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest]
     runs-on: ubuntu-latest
     if: always()
     steps:
