@@ -25,6 +25,25 @@
 
 ---
 
+## Plan Revisions Log
+
+This plan was reviewed by 2 specialized agents (completeness + distributed correctness) on 2026-05-07; the following fixes were applied to the original draft before execution. Marked W2-A through W2-J in commit messages.
+
+| Tag | Issue | Fix applied |
+|-----|-------|-------------|
+| W2-A | `_session()` disposed engine per request — same antipattern as Phase 1 P1-A | Removed dispose; relies on lru_cached `get_engine()` from Phase 1 fix |
+| W2-B | API tests would connect to production `dlw` DB instead of test DB | Added Pre-Task 0: session-autouse conftest fixture points app config at `test_db_name` |
+| W2-C | `env` fixture in Task 6 commits id=1 rows → PK conflict on second test | Changed to module-scoped autouse so seed runs once per module |
+| W2-D | Concurrency test with 2 subtasks could pass for wrong reasons | Added 1-subtask + 2-claimant test that directly proves SKIP LOCKED |
+| W2-E | `complete_subtask` parent transition raceable when 2 subtasks finish at once | Added `with_for_update()` on parent task fetch |
+| W2-F | `assignment_token` written but never verified by `/report` endpoint | One-line equality check added in `complete_subtask` |
+| W2-G | Double-report idempotency (409) untested | Added `test_double_report_returns_409` |
+| W2-H | Invariant 9 (executor ID format `host-X-worker-N`) silently violated | Added explicit deferral comment in `ExecutorJoin` schema |
+| W2-I | Task 8 import lines placed mid-file in plan instructions | Moved to "imports go at top of file" annotation |
+| W2-J | Alembic `sa.text("created_at DESC")` in column list — undocumented API | Changed to `postgresql_ops={"created_at": "DESC NULLS LAST"}` |
+
+---
+
 ## File Structure
 
 After this plan, the repo adds:
@@ -78,10 +97,84 @@ modelpull/
 
 - [ ] **Phase 1 merged** (or working off `feat/phase-1-foundation`)
 - [ ] **Local PG running** (`pg_isready -h localhost -p 5433` or your override)
-- [ ] **dlw database exists** (`psql ... -d dlw -c "\dt"` shows 9 tables from Phase 1)
 - [ ] **`uv sync` clean** (no missing deps)
 - [ ] **All 18 Phase 1 tests pass** (`uv run pytest tests/`)
 - [ ] **Branch created**: `git checkout -b feat/phase-1-week-2-controller-core` (off main if PR #1 merged, else off `feat/phase-1-foundation`)
+
+> **Note**: Week 2 no longer needs a separate `dlw` database for tests — the Pre-Task-0 fixture below points the app at the per-session test DB.
+
+---
+
+## Pre-Task 0: Update conftest to point app at test DB (W2-B fix)
+
+**Files:**
+- Modify: `tests/conftest.py` (add session-autouse fixture)
+
+**Why:** Without this, the FastAPI app's `_session()` dependency calls `get_engine()` which reads `DLW_DB_NAME` (default = `dlw`, the production database). API tests seed data into the test DB created by the `engine` fixture but the app under test queries the production DB → all API tests in Tasks 4/7/8/10 silently fail or 500 in CI. Solution: a session-autouse fixture overrides env vars + clears engine cache before any API test runs.
+
+- [ ] **Step 1: Append to `tests/conftest.py`**
+
+```python
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _point_app_at_test_db(test_db_name: str, engine: AsyncEngine):
+    """Make the FastAPI app's get_engine() / get_settings() see the test DB.
+
+    Runs once per pytest session AFTER the engine fixture creates the test DB.
+    Without this, API tests would query the production `dlw` DB which has no
+    seeded fixtures.
+    """
+    env_overrides = {
+        "DLW_DB_HOST": os.environ.get("DLW_TEST_PG_HOST", "localhost"),
+        "DLW_DB_PORT": os.environ.get("DLW_TEST_PG_PORT", "5433"),
+        "DLW_DB_USER": os.environ.get("DLW_TEST_PG_USER", "postgres"),
+        "DLW_DB_PASSWORD": os.environ.get("DLW_TEST_PG_PASSWORD", ""),
+        "DLW_DB_NAME": test_db_name,
+    }
+    saved = {k: os.environ.get(k) for k in env_overrides}
+    os.environ.update(env_overrides)
+
+    from dlw.config import get_settings
+    from dlw.db.session import reset_engine
+    get_settings.cache_clear()
+    await reset_engine()
+
+    yield
+
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    get_settings.cache_clear()
+    await reset_engine()
+```
+
+(`AsyncEngine` should already be imported at the top of `conftest.py`; if not, add the import.)
+
+- [ ] **Step 2: Verify Phase 1 tests still pass**
+
+```bash
+uv run pytest tests/ -v 2>&1 | tail -10
+```
+
+Expected: 18 PASS (no regression). The session-autouse fixture doesn't affect Phase 1 tests because they don't drive the FastAPI app via HTTP.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "$(cat <<'EOF'
+test(infra): conftest session-autouse — point app at test DB
+
+Without this, API tests would query the production `dlw` DB while seeding
+went to test_dlw_<random>. New fixture overrides DLW_DB_NAME to test_db_name
+session-wide and clears the lru_cached engine + settings.
+
+Refs: W2-B from 2-agent plan review (2026-05-07)
+Plan: docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md Pre-Task 0
+EOF
+)"
+```
 
 ---
 
@@ -342,6 +435,11 @@ class SubTaskRead(BaseModel):
 class SubTaskReport(BaseModel):
     """POST /api/v1/subtasks/{id}/report request body — executor reports outcome."""
     status: Literal["succeeded", "failed"]
+    assignment_token: uuid.UUID | None = Field(
+        default=None,
+        description="Token from /poll's AssignmentResponse — verified against "
+                    "stored value to defend against stale/forged reports (W2-F).",
+    )
     actual_sha256: str | None = Field(default=None, min_length=64, max_length=64)
     bytes_downloaded: int = Field(default=0, ge=0)
     error: str | None = Field(default=None, max_length=2048)
@@ -362,7 +460,14 @@ from dlw.schemas.subtask import SubTaskRead
 
 
 class ExecutorJoin(BaseModel):
-    """POST /api/v1/executors/join — first contact from new executor."""
+    """POST /api/v1/executors/join — first contact from new executor.
+
+    NOTE (W2-H): Invariant 9 in `docs/v2.0/03-distributed-correctness.md`
+    requires id format `^[a-z0-9-]+-worker-\\d+$`. Week 2 does NOT enforce this
+    at the schema level — tests use shorter ids like 'exec-A' for brevity.
+    Phase 2 will add a `@field_validator("id")` enforcing the regex once mTLS
+    cert binding is in place (the cert CN should match the executor id).
+    """
     id: str = Field(min_length=1, max_length=64, examples=["host-12.local-worker-1"])
     host_id: str = Field(min_length=1, max_length=64)
     cert_fingerprint: str = Field(default="placeholder-week2", max_length=128)
@@ -789,18 +894,16 @@ _OWNER_USER_ID = 1
 
 
 async def _session() -> AsyncSession:
-    """Per-request session factory.
+    """Per-request session backed by Phase 1's lru_cached singleton engine.
 
-    Phase 3 will inject this via app.state with proper lifespan management;
-    Week 2 keeps it simple — engine per request is fine for low-throughput dev.
+    Do NOT call engine.dispose() here — would race with concurrent requests
+    sharing the same pool (same root cause as Phase 1 P1-A health.py fix).
+    Lifespan disposes the engine once at app shutdown.
     """
     engine = get_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
-        try:
-            yield session
-        finally:
-            await engine.dispose()
+        yield session
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_bearer)])
@@ -1089,19 +1192,22 @@ async def _create_tables(engine):
         await conn.run_sync(Base.metadata.drop_all)
 
 
-@pytest.fixture
-async def env(db_session: AsyncSession):
-    """Seed minimum data: tenant, project, user, storage, executor."""
-    db_session.add(Tenant(id=1, slug="d", display_name="D"))
-    await db_session.flush()
-    db_session.add(Project(id=1, tenant_id=1, name="d"))
-    db_session.add(User(id=1, tenant_id=1, oidc_subject="d",
-                        email="d@l", role="tenant_admin"))
-    db_session.add(StorageBackend(id=1, tenant_id=1, name="d",
-                                   backend_type="s3", config_encrypted=b""))
-    db_session.add(Executor(id="exec-A", host_id="ha",
-                             cert_fingerprint="fp", status="healthy"))
-    await db_session.commit()
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def env(engine):
+    """Seed minimum data ONCE per module — committed rows would PK-conflict
+    if this fixture were function-scoped (W2-C from review)."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(Tenant(id=1, slug="d", display_name="D"))
+        await s.flush()
+        s.add(Project(id=1, tenant_id=1, name="d"))
+        s.add(User(id=1, tenant_id=1, oidc_subject="d",
+                    email="d@l", role="tenant_admin"))
+        s.add(StorageBackend(id=1, tenant_id=1, name="d",
+                              backend_type="s3", config_encrypted=b""))
+        s.add(Executor(id="exec-A", host_id="ha",
+                        cert_fingerprint="fp", status="healthy"))
+        await s.commit()
 
 
 async def _make_pending_task(session: AsyncSession, n_subtasks: int) -> DownloadTask:
@@ -1147,7 +1253,7 @@ async def test_claim_returns_none_when_no_pending(
 
 @pytest.mark.slow
 async def test_two_concurrent_claims_get_different_subtasks(
-    db_session: AsyncSession, env, engine
+    db_session: AsyncSession, engine
 ) -> None:
     """Concurrency: 2 sessions polling at once must get DIFFERENT subtasks."""
     await _make_pending_task(db_session, n_subtasks=2)
@@ -1162,7 +1268,33 @@ async def test_two_concurrent_claims_get_different_subtasks(
 
     id1, id2 = await asyncio.gather(claim_in_own_session(), claim_in_own_session())
     assert id1 is not None and id2 is not None
-    assert id1 != id2  # The crucial assertion: SKIP LOCKED prevents double-claim
+    assert id1 != id2
+
+
+@pytest.mark.slow
+async def test_one_subtask_two_claimants_only_one_wins(
+    db_session: AsyncSession, engine
+) -> None:
+    """Critical correctness test: with EXACTLY 1 pending subtask and 2
+    concurrent claimants, exactly one must succeed and one must get None.
+
+    The 2-subtask test above passes even if SKIP LOCKED is broken (each
+    claimant just picks a different row). This test directly falsifies
+    the double-claim scenario: without SKIP LOCKED, both claimants would
+    block on FOR UPDATE and both would eventually claim the same row.
+    """
+    await _make_pending_task(db_session, n_subtasks=1)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def claim_in_own_session() -> uuid.UUID | None:
+        async with factory() as s:
+            sub, _ = await claim_one_subtask(s, executor_id="exec-A")
+            await s.commit()
+            return sub.id if sub else None
+
+    r1, r2 = await asyncio.gather(claim_in_own_session(), claim_in_own_session())
+    succeeded = [r for r in (r1, r2) if r is not None]
+    assert len(succeeded) == 1, f"Expected exactly 1 winner, got {succeeded}"
 
 
 @pytest.mark.slow
@@ -1513,13 +1645,19 @@ When all subtasks of a task succeed, the task itself flips to `succeeded`. If an
 
 - [ ] **Step 1: Add `complete_subtask` to `src/dlw/services/scheduler.py`**
 
-Append to the existing scheduler.py:
+**IMPORTANT**: The new imports below go at the **top** of `scheduler.py` (alongside the existing imports from Task 6), not interleaved with the function body. Don't paste them as-is at the append point.
+
+**Add these imports at the top of `src/dlw/services/scheduler.py`** (next to the existing `import uuid` line):
 
 ```python
-from dlw.db.models.task import DownloadTask
 from datetime import UTC, datetime
 
+from dlw.db.models.task import DownloadTask
+```
 
+**Then append `complete_subtask` to the bottom of `src/dlw/services/scheduler.py`**:
+
+```python
 async def complete_subtask(
     session: AsyncSession,
     subtask_id: uuid.UUID,
@@ -1528,8 +1666,16 @@ async def complete_subtask(
     actual_sha256: str | None,
     bytes_downloaded: int,
     error: str | None,
+    assignment_token: uuid.UUID | None = None,
 ) -> tuple[FileSubTask, DownloadTask]:
     """Mark subtask done, then check if parent task can transition.
+
+    Locking: parent task fetched with FOR UPDATE so that two concurrent
+    completions racing on the LAST 2 subtasks cannot both observe
+    "all succeeded" and both write parent.status (W2-E from review).
+
+    Token verification: if `assignment_token` provided, must match the row's
+    stored token (cheap defence — token is already in DB; W2-F from review).
 
     Returns (subtask, parent_task). Caller commits.
     """
@@ -1538,6 +1684,8 @@ async def complete_subtask(
         raise LookupError(f"subtask {subtask_id} not found")
     if sub.status != "assigned":
         raise ValueError(f"subtask {subtask_id} is not assigned (status={sub.status})")
+    if assignment_token is not None and sub.assignment_token != assignment_token:
+        raise ValueError(f"subtask {subtask_id} assignment_token mismatch")
 
     sub.status = final_status
     sub.actual_sha256 = actual_sha256
@@ -1545,8 +1693,11 @@ async def complete_subtask(
     sub.last_error = error
     sub.completed_at = datetime.now(UTC)
 
-    # Check if parent task can transition
-    parent = await session.get(DownloadTask, sub.task_id)
+    # Lock parent before reading siblings — prevents two concurrent
+    # completions both flipping parent.status under the same observation
+    parent = await session.get(
+        DownloadTask, sub.task_id, with_for_update=True
+    )
     siblings = (await session.execute(
         select(FileSubTask).where(FileSubTask.task_id == sub.task_id)
     )).scalars().all()
@@ -1708,6 +1859,23 @@ async def test_report_unauthenticated_returns_401(client) -> None:
         "status": "succeeded",
     })
     assert r.status_code == 401
+
+
+@pytest.mark.slow
+async def test_double_report_returns_409(client, auth) -> None:
+    """W2-G: idempotency / illegal-transition guard.
+
+    First report succeeds; second report on the same subtask must be
+    rejected with 409 (subtask already terminal — invariant 14)."""
+    sub_id = await _setup_assigned_subtask(client, auth, "o/dup")
+    r1 = await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
+        "status": "succeeded", "actual_sha256": "c" * 64, "bytes_downloaded": 100,
+    }, headers=auth)
+    assert r1.status_code == 200
+    r2 = await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
+        "status": "succeeded", "actual_sha256": "c" * 64, "bytes_downloaded": 100,
+    }, headers=auth)
+    assert r2.status_code == 409, r2.text
 ```
 
 - [ ] **Step 3: Verify red**
@@ -1750,6 +1918,7 @@ async def post_report(
             actual_sha256=body.actual_sha256,
             bytes_downloaded=body.bytes_downloaded,
             error=body.error,
+            assignment_token=body.assignment_token,
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -1779,7 +1948,7 @@ Then full regression:
 uv run pytest tests/ 2>&1 | tail -3
 ```
 
-Expected: ~46 tests pass total (18 Phase 1 + 4 auth + 2 task_service + 6 tasks + 4 exec_service + 4 scheduler + 5 executors + 5 subtasks).
+Expected: ~50 tests pass total (18 Phase 1 + 4 auth + 2 task_service + 6 tasks + 4 exec_service + 5 scheduler + 5 executors + 6 subtasks).
 
 - [ ] **Step 7: Commit**
 
@@ -1831,10 +2000,13 @@ def upgrade() -> None:
     )
     # Hot path: get_task list endpoint
     # SELECT FROM download_tasks WHERE tenant_id = ? ORDER BY created_at DESC
+    # W2-J: use postgresql_ops to express DESC ordering — sa.text() in column
+    # list is undocumented and may break across alembic versions.
     op.create_index(
         "ix_download_tasks_tenant_created",
         "download_tasks",
-        ["tenant_id", sa.text("created_at DESC")],
+        ["tenant_id", "created_at"],
+        postgresql_ops={"created_at": "DESC NULLS LAST"},
     )
 
 
@@ -2030,7 +2202,7 @@ Expected: 1 test PASS. Will be slower than unit tests (~2-5s due to HTTP round-t
 uv run pytest tests/ 2>&1 | tail -5
 ```
 
-Expected: ~47 tests pass (Phase 1: 18 + Week 2 unit: ~28 + Week 2 E2E: 1).
+Expected: ~51 tests pass (Phase 1: 18 + Week 2 unit: ~32 + Week 2 E2E: 1).
 
 - [ ] **Step 5: Commit**
 
@@ -2173,7 +2345,7 @@ Expected: all 9 jobs (10 with the aggregate) pass. If pytest fails, look at the 
 ## Acceptance criteria — done when ALL hold
 
 - [ ] All 11 task commits exist on `feat/phase-1-week-2-controller-core` branch
-- [ ] `uv run pytest tests/ -v` shows ~47 PASS, 0 FAIL
+- [ ] `uv run pytest tests/ -v` shows ~51 PASS, 0 FAIL
 - [ ] `psql ... -d dlw -c "\di"` shows both new indexes
 - [ ] `alembic upgrade head` is idempotent (re-running does nothing)
 - [ ] `alembic downgrade -1` rolls back to Phase 1 head cleanly
