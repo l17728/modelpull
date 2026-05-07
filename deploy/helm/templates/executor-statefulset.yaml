@@ -107,13 +107,16 @@ spec:
             secretName: {{ .Values.security.mTLS.ca_secret }}
         - name: tmp
           emptyDir: {}
-      terminationGracePeriodSeconds: 720    # 12min: 给 drain 留余量
+      # CODE-11 修复 (v2.0.16): TGPS 与 graceful_shutdown 强关联，避免 SIGKILL 中断 in-flight upload
+      terminationGracePeriodSeconds: {{ add .Values.executor.config.graceful_shutdown_timeout_seconds 120 }}
   volumeClaimTemplates:
     - metadata:
         name: parts
       spec:
         accessModes: [ReadWriteOnce]
-        storageClassName: {{ .Values.executor.parts.storageClassName }}
+        # CODE-11 修复 (v2.0.16): storageClassName fallback 链
+        # executor.parts.storageClassName → global.storageClass → required
+        storageClassName: {{ .Values.executor.parts.storageClassName | default .Values.global.storageClass | required "executor.parts.storageClassName or global.storageClass required" }}
         resources:
           requests:
             storage: {{ .Values.executor.parts.storage }}

@@ -26,10 +26,21 @@ jobs:
 
       - name: Setup Node
         uses: actions/setup-node@v4
-        with: {node-version: '20'}
+        with:
+          node-version: '20'
+          cache: 'npm'           # CODE-17 修复 (v2.0.16): npm cache
 
-      - name: Install spectral
-        run: npm install -g @stoplight/spectral-cli@6
+      - name: Cache npm global packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-cache-${{ runner.os }}-spectral6-swagger-cli
+          restore-keys: |
+            npm-cache-${{ runner.os }}-
+
+      - name: Install spectral + swagger-cli (cached if hit)
+        run: |
+          npm install -g @stoplight/spectral-cli@6 @apidevtools/swagger-cli
 
       - name: Create spectral ruleset
         run: |
@@ -44,9 +55,7 @@ jobs:
         run: spectral lint api/openapi.yaml --fail-severity=error
 
       - name: Validate with swagger-cli (catches $ref errors)
-        run: |
-          npm install -g @apidevtools/swagger-cli
-          swagger-cli validate api/openapi.yaml
+        run: swagger-cli validate api/openapi.yaml
 
   # ============================================================
   # Helm: lint + template + values schema
@@ -170,7 +179,9 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
+          cache: 'pip'         # CODE-17 修复 (v2.0.16): pip cache
 
       - name: Install pytest
         run: pip install pytest

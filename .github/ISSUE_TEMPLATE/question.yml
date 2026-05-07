@@ -1,0 +1,47 @@
+name: ❓ Question / Discussion
+description: 关于 modelpull 的提问 / 讨论 / 不确定如何归类的反馈（无 required field）
+title: "[Question] "
+labels: [question, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **门槛低**：本模板没有 required 字段。如果你只是想问问题，不知道
+        > 算 bug 还是 feature，欢迎用这个。
+        > 适合这里的：
+        > - "modelpull 适合 X 场景吗？"
+        > - "为什么文档说 Y 而不是 Z？"
+        > - "我看 03 §2 没看懂 fence token，能否解释下？"
+        > - "Phase 1 什么时候开始？"
+        >
+        > 如果你已经定位到具体 bug / feature，请用对应的[模板](https://github.com/l17728/modelpull/issues/new/choose)。
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 你的问题
+      description: 自由发挥；可以一句也可以一段；可以中文也可以英文
+      placeholder: |
+        例：我在 docs/v2.0/13 里看到 fence token 但没明白为什么需要 epoch 和 token 两层；
+        是不是 token 单独就能防双发？
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 大致类别（可选 — 选不出来就选"其他"）
+      options:
+        - 设计 / 架构问题
+        - 实施 / 部署问题
+        - CLI / SDK / API 用法
+        - 性能 / 容量
+        - 安全 / 合规
+        - 文档不清晰
+        - 项目 status / roadmap
+        - 其他
+
+  - type: input
+    id: link
+    attributes:
+      label: 相关文档行号（可选）
+      description: 如果是某段文字让你疑惑，附上链接 / 行号方便定位
+      placeholder: docs/v2.0/13-adaptive-download-optimization.md:142

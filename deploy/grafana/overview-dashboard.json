@@ -9,8 +9,17 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"selected": true, "text": "Prometheus", "value": "Prometheus"},
+        "label": "Datasource",
+        "hide": 0
+      },
+      {
         "name": "tenant",
         "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "query": "label_values(dlw_tasks_active_count, tenant_id)",
         "includeAll": true,
         "multi": true

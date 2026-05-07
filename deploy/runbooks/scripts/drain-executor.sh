@@ -52,14 +52,24 @@ if [[ "$HTTP_CODE" != "202" ]]; then
   fail "Drain request rejected (HTTP $HTTP_CODE)"
 fi
 
-# Step 2: poll until drained
+# Step 2: poll until drained (CODE-13 修复 v2.0.16)
+# 单次 GET 拿 JSON，避免两次 curl 之间 reassign 造成 (status, running) 永远凑不齐
 log "Step 2/3: waiting for in-flight subtasks (max ${TIMEOUT}s)"
 deadline=$(($(date +%s) + TIMEOUT + 30))
 while [[ $(date +%s) -lt $deadline ]]; do
-  STATUS=$(curl -sf "$API/admin/executors/$EXECUTOR_ID" \
-    -H "Authorization: Bearer $DLW_TOKEN" | jq -r '.status')
-  RUNNING=$(curl -sf "$API/admin/executors/$EXECUTOR_ID" \
-    -H "Authorization: Bearer $DLW_TOKEN" | jq -r '.running_subtasks // 0')
+  if ! JSON=$(curl -sf "$API/admin/executors/$EXECUTOR_ID" \
+        -H "Authorization: Bearer $DLW_TOKEN" 2>&1); then
+    log "  API timeout / network blip; retrying in 5s"
+    sleep 5
+    continue
+  fi
+  STATUS=$(jq -r '.status' <<<"$JSON")
+  RUNNING=$(jq -r '.running_subtasks // 0' <<<"$JSON")
+  if [[ "$STATUS" == "null" ]] || [[ -z "$STATUS" ]]; then
+    log "  invalid response: $JSON; retrying in 5s"
+    sleep 5
+    continue
+  fi
   log "  status=$STATUS running=$RUNNING"
   if [[ "$STATUS" == "drained" ]] && [[ "$RUNNING" == "0" ]]; then
     log "✓ Drained"
@@ -68,9 +78,10 @@ while [[ $(date +%s) -lt $deadline ]]; do
   sleep 10
 done
 
-# Verify
-STATUS=$(curl -sf "$API/admin/executors/$EXECUTOR_ID" \
-  -H "Authorization: Bearer $DLW_TOKEN" | jq -r '.status')
+# Verify (CODE-13: 同样原子获取)
+JSON=$(curl -sf "$API/admin/executors/$EXECUTOR_ID" \
+  -H "Authorization: Bearer $DLW_TOKEN") || fail "API unreachable for verify"
+STATUS=$(jq -r '.status' <<<"$JSON")
 if [[ "$STATUS" != "drained" ]]; then
   fail "Drain did not complete (status=$STATUS); some subtasks were force-released"
 fi

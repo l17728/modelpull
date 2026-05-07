@@ -494,18 +494,118 @@ paths:
         content:
           application/json:
             schema: {$ref: '#/components/schemas/HeartbeatRequest'}
+            examples:
+              healthyMidDownload:
+                summary: Healthy executor mid-download (CODE-22 v2.0.16)
+                value:
+                  executor_id: host-12.local-worker-1
+                  epoch: 14
+                  host_id: host-12.local
+                  parent_executor_id: null
+                  timestamp: "2026-05-07T10:30:00.000Z"
+                  uptime_seconds: 3600
+                  system:
+                    nic_speed_gbps: 10
+                    nic_utilization_percent: 67
+                    disk_total_gb: 2000
+                    disk_free_gb: 1230
+                    parts_dir_bytes: 12345678901
+                    memory_used_percent: 34
+                    load_avg_1min: 4.2
+                    active_threads: 16
+                    running_subtasks: 5
+                  source_health:
+                    huggingface: {reachable: true, rtt_ms: 320, last_5xx_ago_s: 1200}
+                    modelscope: {reachable: true, rtt_ms: 18, last_5xx_ago_s: null}
+                    hf_mirror: {reachable: true, rtt_ms: 35, last_5xx_ago_s: null}
+                  tasks:
+                    - subtask_id: 11111111-2222-3333-4444-555555555555
+                      task_id: 7e57a3f8-1234-4567-8901-abcdef012345
+                      executor_epoch: 14
+                      assignment_token: 99999999-aaaa-bbbb-cccc-dddddddddddd
+                      status: downloading
+                      bytes_downloaded: 9876543210
+                      bytes_total: 17000000000
+                      chunks_total: 8
+                      chunks_completed: 5
+                      active_threads: 4
+                      current_speed_bytes_per_sec: 950000000
+                      speed_window_seconds: 5
+                      eta_seconds: 75
+                      source_id: modelscope
+              withCompletion:
+                summary: Heartbeat including a completed subtask
+                value:
+                  executor_id: host-12.local-worker-1
+                  epoch: 14
+                  host_id: host-12.local
+                  timestamp: "2026-05-07T10:35:00.000Z"
+                  uptime_seconds: 3900
+                  system: {nic_speed_gbps: 10, nic_utilization_percent: 12, disk_free_gb: 1228, parts_dir_bytes: 0, memory_used_percent: 22, load_avg_1min: 0.5, active_threads: 0, running_subtasks: 0}
+                  completed_subtasks:
+                    - actual_sha256: abc123def4567890abc123def4567890abc123def4567890abc123def4567890
+                      actual_size: 17000000000
+                      remote_storage_uri: s3://prod-bucket/team-a/deepseek-ai/DeepSeek-V3/abc123/model-001-of-163.safetensors
+                      remote_etag: '"d41d8cd98f00b204e9800998ecf8427e"'
+                      remote_sha256_via_checksum: abc123def4567890abc123def4567890abc123def4567890abc123def4567890
+                      duration_seconds: 1820
+                      sources_used: [modelscope]
+                      bytes_per_source: {modelscope: 17000000000}
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: {$ref: '#/components/schemas/HeartbeatResponse'}
+              examples:
+                idle:
+                  summary: No new work; executor stays idle
+                  value:
+                    server_timestamp: "2026-05-07T10:30:00.150Z"
+                    epoch_check: ok
+                    next_heartbeat_in_seconds: 10
+                    config_version: 42
+                    new_assignments: []
+                    cancellations: []
+                    reassignments: []
+                withNewAssignment:
+                  summary: Server pushes a new subtask assignment
+                  value:
+                    server_timestamp: "2026-05-07T10:30:00.150Z"
+                    epoch_check: ok
+                    next_heartbeat_in_seconds: 10
+                    config_version: 42
+                    new_assignments:
+                      - subtask_id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+                        task_id: 7e57a3f8-1234-4567-8901-abcdef012345
+                        filename: model-002-of-163.safetensors
+                        expected_size: 4322000000
+                        expected_sha256: ffffffff...
+                        source_id: modelscope
+                        alternate_sources: [hf_mirror, huggingface]
+                        executor_epoch: 14
+                        target_executor_epoch: 14
+                        optimization_generation: 7
+                        assignment_token: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+                        deadline_at: "2026-05-07T11:00:00Z"
         '401':
           description: EPOCH_MISMATCH or CERT_REVOKED
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/ProblemDetail'}
+              example:
+                type: https://docs.dlw.example.com/errors/epoch-mismatch
+                title: Executor epoch outdated
+                status: 401
+                detail: "request.epoch=13 but current executors.epoch=14; executor must re-register"
+                code: EPOCH_MISMATCH
+                trace_id: c0ffee0123456789
         '409':
           description: CLOCK_SKEW or NONCE_REPLAY
         '429':
           description: Server requesting backoff
+          headers:
+            Retry-After: {schema: {type: integer}}
 
   /executors/{executorId}/renew:
     parameters:
@@ -922,10 +1022,26 @@ paths:
 
 components:
   securitySchemes:
+    # CODE-09 修复 (v2.0.16): 完整表达 modelpull 的 3 套鉴权
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: User-side OIDC-issued JWT (UI / CLI / SDK)
+    mtlsAuth:
+      type: mutualTLS
+      description: |
+        OAS 3.1 native mTLS scheme. Used for executor → controller channel
+        in addition to bearerAuth (executor JWT). Server validates client
+        cert fingerprint against `executors.cert_fingerprint`.
+    hmacBodySig:
+      type: apiKey
+      in: header
+      name: X-Heartbeat-HMAC
+      description: |
+        HMAC-SHA256 of (request body + nonce + timestamp) using executor's
+        enrollment_secret. Required for /executors/heartbeat in addition to
+        mTLS + bearerAuth (defense in depth). Detail see 04 §2.2.4.
 
   parameters:
     TaskId:
@@ -955,22 +1071,48 @@ components:
     Unauthenticated:
       description: Missing or invalid JWT
       content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetail'}
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
     RateLimited:
-      description: Rate limited
+      description: Rate limited (returned for any token-bucket-throttled endpoint)
       headers:
         Retry-After:
-          schema: {type: integer}
+          schema: {type: integer, description: seconds to wait before retry}
+        X-RateLimit-Limit:
+          schema: {type: integer, description: max requests in current window}
+        X-RateLimit-Remaining:
+          schema: {type: integer, description: remaining requests in current window}
+        X-RateLimit-Reset:
+          schema: {type: integer, description: unix timestamp when window resets}
       content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetail'}
         application/json:
           schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ProblemDetail:
+      description: RFC 7807 standard problem detail
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/ProblemDetail'}
+    PaginationHeaders:
+      description: Standard pagination response headers
+      headers:
+        X-Total-Count:
+          schema: {type: integer, nullable: true, description: total estimated count}
+        Link:
+          schema: {type: string, description: RFC 5988 Link header (next/prev)}
 
   schemas:
     # ===== Common =====
     ErrorResponse:
       type: object
       required: [code, message, trace_id]
+      description: |
+        Legacy error response (v2.0). New endpoints SHOULD use ProblemDetail
+        (RFC 7807). Both schemas coexist for the v2.x release window;
+        v3.0 may deprecate ErrorResponse.
       properties:
         code: {type: string}
         message: {type: string}
@@ -978,6 +1120,46 @@ components:
         details:
           type: object
           additionalProperties: true
+
+    # CODE-10 修复 (v2.0.16): RFC 7807 standard problem detail; SDK generators
+    # auto-map this to typed exceptions across languages
+    ProblemDetail:
+      type: object
+      required: [type, title, status]
+      description: RFC 7807 standard problem detail (application/problem+json)
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            URI identifying the problem type. e.g.
+            https://docs.dlw.example.com/errors/quota-exceeded
+          example: https://docs.dlw.example.com/errors/quota-exceeded
+        title:
+          type: string
+          description: Short human-readable summary of the problem
+          example: Tenant monthly bytes quota exceeded
+        status:
+          type: integer
+          format: int32
+          description: HTTP status code
+          example: 429
+        detail:
+          type: string
+          description: Specific human-readable explanation
+        instance:
+          type: string
+          format: uri
+          description: URI identifying this specific occurrence (often trace_id link)
+        # modelpull-specific extensions (RFC 7807 allows additional members)
+        code:
+          type: string
+          description: Machine-readable error code (same as ErrorResponse.code)
+        trace_id:
+          type: string
+        retry_after_seconds:
+          type: integer
+          nullable: true
 
     # ===== Task =====
     TaskStatus:

@@ -15,6 +15,25 @@
 #
 set -euo pipefail
 
+# CODE-14 修复 (v2.0.16): 校验 GNU coreutils；macOS oncall 的 BSD du/stat/numfmt 不兼容
+for cmd in du numfmt stat find; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "FAIL: required command '$cmd' not found" >&2
+    exit 2
+  fi
+done
+# 测试 stat -c (GNU) vs -f (BSD)
+if ! stat -c %Y /tmp >/dev/null 2>&1; then
+  echo "FAIL: GNU stat required (BSD stat detected; install gnu-coreutils on macOS)" >&2
+  echo "  brew install coreutils && export PATH=\"/usr/local/opt/coreutils/libexec/gnubin:\$PATH\"" >&2
+  exit 2
+fi
+# 测试 du -sb (GNU) vs -k (BSD)
+if ! du -sb /tmp >/dev/null 2>&1; then
+  echo "FAIL: GNU du required (BSD du -sb not supported)" >&2
+  exit 2
+fi
+
 PARTS_DIR="${PARTS_DIR:-/var/lib/dlw/parts}"
 TTL_HOURS=24
 DRY_RUN=false

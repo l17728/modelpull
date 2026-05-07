@@ -93,16 +93,24 @@ spec:
 ---
 # AI Copilot 出站：仅 LLM 提供商 API（v2.1）
 {{- if .Values.aiCopilot.enabled }}
+# CODE-18 修复 (v2.0.16): 原版本叠加 controller selector + ai-copilot label，
+# 但 ai-copilot 不是独立 deployment（in-process MCP 跑在 controller 内），
+# label 永远不会同时匹配 → policy 实际等效 noop。
+# 修订：直接对 controller pods 加这条 egress（覆盖 §controller-egress 的子集）；
+# 当 mcp.deployment=sidecar 时，sidecar pod 自带 ai-copilot label 触发本 policy
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ include "dlw.fullname" . }}-ai-copilot-egress
   namespace: {{ .Release.Namespace }}
+  annotations:
+    dlw.io/note: "v2.0.16 CODE-18 — applies to controller pods (in-process MCP) AND ai-copilot sidecar (when enabled). FQDN restriction requires Cilium/Calico; standard NetworkPolicy only does ipBlock."
 spec:
   podSelector:
-    matchLabels:
-      {{- include "dlw.controller.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: ai-copilot     # 同进程时仍归 controller
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [controller, ai-copilot]
   policyTypes: [Egress]
   egress:
     - to:
