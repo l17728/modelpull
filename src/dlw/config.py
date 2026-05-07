@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     db_password: str = Field(default="")
     db_name: str = Field(default="dlw")
 
+    # Single shared secret for Week 2 (multi-user OIDC PKCE in Phase 3)
+    bearer_token: str = Field(default="dev-token-change-me")
+
     log_level: str = Field(default="INFO")
 
     @property
