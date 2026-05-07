@@ -28,6 +28,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health_router)
+    from dlw.api.tasks import router as tasks_router
+    app.include_router(tasks_router)
+    from dlw.api.executors import router as executors_router
+    app.include_router(executors_router)
+    from dlw.api.subtasks import router as subtasks_router
+    app.include_router(subtasks_router)
     return app
 
 

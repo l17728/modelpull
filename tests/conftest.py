@@ -108,3 +108,37 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     async with factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _point_app_at_test_db(test_db_name: str, engine: AsyncEngine):
+    """Make the FastAPI app's get_engine() / get_settings() see the test DB.
+
+    Runs once per pytest session AFTER the engine fixture creates the test DB.
+    Without this, API tests would query the production `dlw` DB which has no
+    seeded fixtures.
+    """
+    env_overrides = {
+        "DLW_DB_HOST": os.environ.get("DLW_TEST_PG_HOST", "localhost"),
+        "DLW_DB_PORT": os.environ.get("DLW_TEST_PG_PORT", "5433"),
+        "DLW_DB_USER": os.environ.get("DLW_TEST_PG_USER", "postgres"),
+        "DLW_DB_PASSWORD": os.environ.get("DLW_TEST_PG_PASSWORD", ""),
+        "DLW_DB_NAME": test_db_name,
+    }
+    saved = {k: os.environ.get(k) for k in env_overrides}
+    os.environ.update(env_overrides)
+
+    from dlw.config import get_settings
+    from dlw.db.session import reset_engine
+    get_settings.cache_clear()
+    await reset_engine()
+
+    yield
+
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    get_settings.cache_clear()
+    await reset_engine()

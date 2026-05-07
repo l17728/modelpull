@@ -70,10 +70,45 @@ curl http://localhost:8000/health/live    # → {"status":"healthy"}
 curl http://localhost:8000/health/ready   # → {"status":"ready","db":"ok"}
 
 # 9. 跑 tests
-uv run pytest -v               # 18 tests, 应全绿
+uv run pytest -v               # Phase 1: 18 tests | Week 2: 51 tests
 ```
 
-完整开发计划：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
+### Week 2 demo: drive a mock executor end-to-end via HTTP
+
+```bash
+export DLW_BEARER_TOKEN="dev-secret"
+TOKEN_HEADER="Authorization: Bearer dev-secret"
+
+# Create a task (auto-creates 2 mock subtasks)
+TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
+  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
+  -d '{"repo_id":"deepseek-ai/DeepSeek-V3","revision":"0123456789abcdef0123456789abcdef01234567","storage_id":1}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "Task: $TASK_ID"
+
+# Register a worker
+curl -s -X POST http://localhost:8000/api/v1/executors/join \
+  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
+  -d '{"id":"demo-worker","host_id":"demo-host"}'
+
+# Poll twice + report success (token verified)
+for i in 1 2; do
+  POLL=$(curl -s -X POST http://localhost:8000/api/v1/executors/demo-worker/poll -H "$TOKEN_HEADER")
+  SUB_ID=$(echo "$POLL" | python -c "import sys,json; print(json.load(sys.stdin)['subtask']['id'])")
+  TOK=$(echo "$POLL" | python -c "import sys,json; print(json.load(sys.stdin)['assignment_token'])")
+  curl -s -X POST "http://localhost:8000/api/v1/subtasks/$SUB_ID/report" \
+    -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
+    -d "{\"status\":\"succeeded\",\"assignment_token\":\"$TOK\",\"actual_sha256\":\"$(printf 'f%.0s' {1..64})\",\"bytes_downloaded\":100000000}"
+done
+
+# Verify task completed
+curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER"
+# Expected: {"status":"succeeded", ...}
+```
+
+完整开发计划：
+- Phase 1 Foundation：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
+- Phase 1 Week 2 Controller Core：[`docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md)
 
 ---
 
