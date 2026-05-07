@@ -53,6 +53,12 @@ plugins = []
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+filterwarnings = [
+    # pytest-asyncio 0.24 deprecates event_loop fixture override; we need it
+    # for session-scoped async fixtures (testcontainer/local PG engine reuse).
+    # See: https://github.com/pytest-dev/pytest-asyncio/issues/706
+    "ignore::DeprecationWarning:pytest_asyncio",
+]
 addopts = "-v --tb=short --strict-markers"
 markers = [
     "slow: marks tests requiring docker (testcontainers)",
