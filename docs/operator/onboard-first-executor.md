@@ -31,7 +31,7 @@ kubectl -n dlw-prod exec -it deploy/dlw-controller -- \
 ```
 Enrollment token created:
   executor_id:   host-12.local-worker-1
-  token:         ent_a1b2c3d4e5f6...  ← 256-bit hex, ONLY SHOWN ONCE
+  token:         <PASTE_TOKEN_FROM_STEP_1_HERE>  ← 256-bit hex, ONLY SHOWN ONCE
   expires_at:    2026-05-07T08:30:00Z
   one_time:      true (token destroyed after first use)
 
@@ -54,7 +54,7 @@ Enrollment token created:
 ```bash
 # 把 token 注入 K8s Secret
 kubectl -n dlw-prod create secret generic dlw-executor-enrollment \
-  --from-literal=enrollment_token="ent_a1b2c3d4e5f6..." \
+  --from-literal=enrollment_token="<PASTE_TOKEN_FROM_STEP_1_HERE>" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Helm install executor
@@ -76,7 +76,7 @@ ssh dlw@host-12.local
 
 # 把 token 写入 env 文件（chmod 600）
 sudo tee /etc/dlw/enrollment.env <<EOF
-DLW_ENROLLMENT_TOKEN=ent_a1b2c3d4e5f6...
+DLW_ENROLLMENT_TOKEN=<PASTE_TOKEN_FROM_STEP_1_HERE>
 DLW_EXECUTOR_ID=host-12.local-worker-1
 DLW_CONTROLLER_ENDPOINT=https://controller.dlw.example.com
 EOF
