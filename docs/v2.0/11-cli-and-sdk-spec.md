@@ -18,7 +18,13 @@
 
 ## 1. 安装与配置
 
-### 1.1 安装方式
+> ⚠️ **本节是 SPEC，不是工作的安装命令（DX-02 修复 v2.0.13）**
+> 下面所有 `pip install` / `brew install` / `curl get.dlw.example.com` 都是**未发布**的占位。
+> 现在跑这些命令会得到 `package not found`。
+> Phase 1 启动后真实安装方式将在 PyPI / Homebrew / GitHub Releases 上线，并替换本节为可执行命令。
+> 想看现在能跑什么 → [`docs/getting-started.md`](../getting-started.md)。
+
+### 1.1 安装方式（设计中，尚未发布）
 
 ```bash
 # Linux/Mac（推荐）

@@ -1,0 +1,64 @@
+name: Deploy OpenAPI to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/openapi.yaml'
+      - '.github/workflows/openapi-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with: {node-version: '20'}
+
+      - name: Build Redoc static site
+        run: |
+          mkdir -p _site
+          # 用 redocly cli build static html
+          npx -y @redocly/cli build-docs api/openapi.yaml \
+            --output _site/index.html \
+            --title "modelpull API"
+
+          # 简单 landing 页（Pages 根 README 风）
+          cat > _site/_landing.md <<'EOF'
+          # modelpull API Documentation
+
+          - Live OpenAPI Redoc: [./index.html](./index.html)
+          - Source: [api/openapi.yaml](https://github.com/l17728/modelpull/blob/main/api/openapi.yaml)
+          - Project: [github.com/l17728/modelpull](https://github.com/l17728/modelpull)
+
+          > ⚠️ This is the API specification only. Code is not yet implemented.
+          > See the [project README](https://github.com/l17728/modelpull) for current status.
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4

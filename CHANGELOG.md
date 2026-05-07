@@ -1,0 +1,77 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
+
+> ⚠️ **设计阶段说明**：当前版本号是**设计文档版本**（v2.0.X），不是软件 release。
+> 软件版本（如 v2.0.0-alpha）将在 Phase 1 启动后开始。
+
+---
+
+## [Unreleased — design v2.0.13 frozen, 2026-05-07]
+
+### Added
+- 3 轮多 agent review（共 15 reviewer 视角）找出 ~150 项问题，全部分 6 PR 修复
+- `tools/lint_invariants.py` + 9 个 pytest 单测（CI 集成）
+- `docs/operator/onboard-first-executor.md` — mTLS bootstrap 流程（解决 FEAS-03 chicken-and-egg）
+- `docs/operator/oidc-setup.md` — Keycloak/Auth0 配置示例 + `dlw admin bootstrap`（解决 FEAS-04 day-zero）
+- 7 份新 runbook（RB-13~RB-19）覆盖 AI / Optimizer / Multipart / WSS / Credential / Probe / Audit chain
+- 5 个 Grafana dashboard（含 AI Copilot / Optimizer / Enterprise Network）
+- 32 条 Prometheus 告警（v2.0 12 条 + v2.1 12 条 + 加 description 全部）
+- 12 章新设计文档：`12-ai-copilot.md` / `13-adaptive-download-optimization.md` / `14-enterprise-network-and-rate-limit.md`
+- 46 条核心不变量索引（01 §7）含 CI 强制断言
+
+### Changed
+- v2.0 GA 路线图：14 周 → **15 周**（Phase 1 5w → 6w，含 dev infra week）；P90 估算 18-19 周
+- AI Copilot 从 Phase 4 末灰度 → 砍出独立 v2.1 4-6 周里程碑（避免挤压 K8s Operator/Sigstore/chaos）
+- 不变量 2 措辞修订：HF Token 不离开 Controller 仅指 **tenant 级**；executor 本地 OOB 池为例外
+- 不变量 19 扩展：任何外部 origin 字段（含 dlw_* 工具 output）必须 sanitize
+- AuditChainBroken 告警从 ticket → page（P0 安全事件）
+- StorageS3High5xx 告警从绝对 rate → ratio
+- README 重写为"design-only"诚实定位（前 round 3 reviewer DX-01 指出绿色 badge 误导）
+
+### Fixed
+- **CODE-01** (prod 事故级): `AllExecutorsOffline` (P0) 永不触发 — `dlw_executor_health_score` 没 `status` label，recording rule + alert 用错；改 `dlw_executor_status{status}`
+- **CODE-02** (SLO 误报): SLO burn rate 用 `avg_over_time(ratio)` 在零流量时段 NaN 传染；改 sloth 标准
+- **CODE-05** (部署 blocker): `vault.example.com:8200` 硬编码；改 helm value `required` + `enabled` 默认 false
+- **CODE-06** (安全假象): NetworkPolicy 声称限制 LLM endpoint 但实际 ipBlock 全开；加显著 warning + 4 替代方案
+- **CODE-07** (备份"假绿"): `verify-backup.sh` heredoc 残破导致 audit 校验恒返回 0；改 `psql -tAc` + numeric 校验
+- **CODE-12**: `promote-standby.sh` 去 `bc` 依赖（macOS oncall 没装）；用 `awk`；加 fence 旧 primary 步骤
+- **OPS-V21-01**: 12/31 告警无 runbook_url → 全部加 `description` + `runbook_url`
+- **OPS-V21-02**: RB-AI-COST/RB-OPT-STORM/RB-MP-INTEGRITY 链接 404 → 实际写出
+- **OPS-V21-03**: RB-03 (DataIntegrityFailure P0) 加 step 0 「30s 冻结同源新任务」
+- **OPS-V21-05**: inhibit_rules 扩到全 v2.1 主题（凌晨不再 8 个 PD 同时炸）
+- **DIST-V21-01..04**: multipart upload_id 持久化 + part_number bump + WSS push epoch fence + reclaim 主动 push
+- **AI-SEC-V21-01**: Unicode NFKC + Cf 移除 + confusables + 语义模式 sanitize（11 unit test）
+- **FEAS-01..07**: Phase 1 时长、AI canary 范围、前端 FTE、mTLS bootstrap、OIDC bootstrap 等可行性问题
+- 65 项前 2 轮 review 已修；24 项 round 3 critical/high 已修
+
+### Security
+- 不变量 30: 本地凭证不出本机；controller 仅知 alias
+- 不变量 36: AI sanitize 必经 Unicode NFKC + confusables 检测
+- 不变量 37: MCP server 不继承 controller 敏感凭证内存
+- 不变量 44: mTLS fingerprint mismatch fail-fast（防 SSL inspection 透明降级）
+- 不变量 45: cn zone tenant v2.1 GA 期间禁用 AI Copilot
+
+### Notes
+- "本仓库目前 0 issues" 不是项目放弃——是因为还在写设计而非求 bug 报告。设计阶段最有价值的贡献是 design review，欢迎来 [issue 模板](https://github.com/l17728/modelpull/issues/new?template=design_review.yml)
+
+---
+
+## [Design v2.0.0 — 2026-04-28]
+
+### Added
+- v1.0 / v1.4 / v1.5 三份历史设计文档合并为统一 v2.0 体系（10 章）
+- 5 reviewer 第 1 轮 review 找出 70+ 项问题，全部并入 v2.0 设计
+
+### Changed
+- 整体架构：从 v1.x 单文件设计 → v2.0 模块化（按主题切分章节）
+
+---
+
+## [Design v1.5 — superseded]
+
+历史设计版本（详见 `docs/archive/design_document_v1.5_review_e2e.md`）。
+不再维护；新工作以 v2.0 为准。

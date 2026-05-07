@@ -1,16 +1,35 @@
 # modelpull
 
-> **分布式 HuggingFace 模型权重下载系统** · 多机并行 · 多源加速 · 断点续传 · 完整性校验
+[English](./README_en.md) | 中文
+
+> **📐 设计阶段（Design only）— 暂无可执行代码**
+> 寻找的是 **design reviewer**，不是用户。代码实现按 [ROADMAP](./ROADMAP.md) Phase 1 启动。
 
 [![CI](https://github.com/l17728/modelpull/actions/workflows/ci.yml/badge.svg)](https://github.com/l17728/modelpull/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-![Status](https://img.shields.io/badge/status-design--complete-green)
-![Version](https://img.shields.io/badge/version-v2.0--design-orange)
+![Status](https://img.shields.io/badge/status-design--only-orange)
+![Version](https://img.shields.io/badge/spec-v2.0.13-blue)
+![Code](https://img.shields.io/badge/code-not--started-red)
 [![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
-`modelpull` 是一套面向大型语言模型权重下载的分布式系统。专为 TB 级模型（如 DeepSeek-V3 689 GB、Kimi-K2 1 TB）设计，单机下载耗时极长，本系统通过多机协调 + 多源加速将下载时间压缩到接近"出口带宽总和"。
+⛔ **现在还不能下载模型**。如果你想找一个**能用**的 HF 多机下载工具，本仓库帮不到你。
+✅ 如果你是**架构师 / 分布式系统爱好者 / SRE / 想参与设计 review**，欢迎进。
 
-⚠️ **当前阶段：设计文档完成 · 代码实现尚未开始**。本仓库目前包含完整的设计、架构、部署、迁移、测试方案，可作为类似系统的设计参考，或本项目实施的蓝本。
+📚 **设计成果**（~28000 行 / 14 章 / OpenAPI / Helm + Prometheus + Grafana / 6 runbook）：
+- 入口：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
+- v2.0 GA 后才有代码 — 见 [ROADMAP](./ROADMAP.md)
+
+📌 **不打算做的事**：单机小模型下载、基础 HF 镜像功能 — 这些 [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) 已经够用了。
+
+📌 **要做的事**：多机分布式 / 多源加速 / 多租户 / 企业内网部署 / AI Copilot 嵌入式聊天 / 在线运筹优化。详见下方"为什么做这个 + 不用 huggingface_hub 的理由"。
+
+---
+
+## ⚡ 现在你可以做的 3 件事
+
+1. **读 INDEX 决定要不要深入**：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)（按角色推荐 5 条阅读路径）
+2. **提 design review issue**：[模板](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — 当前阶段最有价值的贡献
+3. **Star + Watch**：Phase 1 启动时通知
 
 ---
 
@@ -28,6 +47,60 @@ Qwen3-72B-Instruct (BF16)    144 GB / 30 文件
 - 单机故障 / 中断：从头再来
 
 **多机并行** 把整体下载时间压缩到 **`max(每台机/每源限速)`**；**多源加速** 进一步把时间压到 **`总流量 / 各源带宽之和`**。
+
+### 为什么不用 huggingface_hub.snapshot_download？
+
+最常见的问题先答：
+
+| 维度 | `huggingface_hub` | `modelpull` |
+|------|----------------|-----------|
+| 单文件并发下载 | ⚠️ hf_transfer 实验性 | ✅ DirectOffsetDownloader |
+| 多机协调 | ❌ | ✅ Controller + Executor 架构 |
+| 多源加速（HF/Mirror/ModelScope） | ❌ | ✅ 6 个内置源 + 实时测速 + LPT |
+| 断点续传跨进程 | ⚠️ 文件名约定 | ✅ DB 持久化 + fence token |
+| 多租户 / 配额 | ❌ | ✅ Tenant/Project/User + RBAC |
+| 企业内网（NTLM/Kerberos/反向 WSS） | ❌ | ✅ 14 §1 |
+| 可观测性（SLO / runbook / chaos） | ❌ | ✅ 5 Grafana / 32 Alert / 6 RB |
+| 审计 / 合规（链式哈希 + WORM） | ❌ | ✅ 04 §9 |
+| 在线运筹优化（ad-hoc 重新规划） | ❌ | ✅ 13 §4 |
+
+**单机下一两个模型**：用 `huggingface_hub.snapshot_download`，更轻。
+**团队 / 平台 / 多模型 / 大规模 / 国内多源加速 / 内网部署**：考虑 modelpull。
+
+### 整体架构（30 秒了解）
+
+```mermaid
+flowchart LR
+    subgraph 外网
+      Controller["Controller<br/>(active+standby)"]
+      HF[HuggingFace]
+      MS[ModelScope]
+      Mirror[hf-mirror]
+    end
+    subgraph 内网
+      E1["Executor 1<br/>(GPU 室 A)"]
+      E2["Executor 2"]
+      EN["Executor N"]
+      NFS["内网 NFS<br/>训练集群"]
+      S3["内网 S3 mirror"]
+    end
+    UI[Web UI / CLI / SDK] --OIDC + JWT--> Controller
+    E1 --反向 WSS<br/>出站长连--> Controller
+    E2 --出站--> Controller
+    EN --出站--> Controller
+    Controller --HF reverse-proxy--> HF
+    E1 -.-> MS
+    E1 -.-> Mirror
+    E1 -.-> S3
+    E1 ==上传==> NFS
+    E2 ==上传==> NFS
+```
+
+**关键性质**：
+
+- Executor 主动出站到 Controller（corp 内网无入站口仍可用）
+- HF Token 永不离开 Controller（reverse-proxy 模式）
+- 多源同时下，S3 multipart 实现"多 executor 同文件协作"无需跨节点 FS
 
 ---
 
@@ -236,23 +309,6 @@ CI 强制失败任何违反不变量的 PR。
 
 ---
 
-## 为什么不直接用 huggingface_hub.snapshot_download？
-
-| 维度 | huggingface_hub | modelpull |
-|------|----------------|-----------|
-| 单文件并发下载 | ⚠️ 受 hf_transfer 实验性限制 | ✅ DirectOffsetDownloader |
-| 多机协调 | ❌ | ✅ |
-| 多源加速 | ❌ | ✅ HF + ModelScope + Mirror + 自托管 |
-| 断点续传跨进程 | ⚠️ 依赖文件名约定 | ✅ DB 持久化 + fence token |
-| 多租户 / 配额 | ❌ | ✅ |
-| Active/Standby | ❌ | ✅ |
-| 可观测性 | ❌ | ✅ Prometheus + Grafana + OpenTelemetry |
-| 审计 / 合规 | ❌ | ✅ 链式哈希审计日志 + License 策略 |
-| Fence token 防双发 | N/A | ✅ |
-
-如果你只是单机下一两个模型，`huggingface_hub.snapshot_download` 就够了。`modelpull` 是面向**团队 / 平台 / 多模型 / 大规模 / 国内多源加速**的场景。
-
----
 
 ## 现状声明
 
