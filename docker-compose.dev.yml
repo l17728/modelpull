@@ -1,0 +1,26 @@
+# Dev profile: PG only — opt-in for contributors without local PostgreSQL.
+#
+# This file is OPTIONAL. If you already have PG 16+ on localhost (any port),
+# point DLW_DB_HOST/DLW_DB_PORT at it instead of running this compose file.
+#
+# Controller / executor run as `uv run uvicorn ...` outside docker.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dlw-postgres-dev
+    environment:
+      POSTGRES_USER: dlw
+      POSTGRES_PASSWORD: dlw_dev_password    # dev only — never in prod
+      POSTGRES_DB: dlw
+    ports:
+      - "5432:5432"
+    volumes:
+      - dlw-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dlw -d dlw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dlw-pg-data:
