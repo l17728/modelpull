@@ -1,16 +1,12 @@
-# Dev profile: PG only — opt-in for contributors without local PostgreSQL.
-#
-# This file is OPTIONAL. If you already have PG 16+ on localhost (any port),
-# point DLW_DB_HOST/DLW_DB_PORT at it instead of running this compose file.
-#
-# Controller / executor run as `uv run uvicorn ...` outside docker.
+# Dev profile: PG + 1 controller + 1 executor.
+# Run via: docker compose -f docker-compose.dev.yml up -d --build
 services:
   postgres:
     image: postgres:16-alpine
     container_name: dlw-postgres-dev
     environment:
       POSTGRES_USER: dlw
-      POSTGRES_PASSWORD: dlw_dev_password    # dev only — never in prod
+      POSTGRES_PASSWORD: dlw_dev_password
       POSTGRES_DB: dlw
     ports:
       - "5432:5432"
@@ -22,5 +18,55 @@ services:
       timeout: 5s
       retries: 10
 
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.executor
+    container_name: dlw-controller-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DLW_DB_HOST: postgres
+      DLW_DB_PORT: "5432"
+      DLW_DB_USER: dlw
+      DLW_DB_PASSWORD: dlw_dev_password
+      DLW_DB_NAME: dlw
+      DLW_BEARER_TOKEN: dev-token-change-me
+    ports:
+      - "8000:8000"
+    entrypoint: []
+    # W3-I: set -e so alembic failure aborts the container
+    command:
+      - sh
+      - -c
+      - "set -e && alembic upgrade head && uvicorn dlw.main:app --host 0.0.0.0 --port 8000"
+    # W3-H: healthcheck on /health/ready so executor's depends_on: service_healthy
+    # waits for migration + uvicorn before starting
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health/ready || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  executor:
+    build:
+      context: .
+      dockerfile: Dockerfile.executor
+    container_name: dlw-executor-dev
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      DLW_EXECUTOR_ID: docker-host-worker-1
+      DLW_EXECUTOR_HOST_ID: docker-host
+      DLW_EXECUTOR_CONTROLLER_URL: http://controller:8000
+      DLW_EXECUTOR_BEARER_TOKEN: dev-token-change-me
+      DLW_EXECUTOR_DOWNLOAD_DIR: /downloads
+    volumes:
+      - dlw-downloads:/downloads
+
 volumes:
   dlw-pg-data:
+  dlw-downloads:
