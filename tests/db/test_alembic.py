@@ -62,15 +62,20 @@ EXPECTED_TABLES = {
 
 
 def _alembic(args: list[str], test_db_name: str) -> None:
-    """Run alembic CLI against the per-session test DB."""
+    """Run alembic CLI against the per-session test DB.
+
+    Inherits DLW_DB_HOST/PORT/USER/PASSWORD from environment (CI workflow
+    sets these to point at the postgres service container; locally they
+    fall back to dlw.config defaults of localhost:5433/postgres/trust).
+    Only DLW_DB_NAME is overridden — that's the per-session test database.
+    """
     env = os.environ.copy()
-    env.update({
-        "DLW_DB_HOST": "localhost",
-        "DLW_DB_PORT": "5433",
-        "DLW_DB_USER": "postgres",
-        "DLW_DB_PASSWORD": "",
-        "DLW_DB_NAME": test_db_name,
-    })
+    # If the runner hasn't set these (local dev), match conftest defaults
+    env.setdefault("DLW_DB_HOST", os.environ.get("DLW_TEST_PG_HOST", "localhost"))
+    env.setdefault("DLW_DB_PORT", os.environ.get("DLW_TEST_PG_PORT", "5433"))
+    env.setdefault("DLW_DB_USER", os.environ.get("DLW_TEST_PG_USER", "postgres"))
+    env.setdefault("DLW_DB_PASSWORD", os.environ.get("DLW_TEST_PG_PASSWORD", ""))
+    env["DLW_DB_NAME"] = test_db_name  # always the per-session test DB
     result = subprocess.run(
         [_UV_BIN, "run", "alembic", *args],
         cwd=str(REPO_ROOT),
