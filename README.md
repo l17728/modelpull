@@ -106,9 +106,41 @@ curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER"
 # Expected: {"status":"succeeded", ...}
 ```
 
+### Week 3 demo: end-to-end with docker compose
+
+```bash
+# 1 command: PG + controller + executor all up
+docker compose -f docker-compose.dev.yml up -d --build
+
+# Wait for controller health (executor will pick up automatically once ready)
+until curl -s http://localhost:8000/health/ready | grep -q ok; do sleep 1; done
+echo "controller ready"
+
+# Submit a task
+TOKEN_HEADER="Authorization: Bearer dev-token-change-me"
+TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
+  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
+  -d '{"repo_id":"o/e2e","revision":"0123456789abcdef0123456789abcdef01234567","storage_id":1}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "Task: $TASK_ID"
+
+# Watch the executor pick it up + complete
+for i in $(seq 1 30); do
+  STATUS=$(curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER" \
+    | python -c "import sys,json; print(json.load(sys.stdin)['status'])")
+  echo "[$i] task status: $STATUS"
+  if [ "$STATUS" = "succeeded" ]; then break; fi
+  sleep 1
+done
+
+# Inspect downloaded mock files in the executor container
+docker compose -f docker-compose.dev.yml exec executor ls -la /downloads
+```
+
 完整开发计划：
 - Phase 1 Foundation：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
 - Phase 1 Week 2 Controller Core：[`docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md)
+- Phase 1 Week 3 Executor Process：[`docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md)
 
 ---
 
