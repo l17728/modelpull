@@ -59,7 +59,21 @@ modelpull/
 
 ## Plan Revisions Log
 
-This plan was written in one pass on 2026-05-09 after Week 2 (PR #2) merged. No pre-execution review yet — recommend a 2-agent review pass (similar to Week 2's W2-A through W2-J) before kicking off subagents.
+This plan was reviewed by 2 specialized agents on 2026-05-09 after the first draft. 9 fixes applied (W3-A through W3-I) before subagent execution.
+
+| Tag | Severity | Issue | Fix applied |
+|-----|----------|-------|-------------|
+| W3-A | CRITICAL | Task 4 shutdown cancels mid-flight `_execute_subtask` → subtask stuck `assigned` forever (no failure report sent) | Removed `t.cancel()`; loops exit cleanly via `is_set()` guard after current iteration |
+| W3-B | CRITICAL | Task 5 `except KeyboardInterrupt` inside `_async_main` unreachable on Windows (asyncio.run catches first) | Moved exception handler to `main()` outside asyncio.run |
+| W3-C | CRITICAL | `MockDownloader.download` is `async def` but synchronously writes — blocks event loop; 1GB test file freezes tests | Wrapped blocking I/O in `asyncio.to_thread` |
+| W3-D | CRITICAL | Task 6 Step 2.5 (small file size monkeypatch) was conditional ("if E2E times out"); 1GB mock will always block | Made mandatory + moved before Step 2 + spelled out exact function signature |
+| W3-E | important | Task 6 `_SharedTransport` accesses httpx private `_transport` attribute | Replaced with direct shared `ASGITransport(app=app)` instance |
+| W3-F | important | Task 4 test `DownloadResult.file_path` constructed as `str + "/path"`, dataclass typed `Path` | Use `Path(...) / "..."` |
+| W3-G | important | Task 7 `Dockerfile.executor` doesn't COPY `alembic.ini`; `alembic upgrade head` would fail with FileNotFoundError | Added `COPY alembic.ini ./` before uv sync |
+| W3-H | important | Task 7 executor's `depends_on: service_started` races with controller's migration → 5xx retry exhaustion | Added healthcheck on controller + executor uses `service_healthy` |
+| W3-I | important | Task 7 controller `command` uses `&&` without `set -e` → alembic failure still starts uvicorn on broken schema | Added `set -e` to shell command |
+
+Bonus refactor: simplified Task 2 `_post` to drop dead `_is_transient` use inside `_do()` (status code check is clearer).
 
 ---
 
@@ -414,11 +428,11 @@ class ControllerClient:
         @_retry
         async def _do() -> httpx.Response:
             r = await self._client.post(path, json=json_body)
-            if not r.is_success and _is_transient(httpx.HTTPStatusError("", request=r.request, response=r)):
-                r.raise_for_status()
+            if 500 <= r.status_code < 600:
+                r.raise_for_status()  # 5xx is transient — tenacity will retry
             return r
         r = await _do()
-        r.raise_for_status()
+        r.raise_for_status()  # 4xx falls through here, raised once (no retry)
         return r.json()
 
     async def join(
@@ -577,9 +591,14 @@ Expected: ImportError on `dlw.executor.downloader`.
 Real HuggingFace Hub fetch comes in Week 4 plan. The interface is designed
 so the only swap needed in Week 4 is replacing the random-bytes generator
 with the actual HF download stream.
+
+W3-C: blocking I/O (file write + randbytes) is wrapped in asyncio.to_thread
+so the executor's event loop stays responsive (heartbeat / poll / shutdown
+keep working during a multi-second download).
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import random
 from dataclasses import dataclass
@@ -606,10 +625,18 @@ class MockDownloader:
     async def download(
         self, *, task_id: str, filename: str, file_size: int
     ) -> DownloadResult:
-        """Write `file_size` random bytes to `<download_dir>/<task_id>/<filename>`.
+        """Write `file_size` random bytes; computes sha256 on the fly.
 
-        Computes sha256 in chunks so memory is O(1). Auto-creates parent dirs.
+        File I/O + RNG run inside asyncio.to_thread so event loop is not
+        blocked during long downloads (W3-C). Memory is O(1) — chunked write.
         """
+        return await asyncio.to_thread(
+            self._download_sync, task_id=task_id, filename=filename, file_size=file_size
+        )
+
+    def _download_sync(
+        self, *, task_id: str, filename: str, file_size: int
+    ) -> DownloadResult:
         target = self._download_dir / task_id / filename
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -752,7 +779,7 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
 
     download_result = DownloadResult(
         bytes_written=1024, actual_sha256="a" * 64,
-        file_path=settings.download_dir + "/task-1/config.json"
+        file_path=Path(settings.download_dir) / "task-1" / "config.json",
     )
     downloader = MagicMock(spec=MockDownloader)
     downloader.download = AsyncMock(return_value=download_result)
@@ -885,14 +912,16 @@ class ExecutorRunner:
             },
         )
 
-        # 2. Concurrent loops
+        # 2. Concurrent loops — both check self._shutdown.is_set() each iteration
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         poll_task = asyncio.create_task(self._poll_and_execute_loop())
 
-        # 3. Wait for shutdown
+        # 3. Wait for shutdown signal then let loops exit naturally
+        # (W3-A fix): do NOT t.cancel() — that would interrupt _execute_subtask
+        # mid-download, leaving the subtask stuck in 'assigned' status with no
+        # failure report. The pacing waits inside each loop already react to
+        # _shutdown.set() instantly via asyncio.wait_for(... timeout=...).
         await self._shutdown.wait()
-        for t in (heartbeat_task, poll_task):
-            t.cancel()
         await asyncio.gather(heartbeat_task, poll_task, return_exceptions=True)
 
     async def _heartbeat_loop(self) -> None:
@@ -1110,17 +1139,21 @@ async def _async_main(args: argparse.Namespace) -> int:
             # KeyboardInterrupt behavior; Ctrl-C still works in dev.
             pass
 
-    try:
-        async with client:
-            await runner.run()
-    except KeyboardInterrupt:
-        runner.request_shutdown()
+    async with client:
+        await runner.run()
     return 0
 
 
 def main() -> int:
+    """Entry point. Catches KeyboardInterrupt OUTSIDE asyncio.run because on
+    Windows asyncio.run catches Ctrl-C internally and re-raises after task
+    cancellation — the inner except KeyboardInterrupt is unreachable (W3-B).
+    """
     args = _parse_args()
-    return asyncio.run(_async_main(args))
+    try:
+        return asyncio.run(_async_main(args))
+    except KeyboardInterrupt:
+        return 0  # graceful exit; asyncio.run already cancelled child tasks
 
 
 if __name__ == "__main__":
@@ -1166,10 +1199,21 @@ EOF
 
 This test spins up the real FastAPI controller in-process via httpx ASGITransport, pipes it into ControllerClient, and runs ExecutorRunner against it. No mocks, no subprocess, no network — but the entire protocol is exercised.
 
+**Subagent context note**: `tests/conftest.py` (Week 1) provides session-scoped fixtures `engine` (AsyncEngine pointing at the per-session test DB) and `test_db_name`, plus an autouse `_point_app_at_test_db` that points the FastAPI app's lru_cached `get_engine()` at the same test DB. The module-scoped `_bootstrap` below depends on `engine` — that scope combination works because session > module > function.
+
 - [ ] **Step 1: Write `tests/e2e/test_executor_e2e.py`**
 
 ```python
-"""E2E: real controller in-process + real ExecutorRunner — full happy path."""
+"""E2E: real controller in-process + real ExecutorRunner — full happy path.
+
+W3-C/D: monkeypatches _MOCK_FILES to small sizes so the test actually finishes
+in seconds. A 1GB random-bytes generation would block the event loop for many
+seconds even with asyncio.to_thread (the thread is just doing CPU work).
+
+W3-E: shares one httpx.ASGITransport(app=app) instance between the controller's
+test AsyncClient and the executor's ControllerClient — no private attribute
+access needed.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -1192,7 +1236,7 @@ _TOKEN = "e2e-executor-token"
 
 @pytest.fixture(scope="module", autouse=True)
 async def _bootstrap(engine):
-    """Seed default tenant/project/user/storage."""
+    """Seed default tenant/project/user/storage. engine is session-scoped (conftest)."""
     from dlw.db.models.storage import StorageBackend
     from dlw.db.models.tenant import Project, Tenant, User
     async with engine.begin() as conn:
@@ -1221,22 +1265,35 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.slow
-async def test_executor_completes_real_task(tmp_path: Path) -> None:
+async def test_executor_completes_real_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """End-to-end with real controller + real executor (no mocks).
 
-    1. POST a task to the controller (creates 2 mock subtasks)
-    2. Run an ExecutorRunner targeting the controller via in-process ASGI transport
-    3. Assert task transitions to 'succeeded' within 5 seconds
+    1. Reduce mock file sizes so test finishes in seconds (W3-D mandatory)
+    2. POST a task to the controller (creates 2 mock subtasks)
+    3. Run an ExecutorRunner targeting the controller via shared ASGI transport
+    4. Assert task transitions to 'succeeded' within 5 seconds
     """
+    # W3-D: shrink mock files so 1GB safetensors doesn't burn 30+ seconds of CPU
+    import dlw.services.task_service as ts
+    monkeypatch.setattr(ts, "_MOCK_FILES", [
+        ("config.json", 4096, None),
+        ("model.safetensors", 64 * 1024, None),  # 64KB instead of 1GB
+    ])
+
     from dlw.main import create_app
     app = create_app()
 
+    # W3-E: single shared ASGITransport, no private attribute access
+    asgi_transport = httpx.ASGITransport(app=app)
+
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=asgi_transport, base_url="http://test"
     ) as ctrl_client:
         auth = {"Authorization": f"Bearer {_TOKEN}"}
 
-        # 1. Create task
+        # 2. Create task
         r = await ctrl_client.post("/api/v1/tasks", json={
             "repo_id": "o/e2e",
             "revision": "0" * 40,
@@ -1245,21 +1302,14 @@ async def test_executor_completes_real_task(tmp_path: Path) -> None:
         assert r.status_code == 201
         task_id = r.json()["id"]
 
-        # 2. Build ControllerClient sharing the same ASGI transport
-        # so ExecutorRunner's HTTP calls go to the same in-process app
-        class _SharedTransport(httpx.AsyncBaseTransport):
-            async def handle_async_request(
-                self, request: httpx.Request
-            ) -> httpx.Response:
-                return await ctrl_client._transport.handle_async_request(request)
-
+        # 3. Build ControllerClient sharing the same ASGI transport
         executor_client = ControllerClient(
             base_url="http://test",
             bearer_token=_TOKEN,
-            _transport=_SharedTransport(),
+            _transport=asgi_transport,
         )
 
-        # 3. Build settings + downloader + runner
+        # 4. Settings + downloader + runner
         settings = ExecutorSettings(
             id="e2e-host-w1",
             host_id="e2e-host",
@@ -1274,12 +1324,11 @@ async def test_executor_completes_real_task(tmp_path: Path) -> None:
             settings=settings, client=executor_client, downloader=downloader
         )
 
-        # 4. Run executor for up to 5 seconds, then shutdown
-        run_task = asyncio.create_task(runner.run())
-        await asyncio.sleep(4)  # 2 subtasks * (poll 1s + report 0.x s) ≤ 4s
-        runner.request_shutdown()
-        await asyncio.wait_for(run_task, timeout=5)
-        await executor_client.__aexit__(None, None, None)
+        async with executor_client:
+            run_task = asyncio.create_task(runner.run())
+            await asyncio.sleep(4)
+            runner.request_shutdown()
+            await asyncio.wait_for(run_task, timeout=5)
 
         # 5. Verify task is succeeded
         r = await ctrl_client.get(f"/api/v1/tasks/{task_id}", headers=auth)
@@ -1299,25 +1348,7 @@ async def test_executor_completes_real_task(tmp_path: Path) -> None:
 uv run pytest tests/e2e/test_executor_e2e.py -v
 ```
 
-Expected: 1 PASS within ~5 seconds.
-
-If it flakes (passes sometimes, fails sometimes due to timing), bump the asyncio.sleep window from 4 to 6 seconds. The 1GB mock subtask file might take longer than expected; consider adding a smaller-file scenario in `task_service.create_task` for tests — but that's a Week 5 cleanup, not a Week 3 fix.
-
-Actually: the default `_MOCK_FILES` in `task_service.py` has `1_073_741_824` (1 GB). Generating 1 GB of random bytes in a unit test is slow. **Add a Step 2.5**: temporarily set `DLW_EXECUTOR_DOWNLOAD_DIR` and tweak the mock file size for tests.
-
-- [ ] **Step 2.5: If E2E times out, reduce mock file size**
-
-In `tests/e2e/test_executor_e2e.py`, before creating the task, monkeypatch the mock files:
-
-```python
-import dlw.services.task_service as ts
-monkeypatch.setattr(ts, "_MOCK_FILES", [
-    ("config.json", 4096, None),
-    ("model.safetensors", 1024 * 64, None),  # 64 KB instead of 1 GB
-])
-```
-
-Add `monkeypatch` to the test fixture list.
+Expected: 1 PASS within ~5 seconds. If it times out, raise the `asyncio.sleep(4)` to `asyncio.sleep(6)` — but 64KB random bytes + 4KB random bytes should complete very fast.
 
 - [ ] **Step 3: Run regression**
 
@@ -1360,7 +1391,7 @@ Until now `docker-compose.dev.yml` only has PG. Now add an executor that runs `d
 FROM python:3.12-slim AS builder
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.9
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock alembic.ini ./
 COPY src/ src/
 RUN uv sync --frozen --no-dev
 
@@ -1368,10 +1399,15 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/alembic.ini ./alembic.ini
+# curl for the controller's healthcheck (W3-H); ~1 MB extra
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src
 ENTRYPOINT ["dlw-executor"]
 ```
+
+NOTE (W3-G): `alembic.ini` MUST be copied — without it, `alembic upgrade head` in the controller container fails with `FileNotFoundError`. NOTE: `uv==0.11.9` is the correct version (verified locally + in CI; do NOT change to 0.4.x even if some sources claim that's the latest).
 
 - [ ] **Step 2: Update `docker-compose.dev.yml`**
 
@@ -1416,12 +1452,19 @@ services:
     ports:
       - "8000:8000"
     entrypoint: []
+    # W3-I: set -e so alembic failure aborts the container (no broken-schema uvicorn)
     command:
       - sh
       - -c
-      - |
-        alembic upgrade head &&
-        uvicorn dlw.main:app --host 0.0.0.0 --port 8000
+      - "set -e && alembic upgrade head && uvicorn dlw.main:app --host 0.0.0.0 --port 8000"
+    # W3-H: healthcheck on /health/ready so executor's depends_on: service_healthy
+    # waits for migration + uvicorn before starting (otherwise executor hammers 5xx)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health/ready || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   executor:
     build:
@@ -1430,7 +1473,7 @@ services:
     container_name: dlw-executor-dev
     depends_on:
       controller:
-        condition: service_started
+        condition: service_healthy   # W3-H: was service_started
     environment:
       DLW_EXECUTOR_ID: docker-host-worker-1
       DLW_EXECUTOR_HOST_ID: docker-host
