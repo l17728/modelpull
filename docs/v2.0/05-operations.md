@@ -52,8 +52,14 @@
 - dlw_source_speed_ewma_bytes_per_sec{executor, source}
 
 # 执行器
-- dlw_executors_count{status}                      # gauge by status
+- dlw_executors_count{status}                      # gauge by status (recording rule, derived)
 - dlw_executor_health_score{executor_id}            # gauge 0..100
+- dlw_executor_status{executor_id, status}          # gauge 0/1; CODE-01 修复 (v2.0.12)
+                                                    # status ∈ {healthy, degraded, suspect, faulty, probationary}
+                                                    # **强制由 controller emit**；recording rule
+                                                    # `dlw:executors_count:by_status` 依赖此 metric
+- dlw_executor_ws_connected{executor_id}            # gauge 0/1，反向 WSS 状态 (v2.1)
+- dlw_executor_ws_reconnects_total{executor_id}     # counter
 - dlw_executor_disk_free_gb{executor_id}
 - dlw_executor_parts_dir_bytes{executor_id}
 
@@ -524,6 +530,242 @@ $ ./scripts/rotate-executor-mtls.sh <executor-id>
 4. 执行维护
 5. 退出：POST /api/admin/maintenance/exit
 ```
+
+### 4.13 RB-13 — AI Copilot 事件（cost / quota / injection）
+
+> 触发告警：`AICostPerTenantSurge` / `AIQuotaExhaustedHighRate` / `AIPromptInjectionDetected`
+
+#### 场景 A：单 tenant cost surge（投影 > $5/day）
+
+```bash
+# 1. 找 top user
+TENANT_ID=$1
+psql -c "SELECT user_id, sum(cost_usd_cents) as cents
+         FROM ai_token_usage
+         WHERE tenant_id=$TENANT_ID AND occurred_at > now()-'24h'
+         GROUP BY user_id ORDER BY cents DESC LIMIT 5"
+
+# 2. 单用户占 > 70% → 临时限速（per-user override）
+USER_ID=$2
+psql -c "UPDATE users SET ai_request_rate_limit_per_5min=5 WHERE id=$USER_ID"
+
+# 3. 通知 tenant_admin
+curl -X POST $WEBHOOK -d "{\"event\":\"ai_cost_alert\",\"tenant_id\":$TENANT_ID,\"top_user\":$USER_ID}"
+```
+
+#### 场景 B：AIPromptInjectionDetected (5+ 次/15min)
+
+```bash
+# 1. 拉最近 15min 触发 injection_pattern 的 conversation
+psql -c "SELECT c.id, c.owner_user_id, m.content->'sanitize_warnings'
+         FROM ai_messages m JOIN ai_conversations c ON m.conversation_id=c.id
+         WHERE m.created_at > now()-'15min'
+         AND m.content->'sanitize_warnings' @> '[\"injection_pattern\"]'"
+
+# 2. 单用户 4+ injection → 调查
+#    a. 是 internal user 误用 (合法 query 含可疑词)
+#    b. 是恶意 (account compromised) → tenant_admin 通知
+#    c. 是 indirect injection (HF model card) → blacklist source
+
+# 3. 如确认恶意：
+psql -c "UPDATE users SET is_active=false WHERE id=$BAD_USER"
+```
+
+#### 场景 C：AIQuotaExhaustedHighRate
+
+参见场景 A 的限速；如系统性配额不足，联系销售评估升级 plan。
+
+### 4.14 RB-14 — Optimizer 决策异常
+
+> 触发告警：`OptimizerDecisionStorm` / `OptimizerSlowPathTimeoutSurge` / `OptimizerActualVsExpectedDeviation`
+
+#### 场景 A：DecisionStorm (>60/min)
+
+```bash
+# 1. 找哪个 task 在 storm
+psql -c "SELECT task_id, count(*) as decisions
+         FROM optimization_decisions
+         WHERE triggered_at > now()-'10min'
+         GROUP BY task_id ORDER BY decisions DESC LIMIT 5"
+
+# 2. 短期：冻结该 task 的 optimizer
+TASK_ID=$1
+curl -X POST -H "Authorization: Bearer $DLW_TOKEN" \
+  https://api.dlw/api/admin/tasks/$TASK_ID/optimizer-freeze
+
+# 3. 调查根因：是否某 source 抖动 (查 source_speed_samples) 触发频繁 trigger
+```
+
+#### 场景 B：slow path timeout surge
+
+参见 03 §10 控制器扩容；如长期 saturated 考虑分片到多 controller (v2.2)。
+
+#### 场景 C：actual vs expected deviation > 50%
+
+非紧急。Backlog 任务：调整 EWMA α / hysteresis CUSUM 参数（13 §4.3.7）。
+
+### 4.15 RB-15 — Multipart 数据完整性事件 ⚠️ P0
+
+> 触发告警：`MultipartCompleteInvalidPart`
+
+```bash
+# 1. 立即冻结相关 source 的新任务（防同模式连发）
+psql -c "SELECT DISTINCT source_id FROM file_subtasks
+         WHERE last_error LIKE '%InvalidPart%' AND created_at > now()-'1h'"
+# 对每个 source 调
+curl -X POST https://api.dlw/api/admin/sources/$SOURCE_ID/quarantine
+
+# 2. 找受影响 upload_id
+psql -c "SELECT subtask_id, multipart_upload_id, last_error
+         FROM file_subtasks
+         WHERE last_error LIKE '%InvalidPart%' AND created_at > now()-'1h'"
+
+# 3. 对每个 upload_id 做 abort + reschedule
+for ID in $UPLOAD_IDS; do
+  aws s3api list-parts --bucket "$BUCKET" --key "$KEY" --upload-id "$ID"
+  aws s3api abort-multipart-upload --bucket "$BUCKET" --key "$KEY" --upload-id "$ID"
+done
+
+# 4. 重新调度受影响 subtask
+psql -c "UPDATE file_subtasks SET status='pending', multipart_upload_id=NULL,
+         s3_part_number=NULL WHERE last_error LIKE '%InvalidPart%'"
+
+# 5. 汇报：检查 part_number bump 实现是否正确（不变量 26）；写 postmortem
+```
+
+### 4.16 RB-16 — WSS 反向通道事件
+
+> 触发告警：`WSSReconnectStorm` / `WSSAllExecutorsDisconnected` / `WSSPushEpochMismatchHighRate`
+
+#### 场景 A：WSSReconnectStorm
+
+```bash
+# 1. 哪些 executor 频繁 reconnect
+kubectl logs -l app.kubernetes.io/component=executor --tail=200 \
+  | grep -i "ws_reconnect\|epoch_mismatch" | sort | uniq -c | sort -rn | head -10
+
+# 2. corp proxy idle timeout 短？检查 ws_ping_interval_seconds
+kubectl get cm dlw-executor-config -o yaml | grep ping_interval
+
+# 3. 若 proxy 强制断 → 缩 ping interval：
+kubectl patch cm dlw-executor-config --patch '{"data":{"ws_ping_interval":"10"}}'
+kubectl rollout restart sts dlw-executor
+```
+
+#### 场景 B：WSSAllExecutorsDisconnected ⚠️ P0
+
+```bash
+# 1. 验证 controller 端 ws endpoint 健康
+curl -I https://controller.dlw/health/ws
+
+# 2. 通过任意 executor pod 测试
+kubectl exec -it dlw-executor-0 -- \
+  websocat wss://controller.dlw/ws/v1/executor
+
+# 3. 应急：临时关闭 WSS，强制 polling fallback
+kubectl patch cm dlw-controller-config --patch '{"data":{"force_polling_only":"true"}}'
+# Optimizer 推命令延迟会从 1s → 10s，但保证可用性
+```
+
+#### 场景 C：WSSPushEpochMismatchHighRate
+
+```bash
+# 1. 找有 stale ws_session 的 executor
+psql -c "SELECT executor_id, count(*) as sessions
+         FROM executor_ws_sessions WHERE closed_at IS NULL
+         GROUP BY executor_id HAVING count(*) > 1"
+
+# 2. 强制重启该 executor
+kubectl delete pod $EXECUTOR_POD
+# StatefulSet 会重建；新 register → 新 epoch → 旧 session invalidated
+```
+
+### 4.17 RB-17 — Credential pool 401 surge
+
+> 触发告警：`CredentialPool401Surge`
+
+```bash
+# 1. 确认 alias 是否被外部 revoke
+ALIAS=$1; EXEC_ID=$2
+echo "Check with corp IT or HF team if account '$ALIAS' was disabled"
+
+# 2. 启动 drain-purge 2-phase（不变量 31 v2.1）
+curl -X POST https://api.dlw/api/admin/credentials/$EXEC_ID/$ALIAS/drain
+
+# 3. SSH to executor host（或经 vault-agent 触发）
+ssh dlw@$EXEC_HOST "vi /etc/dlw/credentials.yaml  # 删除该 alias 或换 password"
+ssh dlw@$EXEC_HOST "kill -HUP \$(pgrep -f dlw-executor)"
+
+# 4. 验证 executor WSS 上报了 creds_change_committed 事件
+psql -c "SELECT * FROM credential_usage_log WHERE alias='$ALIAS' AND ended_at IS NULL"
+# 预期 0 行（已 committed）
+
+# 5. 受 affected 的 in-flight chunk 应自动 reschedule
+```
+
+### 4.18 RB-18 — Probe leader / budget
+
+> 触发告警：`RateLimitProbeLeaderLost` / `RateLimitProbeBudgetExhausted`
+
+#### Probe leader lost
+
+```bash
+# 1. 检查 advisory_lock 状态
+psql -c "SELECT pid, granted, l.* FROM pg_locks l
+         WHERE locktype='advisory' AND objid=hash('probe_leader')"
+
+# 2. 若有死 holder（granted=false 但 row 在）
+STALE_PID=$(psql -tAc "...")
+psql -c "SELECT pg_terminate_backend($STALE_PID)"
+
+# 3. controller 自动重新选举（30s 内）
+```
+
+#### Budget exhausted
+
+```bash
+# 1. 检查是否是 runaway loop
+psql -c "SELECT count(*), date_trunc('hour', measured_at) as hour
+         FROM rate_limit_probes WHERE measured_at > now()-'1d'
+         GROUP BY hour ORDER BY hour DESC"
+# 正常应 ≤ 4 探测/小时；> 50 必有 bug
+
+# 2. 临时调高 budget（编辑 probe_budget.bytes_limit）
+psql -c "UPDATE probe_budget SET bytes_limit = bytes_limit * 2
+         WHERE day = CURRENT_DATE"
+
+# 3. 提工单调查根因
+```
+
+### 4.19 RB-19 — Audit chain 断裂 ⚠️ P0 安全事件
+
+> 触发告警：`AuditChainBroken`
+
+```bash
+# 1. ⚠️ 不要删 audit_log；保存 evidence
+PG_DUMP_PATH="/backup/audit-incident-$(date +%s).sql"
+pg_dump -h $PG_HOST -U postgres -t audit_log dlw > $PG_DUMP_PATH
+
+# 2. 找断点
+psql -c "SELECT id, occurred_at, action, prev_hash,
+         lag(self_hash) OVER (ORDER BY id) as expected_prev
+         FROM audit_log
+         WHERE id IN (
+           SELECT id FROM audit_log a WHERE a.id > 1
+           AND a.prev_hash != lag(a.self_hash) OVER (ORDER BY a.id)
+           LIMIT 5
+         )"
+
+# 3. 与 WORM (S3 Object Lock COMPLIANCE) 对账
+LATEST_WORM=$(aws s3 ls s3://audit-worm/ --recursive | tail -1)
+aws s3 cp s3://audit-worm/$LATEST_WORM /tmp/worm.parquet
+# diff DB 中 IDs vs WORM IDs，找差异
+
+# 4. 通知 security lead + 启动 incident response
+# 5. 不要 patch 链；记录到 immutable post-mortem
+# 6. 评估法务通知义务（GDPR / 中国数据安全法）
+```
+**Why P0**：审计链断裂可能源自：(a) DB 损坏（不算事件但需查 PG corruption）；(b) 主动篡改（必须立刻调查）；(c) trigger / 应用 bug（修复并补审计）。三种都不能等到工作时间。
 
 ---
 

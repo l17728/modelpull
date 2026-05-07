@@ -90,6 +90,10 @@ controller:
       enabled: true
       role: dlw-controller
       mountPath: /secrets
+      # REQUIRED (CODE-05 修复 v2.0.12): 必须由部署方覆盖；helm install 时 --set 或 values.production.yaml
+      address: ""              # 例：https://vault.corp.example.com:8200
+      tlsServerName: ""        # 可选：vault.corp.example.com（如证书 SAN 与 host 不同）
+      caCertPath: ""           # 可选：/etc/dlw/ca/vault-ca.pem
 
   envFromVault:
     - HF_TOKEN_PRIMARY: secret/data/dlw/hf_token#primary

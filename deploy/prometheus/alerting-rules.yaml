@@ -101,12 +101,24 @@ groups:
           runbook_url: https://docs.dlw.example.com/runbooks/RB-04
 
       - alert: StorageS3High5xx
+        # CODE-15 修复 (v2.0.12): 用 ratio 而非绝对 rate
+        # 0.05 events/sec 在不同流量下含义差异巨大；改为 5% error ratio
         expr: |
-          rate(dlw_storage_put_total{status_code=~"5.."}[10m]) > 0.05
+          (
+            sum(rate(dlw_storage_put_total{status_code=~"5.."}[10m]))
+          ) / (
+            sum(rate(dlw_storage_put_total[10m])) > 0
+          ) > 0.05
         for: 5m
         labels: {severity: work-hours, category: external}
         annotations:
-          summary: "Storage backend 5xx rate >5%"
+          summary: "Storage backend 5xx ratio >5% (10m)"
+          description: |
+            Storage backend (S3/OBS/MinIO) returning >5% 5xx errors over 10m.
+            Steps:
+              1) Check provider status page for incidents
+              2) Run `gh run view` for recent storage-related test failures
+              3) If sustained >30min, switch to fallback storage (RB-11)
           runbook_url: https://docs.dlw.example.com/runbooks/RB-05
 
       - alert: ControllerDBSlow
@@ -177,12 +189,22 @@ groups:
           runbook_url: https://docs.dlw.example.com/runbooks/RB-09
 
       - alert: AuditChainBroken
+        # OPS-V21-08 修复 (v2.0.12): 升级到 P0
+        # Audit chain 断裂可能意味着主动篡改或 DB 损坏，必须立即响应
         expr: dlw_audit_chain_integrity == 0
-        for: 5m
-        labels: {severity: ticket, category: security}
+        for: 1m
+        labels: {severity: page, category: security}
         annotations:
-          summary: "Audit log chain integrity check failed"
-          description: "Possible tampering attempt"
+          summary: "🚨 Audit log chain integrity FAILED — possible tampering"
+          description: |
+            audit_log self_hash verification detected broken chain. This is a
+            P0 security incident. Steps:
+              1) DO NOT delete audit_log — preserve evidence
+              2) Snapshot current PG state: `pg_dump -t audit_log > /backup/incident-$(date +%s).sql`
+              3) Identify break point: `SELECT id FROM audit_log WHERE prev_hash != lag(self_hash) OVER (ORDER BY id) LIMIT 5`
+              4) Cross-check with WORM export (S3 Object Lock COMPLIANCE bucket)
+              5) Page security lead and start incident response
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-19
 
   # ============================================
   # v2.1 — AI Copilot / Optimizer / Enterprise Network
@@ -205,6 +227,14 @@ groups:
         labels: {severity: work-hours, category: quota}
         annotations:
           summary: "AI quota exhausted on {{ $labels.tenant_id }} (scope={{ $labels.scope }})"
+          description: |
+            >6 AI quota_exceeded events/min on tenant {{ $labels.tenant_id }} ({{ $labels.scope }} scope).
+            Likely cause: single user script abuse, or tenant plan undersized.
+            Steps:
+              1) `dlw quota usage --tenant {{ $labels.tenant_id }} --group-by user` to find top user
+              2) If single user: rate-limit (per-user override) or contact user
+              3) If broad usage: assess plan upgrade
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-13
 
       - alert: AIPromptInjectionDetected
         expr: increase(dlw_ai_sanitize_warnings_total{warning="injection_pattern"}[15m]) > 5
@@ -212,6 +242,15 @@ groups:
         labels: {severity: work-hours, category: security}
         annotations:
           summary: "AI Copilot detected {{ $value }} prompt injection attempts in 15m"
+          description: |
+            sanitize layer detected >5 injection patterns in 15m on tenant {{ $labels.tenant_id }}.
+            This may be: (a) malicious user testing, (b) compromised account, (c) HF model card
+            embedding malicious content (indirect injection).
+            Steps:
+              1) Query `audit_log WHERE action LIKE 'ai.tool.%' AND occurred_at > now()-'15min'` for context
+              2) Check if conversations originate from single user → suspend if 4+ patterns from one user
+              3) If sources contain HF model cards → check repo_id, blacklist if needed
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-13
 
       # Optimizer
       - alert: OptimizerDecisionStorm
@@ -228,6 +267,14 @@ groups:
         labels: {severity: work-hours, category: performance}
         annotations:
           summary: "Optimizer slow path timeout > 5%; falling back to LP relaxation"
+          description: |
+            >5% optimization decisions timing out in slow path (LP solver). Per invariant 38,
+            after 3 consecutive timeouts, optimizer auto-degrades to LP relaxation + 1s anytime.
+            Steps:
+              1) Check controller CPU — saturated controller is most common cause
+              2) Query `optimization_decisions WHERE actual_outcome IS NULL AND triggered_at > now()-'15min'`
+              3) If single tenant overload → consider sharding controller
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-14
 
       - alert: OptimizerActualVsExpectedDeviation
         # 决策 actual_savings 显著低于 expected → 算法系统性高估
@@ -238,6 +285,14 @@ groups:
         labels: {severity: ticket, category: algorithm}
         annotations:
           summary: "Optimizer expected vs actual savings deviation > 50%"
+          description: |
+            Optimizer's predicted savings consistently overshoot reality by >2x.
+            Suggests systematic algorithm bias — speed estimation models drifted.
+            Steps (work-hours, not P0):
+              1) Query optimization_decisions for sample with large deviation
+              2) Inspect state_snapshot.V[E][S] vs actual measured speeds
+              3) Likely fix: re-tune EWMA α or hysteresis CUSUM thresholds
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-14
 
       # Enterprise Network
       - alert: WSSReconnectStorm
@@ -247,15 +302,36 @@ groups:
         labels: {severity: work-hours, category: availability}
         annotations:
           summary: "WSS reconnect rate spike: corp proxy / network instability suspected"
+          description: |
+            Cluster-wide WSS reconnects >6/min. Likely causes:
+              (a) corp proxy idle timeout < 60s
+              (b) cert rotation in flight
+              (c) network partition between executor subnet and controller LB
+            Steps:
+              1) `kubectl logs -l app.kubernetes.io/component=executor --tail=100 | grep -i ws`
+              2) Check corp proxy logs for idle close
+              3) Verify ws_ping_interval_seconds (executor.yaml) ≤ proxy idle/2
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-16
 
       - alert: WSSAllExecutorsDisconnected
+        # CODE-01 修复 (v2.0.12): metric 名修正 — `dlw_executors_count` 不存在；
+        # 应为 recording rule `dlw:executors_count:by_status`
         expr: |
           count(dlw_executor_ws_connected == 1) == 0
-          and count(dlw_executors_count{status="healthy"}) > 0
+          and sum(dlw:executors_count:by_status{status="healthy"}) > 0
         for: 2m
         labels: {severity: page, category: availability}
         annotations:
-          summary: "All executors lost WSS connection but heartbeats still active"
+          summary: "🚨 All executors lost WSS connection but heartbeats still active"
+          description: |
+            Heartbeat (HTTPS polling) still works but every executor lost WSS reverse channel.
+            Indicates corp proxy / WAF break. PlanOptimizer commands cannot push, decision
+            response delays escalate from 1s → 10s.
+            Steps:
+              1) Check controller WSS endpoint reachability from corp net side
+              2) Verify Sec-WebSocket-Protocol pass-through on intermediate proxies
+              3) Force fallback: edit configmap heartbeat.use_ws=false → executors retry polling-only mode
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-16
 
       - alert: CredentialPool401Surge
         # 单 alias 401 率激增 → 凭证可能被外部 revoke
@@ -265,6 +341,15 @@ groups:
         labels: {severity: work-hours, category: security}
         annotations:
           summary: "Credential alias {{ $labels.alias }} 401 rate {{ $value | humanizePercentage }}"
+          description: |
+            Alias {{ $labels.alias }} ({{ $labels.alias_type }}) on executor {{ $labels.executor_id }}
+            getting 401 at >5%/min. Likely cause: external admin revoked the credential.
+            Steps:
+              1) Confirm with corp IT / HF team if account was disabled
+              2) If revoked: trigger drain-purge 2-phase (per invariant 31 v2.1)
+              3) Update credentials.yaml on affected executor → SIGHUP
+              4) Watch for stuck in-flight chunks; force-kill if drain timeout
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-17
 
       - alert: RateLimitProbeBudgetExhausted
         expr: |
@@ -273,6 +358,13 @@ groups:
         labels: {severity: ticket, category: capacity}
         annotations:
           summary: "Rate-limit probe daily budget < 500MB remaining"
+          description: |
+            Cluster probe budget (5GB/day per invariant 43) below 500MB. New probes for
+            unseen target_host will use neighbor inference (confidence ×0.5).
+            Steps (low urgency):
+              1) Verify no runaway probing loop: `SELECT count(*) FROM rate_limit_probes WHERE measured_at > now()-'1h'`
+              2) Adjust budget if usage is legitimate
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-18
 
       - alert: RateLimitProbeLeaderLost
         expr: dlw_rate_limit_probe_leader_present == 0
@@ -280,16 +372,35 @@ groups:
         labels: {severity: ticket, category: availability}
         annotations:
           summary: "No probe leader elected; new probes blocked"
+          description: |
+            PG advisory_lock for probe leader (per invariant 43) cannot be acquired by any controller.
+            All controllers may have lost PG connection, or split-brain between active/standby.
+            Steps:
+              1) `psql -c "SELECT pid, granted FROM pg_locks WHERE locktype='advisory' AND objid=hash('probe_leader')"`
+              2) If row exists but granted=false → lock holder is dead but not released
+              3) Manually `pg_terminate_backend(pid)` on stale holder
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-18
 
       # Multipart upload integrity
       - alert: MultipartCompleteInvalidPart
+        # 升级到 page (P0): 数据完整性事件
         expr: rate(dlw_multipart_complete_invalid_part_total[15m]) > 0
         for: 5m
-        labels: {severity: work-hours, category: integrity}
+        labels: {severity: page, category: integrity}
         annotations:
-          summary: "S3 CompleteMultipartUpload InvalidPart errors detected"
-          description: "Possible part_number race; check DIST-V21-02 fence"
-          runbook_url: https://docs.dlw.example.com/runbooks/RB-MP-INTEGRITY
+          summary: "🚨 S3 CompleteMultipartUpload InvalidPart — data integrity at risk"
+          description: |
+            S3 returned InvalidPart on CompleteMultipartUpload. Indicates DIST-V21-02 fence
+            broken (part_number race after reclaim). Per invariant 26+34, controller MUST
+            ListParts and strict-match DB-expected ETag set before Complete.
+            Steps:
+              1) Find affected upload_id: `SELECT subtask_id, multipart_upload_id, last_error
+                 FROM file_subtasks WHERE last_error LIKE '%InvalidPart%' AND created_at > now()-'1h'`
+              2) For each upload_id: `aws s3api list-parts --bucket X --key Y --upload-id ID`
+                 vs `SELECT s3_part_number, s3_etag FROM file_subtasks WHERE multipart_upload_id=...`
+              3) If mismatch detected: `aws s3api abort-multipart-upload` + reschedule
+              4) File postmortem; verify part_number bump (invariant 26) implementation
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-15
 
       - alert: WSSPushEpochMismatchHighRate
         expr: rate(dlw_ws_push_epoch_mismatch_total[10m]) > 0.01
@@ -297,3 +408,13 @@ groups:
         labels: {severity: ticket, category: integrity}
         annotations:
           summary: "WSS push epoch mismatch > 1%; possible stale ws_session leak"
+          description: |
+            WSS push events arriving with target_executor_epoch != self.epoch at >1%.
+            Per invariant 35, executor closes ws on mismatch and reconnects. High rate
+            suggests controller continues pushing to dead ws_sessions.
+            Steps:
+              1) Query `SELECT executor_id, count(*) FROM executor_ws_sessions WHERE closed_at IS NULL GROUP BY executor_id HAVING count(*) > 1`
+                 — should not have multiple active sessions per executor
+              2) Restart any executor showing >1 session
+              3) If persists, investigate executor_ws_sessions cleanup job
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-16

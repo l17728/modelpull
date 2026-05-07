@@ -38,12 +38,16 @@ groups:
   # ============================================
   # 聚合 rules（避免高基数）
   # ============================================
+  # CODE-01 修复（v2.0.12）：原版本 `count by (status) (dlw_executor_health_score)`
+  # 错误地假设 health_score 含 status label —— 它不含。
+  # Controller MUST emit `dlw_executor_status{executor_id, status="healthy|degraded|suspect|faulty|probationary"} 1`
+  # 详见 docs/v2.0/05-operations.md §1.1.2 "强制 emitted metrics 清单"
   - name: dlw_aggregations
     interval: 30s
     rules:
       - record: dlw:executors_count:by_status
         expr: |
-          count by (status) (dlw_executor_health_score)
+          count by (status) (dlw_executor_status == 1)
 
       - record: dlw:tasks_active:count
         expr: |
@@ -59,28 +63,58 @@ groups:
 
   # ============================================
   # SLO error budget burn rate
+  # CODE-02 修复（v2.0.12）：原 burn_rate 用 `avg_over_time(ratio[6h])` 在 ratio 上做平均，
+  # 在零流量时段会 NaN 传染；改用 sloth 标准（独立 short/long error_ratio recording）。
   # ============================================
   - name: dlw_slo_burn_rates
     interval: 30s
     rules:
-      # Multi-window multi-burn-rate (SRE Workbook)
       - record: dlw:api_availability:slo_target
         expr: vector(0.999)
 
-      - record: dlw:api_availability:burn_rate_1h
+      # === API availability error ratios (sloth-style) ===
+      - record: dlw:api_availability:error_ratio_5m
         expr: |
-          (1 - dlw:api_availability:ratio_rate5m)
-          / (1 - dlw:api_availability:slo_target)
+          (
+            sum(rate(http_requests_total{job="dlw-controller",code=~"5.."}[5m]))
+          ) / (
+            sum(rate(http_requests_total{job="dlw-controller"}[5m])) > 0
+          ) or vector(0)
+
+      - record: dlw:api_availability:error_ratio_1h
+        expr: |
+          (
+            sum(rate(http_requests_total{job="dlw-controller",code=~"5.."}[1h]))
+          ) / (
+            sum(rate(http_requests_total{job="dlw-controller"}[1h])) > 0
+          ) or vector(0)
+
+      - record: dlw:api_availability:error_ratio_6h
+        expr: |
+          (
+            sum(rate(http_requests_total{job="dlw-controller",code=~"5.."}[6h]))
+          ) / (
+            sum(rate(http_requests_total{job="dlw-controller"}[6h])) > 0
+          ) or vector(0)
+
+      # === API burn rates (multi-window, multi-burn-rate per SRE Workbook) ===
+      - record: dlw:api_availability:burn_rate_1h
+        expr: dlw:api_availability:error_ratio_1h / (1 - 0.999)
 
       - record: dlw:api_availability:burn_rate_6h
-        expr: |
-          (1 - avg_over_time(dlw:api_availability:ratio_rate5m[6h]))
-          / (1 - dlw:api_availability:slo_target)
+        expr: dlw:api_availability:error_ratio_6h / (1 - 0.999)
 
+      # === Task completion ===
       - record: dlw:task_completion:slo_target
         expr: vector(0.99)
 
-      - record: dlw:task_completion:burn_rate_1d
+      - record: dlw:task_completion:error_ratio_1d
         expr: |
-          (1 - avg_over_time(dlw:task_completion:ratio_rate7d[1d]))
-          / (1 - dlw:task_completion:slo_target)
+          (
+            sum(rate(dlw_tasks_completed_total{status="failed"}[1d]))
+          ) / (
+            sum(rate(dlw_tasks_completed_total{status=~"completed|failed"}[1d])) > 0
+          ) or vector(0)
+
+      - record: dlw:task_completion:burn_rate_1d
+        expr: dlw:task_completion:error_ratio_1d / (1 - 0.99)

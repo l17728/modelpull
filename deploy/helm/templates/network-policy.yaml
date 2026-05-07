@@ -1,4 +1,19 @@
 {{- if .Values.security.network_policies.enabled }}
+# ============================================================================
+# ⚠️ 重要限制 (CODE-06, v2.0.12)：标准 K8s NetworkPolicy 只支持 ipBlock CIDR，
+# 不能限制到具体 FQDN（如 api.anthropic.com）。
+#
+# 下面的 controller-egress / ai-copilot-egress 策略中，"非 RFC1918 即可出"
+# 实际等于"允许全公网"，无法把 LLM 流量锁死到 anthropic/openai。
+#
+# 真正生效的做法（必须满足以下之一）：
+#   (a) 使用 Cilium CNI 的 CiliumNetworkPolicy 配 toFQDNs (推荐)
+#   (b) 使用 Calico 的 GlobalNetworkPolicy + ServiceAccountSelector
+#   (c) 部署 egress gateway (如 Istio Egress Gateway) 做 FQDN 过滤
+#   (d) 部署 squid forward proxy 把白名单做在 proxy 层
+#
+# 不做这些 → AI Copilot 可达任意外部 endpoint，AI-SEC-V21-* 部分缓解失效。
+# ============================================================================
 # 默认拒绝所有，按需开放
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -77,33 +77,66 @@ while [[ $(date +%s) -lt $deadline ]]; do
   sleep 5
 done
 
+# Wait for PG to actually accept connections (CODE-07 修复 v2.0.12)
+log "Waiting for PG to be ready (max 60s)..."
+if ! pg_isready -h localhost -p "$PORT" -t 60 -U postgres >/dev/null; then
+  fail "pg_not_ready_after_recovery"
+fi
+
+# Helper: run single-line SQL with -tAc (tuples-only, unaligned, command); single quoted result
+# CODE-07 修复 v2.0.12: 替代有问题的 heredoc + tr 残破方案
+psql_q() {
+  local sql="$1"
+  local result
+  if ! result=$(psql -h localhost -p "$PORT" -U postgres dlw -tAc "$sql" 2>&1); then
+    echo "PSQL_ERROR: $result" >&2
+    return 1
+  fi
+  if [[ -z "$result" ]]; then
+    echo "PSQL_EMPTY" >&2
+    return 1
+  fi
+  printf '%s' "$result"
+}
+
 # Step 4: Sanity queries
 log "Step 4/4: sanity queries"
 
-# Count tasks
-TASK_COUNT=$(psql -h localhost -p $PORT -U postgres dlw -t -c \
-  "SELECT count(*) FROM download_tasks" | tr -d ' ')
+# Count tasks (CODE-07 修复: 使用 psql_q 处理空字符串)
+TASK_COUNT=$(psql_q "SELECT count(*) FROM download_tasks") || fail "task_query_failed"
 log "  download_tasks count: $TASK_COUNT"
-[[ "$TASK_COUNT" -ge 0 ]] || fail "task_query_failed"
+if ! [[ "$TASK_COUNT" =~ ^[0-9]+$ ]]; then
+  fail "task_count_invalid:$TASK_COUNT"
+fi
 
-# Audit chain integrity (sample)
-BROKEN=$(psql -h localhost -p $PORT -U postgres dlw -t <<EOF | tr -d ' '
-WITH chain AS (
-  SELECT id, prev_hash,
-    LAG(self_hash) OVER (ORDER BY id) AS expected_prev
-  FROM audit_log ORDER BY id LIMIT 1000
-)
-SELECT count(*) FROM chain
-WHERE id > 1 AND prev_hash != expected_prev
-EOF
-)
+# Audit chain integrity (sample first 1000 rows)
+# CODE-07 修复: 用单行 SQL + psql -tAc，避免 heredoc + tr 的 silent fail 路径
+BROKEN=$(psql_q "WITH chain AS (SELECT id, prev_hash, LAG(self_hash) OVER (ORDER BY id) AS expected_prev FROM audit_log ORDER BY id LIMIT 1000) SELECT count(*) FROM chain WHERE id > 1 AND prev_hash != expected_prev") \
+  || fail "audit_query_failed"
 log "  audit chain breaks (sample 1000): $BROKEN"
-[[ "$BROKEN" == "0" ]] || fail "audit_chain_broken"
+if ! [[ "$BROKEN" =~ ^[0-9]+$ ]]; then
+  fail "audit_count_invalid:$BROKEN"
+fi
+if [[ "$BROKEN" -ne 0 ]]; then
+  fail "audit_chain_broken:$BROKEN"
+fi
 
-# State machine sanity
-ILLEGAL=$(psql -h localhost -p $PORT -U postgres dlw -t -c \
-  "SELECT count(*) FROM file_subtasks WHERE status = 'transferring'" | tr -d ' ')
-[[ "$ILLEGAL" == "0" ]] || fail "illegal_status_transferring_found"
+# State machine sanity (CODE-07 同样使用 psql_q)
+ILLEGAL=$(psql_q "SELECT count(*) FROM file_subtasks WHERE status = 'transferring'") \
+  || fail "state_machine_query_failed"
+if ! [[ "$ILLEGAL" =~ ^[0-9]+$ ]]; then
+  fail "illegal_count_invalid:$ILLEGAL"
+fi
+if [[ "$ILLEGAL" -ne 0 ]]; then
+  fail "illegal_status_transferring_found:$ILLEGAL"
+fi
+
+# Additional check: no NULL prev_hash (id > 1)
+NULL_HASH=$(psql_q "SELECT count(*) FROM audit_log WHERE id > 1 AND prev_hash IS NULL") \
+  || fail "null_hash_query_failed"
+if [[ "$NULL_HASH" -ne 0 ]]; then
+  fail "audit_null_prev_hash:$NULL_HASH"
+fi
 
 pg_ctl -D "$TMP_PG_DATA" stop -m immediate || true
 
