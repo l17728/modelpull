@@ -86,11 +86,13 @@ controller:
 
   secrets:
     # ★ 使用 CSI Driver 从 Vault 拉取，不在此处明文
+    # CODE-05 修复 (v2.0.12): vault.enabled 默认改为 false，避免 helm template
+    # 在没有 address 时 required 失败；prod 部署必须显式 enabled=true + 提供 address
     vault:
-      enabled: true
+      enabled: false           # production: set to true via values.production.yaml
       role: dlw-controller
       mountPath: /secrets
-      # REQUIRED (CODE-05 修复 v2.0.12): 必须由部署方覆盖；helm install 时 --set 或 values.production.yaml
+      # REQUIRED 当 enabled=true: 必须由部署方覆盖
       address: ""              # 例：https://vault.corp.example.com:8200
       tlsServerName: ""        # 可选：vault.corp.example.com（如证书 SAN 与 host 不同）
       caCertPath: ""           # 可选：/etc/dlw/ca/vault-ca.pem
