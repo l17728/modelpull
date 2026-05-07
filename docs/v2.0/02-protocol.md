@@ -3,6 +3,13 @@
 > 角色：实现 SDK / 集成方只读这份。
 > 取代：v1.0 §13（整章作废），v1.4 §5（实时进度协议），v1.5 中 §1 内零散的 API 修订。
 
+## 📌 TL;DR (DOC-12, v2.0.17)
+
+- **解决什么**：定义 modelpull 的对外契约（REST / WSS / Heartbeat HMAC），让 SDK 可生成、外部集成可对接
+- **涉及不变量**：6（assignment_token）/ 9（executor_epoch）/ 28（mTLS+JWT 复用）/ 35（WSS push epoch fence）
+- **必看一节**：§2 OpenAPI 摘要 + §4 心跳 + §6 CAS-then-enqueue（详细 §4.3 在 03 §2）
+- **配套**：[`api/openapi.yaml`](../../api/openapi.yaml) 是权威 schema；本章是注解版
+
 ---
 
 ## 0. 从历史文档迁移指引

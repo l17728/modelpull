@@ -1,0 +1,56 @@
+{{- if .Values.controller.migration.enabled }}
+# CODE-20 修复 (v2.0.17): pre-install / pre-upgrade migration job
+# 阻塞 controller 启动直到 alembic upgrade head 完成（详见 09-migration §4）
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dlw.fullname" . }}-migration-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.controller.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.controller.migration.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "dlw.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "dlw.fullname" . }}-controller
+      securityContext:
+        {{- toYaml .Values.common.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: alembic-upgrade
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: DLW_DB_HOST
+              value: {{ include "dlw.dbHost" . | quote }}
+            - name: DLW_DB_PORT
+              value: "5432"
+            - name: DLW_DB_USER
+              value: {{ .Values.externalDatabase.user | quote }}
+            - name: DLW_DB_NAME
+              value: {{ .Values.externalDatabase.database | quote }}
+            - name: DLW_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalDatabase.existingSecret }}
+                  key: {{ .Values.externalDatabase.existingSecretPasswordKey }}
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+            limits: {cpu: 1000m, memory: 1Gi}
+          securityContext:
+            {{- toYaml .Values.common.containerSecurityContext | nindent 12 }}
+{{- end }}

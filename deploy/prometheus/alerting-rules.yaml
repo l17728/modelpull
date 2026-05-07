@@ -213,13 +213,25 @@ groups:
     rules:
       # AI Copilot
       - alert: AICostPerTenantSurge
+        # OPS-V21-10 修复 (v2.0.17): 改为相对 baseline 触发，不固定 $5/day 阈值
+        # 原阈值对小 tenant 噪声、对大 tenant 过松；改为 "近 1h 速率 > 近 7d baseline 的 3 倍 + 绝对下限"
         expr: |
-          rate(dlw_ai_cost_usd_cents_total[1h]) * 24 > 500   # > $5/day projected
+          (
+            rate(dlw_ai_cost_usd_cents_total[1h]) > 3 * rate(dlw_ai_cost_usd_cents_total[7d])
+          )
+          and
+          (
+            rate(dlw_ai_cost_usd_cents_total[1h]) * 3600 > 50   # 绝对下限 $0.5/h，避免 0 baseline 噪声
+          )
         for: 30m
         labels: {severity: work-hours, category: cost}
         annotations:
-          summary: "Tenant {{ $labels.tenant_id }} AI cost surge: projected ${{ $value | humanize }}/day"
-          runbook_url: https://docs.dlw.example.com/runbooks/RB-AI-COST
+          summary: "Tenant {{ $labels.tenant_id }} AI cost surge: 1h rate {{ $value | humanize }}× of 7d baseline"
+          description: |
+            Tenant cost rate spiked >3× over 7d baseline. Likely cause:
+            single user script abuse / new use case ramp / model switch.
+            Steps see RB-13.
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-13
 
       - alert: AIQuotaExhaustedHighRate
         expr: rate(dlw_ai_quota_exhausted_total[10m]) > 0.1
@@ -418,3 +430,53 @@ groups:
               2) Restart any executor showing >1 session
               3) If persists, investigate executor_ws_sessions cleanup job
           runbook_url: https://docs.dlw.example.com/runbooks/RB-16
+
+      # OPS-V21-08 修复 (v2.0.17): 3 个之前缺失的告警类别
+      - alert: DBPoolExhausted
+        expr: |
+          sum(pg_stat_activity_count{datname="dlw"}) /
+          on() group_left max(pg_settings_max_connections) > 0.9
+        for: 5m
+        labels: {severity: page, category: availability}
+        annotations:
+          summary: "DB connection pool >90% saturated"
+          description: |
+            PG connection pool usage > 90% sustained. Likely cause: SQLAlchemy
+            session leak / long-running idle in transaction / app loop without close.
+            Steps see RB-20.
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-20
+
+      - alert: TenantQuotaSpike
+        expr: |
+          (
+            rate(dlw_quota_bytes_used_month{tenant_id!=""}[5m])
+            > 10 * rate(dlw_quota_bytes_used_month[7d])
+          )
+          and
+          (
+            rate(dlw_quota_bytes_used_month{tenant_id!=""}[5m]) > 1073741824   # 1 GB/min
+          )
+        for: 15m
+        labels: {severity: work-hours, category: quota}
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} bytes consumption rate >10× baseline"
+          description: |
+            Bytes consumption rate over last 5m is >10× the 7d baseline AND >1GB/min.
+            Catches ramp-up anomalies before they hit static 85% QuotaApproachingLimit.
+            Steps see RB-21.
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-21
+
+      - alert: EgressBytesSurge
+        # 跨 region egress 是直接成本 ($0.02-0.09/GB)
+        expr: |
+          sum by (region_pair) (rate(dlw_egress_bytes_total{region_pair!=""}[1h]))
+          > 1073741824   # > 1 GB/sec sustained = $7-32/h
+        for: 30m
+        labels: {severity: work-hours, category: cost}
+        annotations:
+          summary: "Egress {{ $labels.region_pair }} > 1 GB/s for 30m"
+          description: |
+            Sustained cross-region egress > 1 GB/s on {{ $labels.region_pair }}.
+            Estimated cost: $7-32/hour at standard cloud rates.
+            Steps see RB-22.
+          runbook_url: https://docs.dlw.example.com/runbooks/RB-22

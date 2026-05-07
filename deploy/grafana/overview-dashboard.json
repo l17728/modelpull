@@ -28,6 +28,119 @@
   },
   "panels": [
     {
+      "id": 100,
+      "title": "🚦 系统体征红绿灯（OPS-V21-06, v2.0.17）",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 101,
+      "title": "Controller role",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 0, "y": 1 },
+      "targets": [{"expr": "max(dlw_controller_role) by (role)", "legendFormat": "{{role}}"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"1": {"text": "ACTIVE", "color": "green"}, "0": {"text": "STANDBY", "color": "blue"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 102,
+      "title": "PG replication lag",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 3, "y": 1 },
+      "targets": [{"expr": "max(pg_replication_lag_seconds)"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "yellow", "value": 30}, {"color": "red", "value": 60}]}
+        }
+      }
+    },
+    {
+      "id": 103,
+      "title": "WSS conn %",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 6, "y": 1 },
+      "targets": [{"expr": "100 * sum(dlw_executor_ws_connected) / count(dlw_executor_status == 1)"}],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "yellow", "value": 80}, {"color": "green", "value": 95}]}
+        }
+      }
+    },
+    {
+      "id": 104,
+      "title": "Probe leader",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 9, "y": 1 },
+      "targets": [{"expr": "dlw_rate_limit_probe_leader_present"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "NO LEADER", "color": "red"}, "1": {"text": "ELECTED", "color": "green"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 105,
+      "title": "Active P0/P1 alerts",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 12, "y": 1 },
+      "targets": [{"expr": "count(ALERTS{severity=~\"page|work-hours\", alertstate=\"firing\"})"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"steps": [{"color": "green"}, {"color": "yellow", "value": 1}, {"color": "red", "value": 3}]}
+        }
+      }
+    },
+    {
+      "id": 106,
+      "title": "Recovery in progress?",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 15, "y": 1 },
+      "targets": [{"expr": "max(dlw_controller_recovery_in_progress)"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "RECOVERING (503)", "color": "red"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 107,
+      "title": "Audit chain integrity",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 18, "y": 1 },
+      "targets": [{"expr": "max(dlw_audit_chain_integrity)"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "BROKEN ⚠️", "color": "red"}, "1": {"text": "OK", "color": "green"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 108,
+      "title": "Last DataIntegrity (24h)",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 3, "x": 21, "y": 1 },
+      "targets": [{"expr": "increase(dlw_subtask_retries_total{reason=\"checksum\"}[24h])"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"steps": [{"color": "green"}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}
+        }
+      }
+    },
+    {
       "id": 1,
       "title": "Active tasks",
       "type": "stat",
@@ -132,7 +245,16 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "Bps" }
+        "defaults": {
+          "unit": "Bps",
+          "links": [
+            {
+              "title": "🔗 View in Loki: this source's logs",
+              "url": "/explore?left={\"datasource\":\"Loki\",\"queries\":[{\"expr\":\"{component=\\\"hf_proxy\\\",source_id=\\\"${__field.labels.source_id}\\\"}\"}]}",
+              "targetBlank": true
+            }
+          ]
+        }
       }
     },
     {

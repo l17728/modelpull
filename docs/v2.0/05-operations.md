@@ -3,6 +3,13 @@
 > 角色：SRE / on-call 工作手册。
 > 取代：v1.5 §4 日志与可观测性，散落在各文的运维提示。
 
+## 📌 TL;DR (DOC-12, v2.0.17)
+
+- **解决什么**：SLO 定义 + 4 层可观测（metrics/logs/traces/console）+ 22 个 runbook + 备份 + 灾备 + 优雅停机 + 容量规划
+- **凌晨 3 点入口**：§4 RB-XX runbook 列表（22 份覆盖 P0-P2 各类 incident）；先看 alert 里的 runbook_url
+- **必看一节**：§1 三柱 / §3 告警分级 / §4 全部 runbook（22 份）/ §5 RPO/RTO
+- **配套**：[`../../deploy/prometheus/`](../../deploy/prometheus/) 32 告警规则 + [`../../deploy/grafana/`](../../deploy/grafana/) 5 dashboard
+
 ---
 
 ## 0. 从历史文档迁移指引
@@ -857,6 +864,91 @@ aws s3 cp s3://audit-worm/$LATEST_WORM /tmp/worm.parquet
 # 6. 评估法务通知义务（GDPR / 中国数据安全法）
 ```
 **Why P0**：审计链断裂可能源自：(a) DB 损坏（不算事件但需查 PG corruption）；(b) 主动篡改（必须立刻调查）；(c) trigger / 应用 bug（修复并补审计）。三种都不能等到工作时间。
+
+### 4.20 RB-20 — DB connection pool 耗尽（OPS-V21-08, v2.0.17）
+
+> 触发告警：`DBPoolExhausted`（v2.0.17 新增；触发 `pg_stat_activity total >= max_connections * 0.9`）
+
+```bash
+# 1. 谁占着连接？
+psql -tAc "SELECT pid, state, application_name, query_start,
+           left(query, 60) as query
+           FROM pg_stat_activity
+           WHERE datname='dlw' AND state != 'idle'
+           ORDER BY query_start LIMIT 20"
+
+# 2. 长时间 idle in transaction → 应用 bug（连接泄漏）
+psql -tAc "SELECT pid, application_name, state_change
+           FROM pg_stat_activity
+           WHERE state = 'idle in transaction'
+             AND state_change < now() - INTERVAL '5 min'"
+# 安全 kill：pg_terminate_backend(pid)
+
+# 3. 短期：增大 max_connections（需 PG restart）或扩 controller HPA
+# 4. 长期：审 SQLAlchemy session 是否漏 commit/close
+```
+
+### 4.21 RB-21 — 单租户配额突发（OPS-V21-08, v2.0.17）
+
+> 触发告警：`TenantQuotaSpike`（v2.0.17 新增；按 rate 触发，不等到 85% 静态阈值）
+> 与 `QuotaApproachingLimit` (P2 ticket, ratio-based) 互补 —— 本告警捕获 ramp-up 异常
+
+```bash
+# 1. 找突发的 tenant
+TENANT_ID=$1
+psql -tAc "SELECT bytes, project_id, occurred_at
+           FROM usage_records
+           WHERE tenant_id=$TENANT_ID AND metric='bytes_downloaded'
+             AND occurred_at > now()-'1h'
+           ORDER BY bytes DESC LIMIT 20"
+
+# 2. 是否单 user 触发？
+psql -tAc "SELECT user_id, sum(value) as bytes
+           FROM usage_records
+           WHERE tenant_id=$TENANT_ID AND metric='bytes_downloaded'
+             AND occurred_at > now()-'1h'
+           GROUP BY user_id ORDER BY bytes DESC LIMIT 5"
+
+# 3. 是否单 task / 单 repo？
+psql -tAc "SELECT task_id, repo_id, sum(value) as bytes
+           FROM usage_records ur JOIN download_tasks dt ON ur.task_id=dt.id
+           WHERE ur.tenant_id=$TENANT_ID AND ur.metric='bytes_downloaded'
+             AND ur.occurred_at > now()-'1h'
+           GROUP BY task_id, repo_id ORDER BY bytes DESC LIMIT 5"
+
+# 4. 处置选项：
+#   a. 合理用量：通知 admin 提额
+#   b. 异常 / 滥用：临时降 tenant priority
+#      psql -c "UPDATE quota_snapshots SET concurrent_quota = LEAST(concurrent_quota, 5)
+#               WHERE tenant_id=$TENANT_ID"
+#   c. 单用户 abuse：rate-limit 该 user
+```
+
+### 4.22 RB-22 — 跨区 Egress 暴涨（OPS-V21-08, v2.0.17）
+
+> 触发告警：`EgressBytesSurge`（v2.0.17 新增；按 region_pair 维度）
+> 财务影响告警：跨 region egress 通常 $0.02-0.09/GB，1TB = $20-90
+
+```bash
+# 1. 找哪条 region_pair 在涨
+psql -tAc "SELECT region_pair, sum(value) as bytes
+           FROM usage_records
+           WHERE metric='bytes_egress' AND occurred_at > now()-'1h'
+           GROUP BY region_pair ORDER BY bytes DESC LIMIT 5"
+
+# 2. 哪个 tenant / source 触发的
+psql -tAc "SELECT tenant_id, source_id, region_pair, sum(value) as bytes
+           FROM usage_records
+           WHERE metric='bytes_egress' AND occurred_at > now()-'1h'
+             AND region_pair = '<offending pair>'
+           GROUP BY tenant_id, source_id, region_pair ORDER BY bytes DESC LIMIT 10"
+
+# 3. 处置：
+#   a. 引导该 tenant 到同 region 的 source（修改 source_strategy）
+#   b. 临时关闭跨 region task
+#   c. 紧急情况下 quarantine source
+#   d. 估算财务损失，通知 finance / tenant_admin
+```
 
 ---
 

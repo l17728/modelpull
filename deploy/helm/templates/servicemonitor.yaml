@@ -1,0 +1,41 @@
+{{- if .Values.observability.prometheus.serviceMonitor.enabled }}
+# CODE-20 修复 (v2.0.17): ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "dlw.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "dlw.controller.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.prometheus.serviceMonitor.interval }}
+      scheme: http
+      relabelings:
+        # 强制 scrape 来源 namespace 进 label，多 cluster 可区分
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: kubernetes_namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "dlw.fullname" . }}-executor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlw.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "dlw.executor.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.observability.prometheus.serviceMonitor.interval }}
+{{- end }}

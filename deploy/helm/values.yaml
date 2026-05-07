@@ -25,6 +25,21 @@ controller:
     lbDrainSeconds: 30
   terminationGracePeriodSeconds: 180  # 必须 > lbDrainSeconds + graceful_stop timeout + 5s buffer
 
+  # CODE-20 修复 (v2.0.17): HPA 默认关闭（active/standby 模式 replicas=2 固定）
+  # 如租户规模 > 500 executor 才考虑开启
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPU: 70           # %
+    targetMemory: 75        # %
+
+  # CODE-20 修复 (v2.0.17): pre-install / pre-upgrade migration job
+  migration:
+    enabled: true
+    backoffLimit: 0         # alembic upgrade 失败不重试，避免 partial migration
+    timeoutSeconds: 1800    # 30 min；大表 ALTER 上限
+
   resources:
     requests:
       cpu: 2000m
