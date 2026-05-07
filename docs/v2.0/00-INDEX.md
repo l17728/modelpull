@@ -20,6 +20,14 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 
 按主题切分。每份文档独立成章，互相用链接交叉引用。
 
+### 🚀 入门 / 索引（v2.0.15 新增 — 解决 reviewer DOC-01/02/08 入门门槛过高）
+
+| 文件 | 主题 | 时间 |
+|------|------|------|
+| **[00-OVERVIEW.md](./00-OVERVIEW.md)** | 1.5 小时入门版（5 个关键设计 + 6 个核心不变量 + 14 章地图） | 90 分钟 |
+| **[INVARIANTS.md](./INVARIANTS.md)** | 46 不变量按 5 主题分组 + 依赖 DAG + Anti-example | 30 分钟 |
+| **[GLOSSARY.md](./GLOSSARY.md)** | 术语 / 缩写 / RFC 2119 规范 | 查阅型 |
+
 ### 设计文档（架构与契约）
 
 | 文件 | 主题 | 必读对象 |
@@ -124,6 +132,20 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
   - `sql` 块为权威 schema，应作为 migration 蓝本
   - `yaml` 块为权威配置 schema
 
+### RFC 2119 规范性词汇（v2.0.15 新增 — DOC-09）
+
+modelpull v2.0 文档采用 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119.txt) 关键字风格：
+
+| 中文 | RFC 2119 | 强度 | 用法 |
+|------|---------|------|------|
+| **必须** | MUST | 绝对要求 | 不变量 / 安全约束 / 数据完整性 |
+| **不得 / 禁止** | MUST NOT | 绝对禁止 | 反模式 / 安全禁区 |
+| **应当** | SHOULD | 强烈推荐但允许例外 | 性能 / 可观测 / 工程实践 |
+| **不应** | SHOULD NOT | 不推荐但允许例外 | 反模式（弱） |
+| **可以** | MAY | 可选 | 可配置 / 优化 |
+
+**禁止使用的弱化词**：「应该」「推荐」「最好」「可能」 → 改用 SHOULD / MAY。详见 [`GLOSSARY.md`](./GLOSSARY.md) §6。
+
 ---
 
 ## 文档维护
@@ -152,3 +174,4 @@ v2.0 是对 v1.0 / v1.4 / v1.5 三份历史文档的合并、修正、加固版�
 | 2026-05-07 | v2.0.12 | **第3轮 review · PR 5（紧急）** 修 7 项真实代码 bug（防 prod 事故）：CODE-01 P0 告警 `AllExecutorsOffline` 永不触发 → 修 recording rule 用 `dlw_executor_status{status}`；CODE-02 SLO burn rate 公式 → 改 sloth 标准（独立 short/long error_ratio）；CODE-05 `vault.example.com` 硬编码 → helm value `required`；CODE-06 NetworkPolicy FQDN 限制添加显著 ⚠️ warning；CODE-07 verify-backup heredoc 残破（audit 校验恒为 0 假绿）→ 改 psql -tAc + isready 前置；OPS-V21-02 RB-AI-COST/RB-OPT-STORM/RB-MP-INTEGRITY 引用 404 → 实际写出 RB-13~RB-19 共 7 份新 runbook；OPS-V21-01 12 个无 description/runbook_url 告警全部补齐；StorageS3High5xx 改 ratio；AuditChainBroken 升 P0 |
 | 2026-05-07 | v2.0.13 | **PR 6（可行性 + 运维稳健）** 修 12 项：FEAS-01 Phase 1 5w→6w（被遗忘的工程任务专列 Week 5）；总线 14w→15w；P90 18-19w 写入 §10；FEAS-07 砍 Phase 4 末 AI canary（独立 v2.1 4-6w 里程碑）；FEAS-05 前端 ≥2 FTE 入场标准对齐；OPS-V21-03 RB-03 加 step 0「冻结同源」+ multipart abort + affected blobs 报表；OPS-V21-05 inhibit_rules 扩到全 v2.1 主题；OPS-V21-09 RB-01 加 status page + UI banner 自动化 + 前置 checklist；CODE-04 preStop sleep magic → helm value 化；CODE-12 promote-standby.sh 去 bc 用 awk + fence 旧 primary（label + cordon）；CODE-03 lint_invariants.py 空目录/缺文件 friendly exit；CODE-08 加 9 个 unit test（pytest）+ CI 集成；新增 `docs/operator/onboard-first-executor.md`（FEAS-03，mTLS bootstrap 流程）+ `docs/operator/oidc-setup.md`（FEAS-04，Keycloak/Auth0 配置示例 + dlw admin bootstrap） |
 | 2026-05-07 | v2.0.14 | **PR 7（DX / 公开形象）** 修 7 项：DX-01 README 重写"design-only"诚实定位（status badge orange + ⛔ 警告 + 30 秒"做 / 不做"判断 + 现在能做的 3 件事）；DX-02 11-cli §1.1 顶部加 ⚠️ 占位 banner；DX-03 新增 `docs/getting-started.md`（设计阶段 5 件能做的事 + 设计中的 first-run）；DX-07 新增 `README_en.md`（英文版，国际可见度）；DX-08 新增 `ROADMAP.md`（08-mvp-roadmap 摘要 + 当前状态 checkbox）+ `CHANGELOG.md`（Keep a Changelog 风格，覆盖 v2.0.0 → v2.0.14）；DX-09 README"为何不用 hf_hub"表移到首屏后立刻；加 mermaid 整体架构图（30 秒了解）；DX-13 新增 `.github/workflows/openapi-pages.yml`（GitHub Pages 部署 Redocly 静态站）；DX-15 新增 `docs/contributor/local-setup.md`（5 分钟跑通 invariant lint + pytest + helm template + redoc preview） |
+| 2026-05-07 | v2.0.15 | **PR 8（文档可读性 / 结构）** 修 8 项：DOC-01 新增 `00-OVERVIEW.md`（1.5 小时入门版替代 24 小时全量阅读）；DOC-02 + DOC-10 新增 `INVARIANTS.md`（46 不变量按 5 主题分组 + 依赖 mermaid DAG + Anti-example + 测试 ID 速查）；DOC-08 新增 `GLOSSARY.md`（LPT/EWMA/CUSUM 等缩写首次定义 + 中英术语统一 + chunk vs sub-chunk 命名约定）；DOC-09 INDEX 加 RFC 2119 规范性词汇表（必须/应当/可以）+ 禁用弱化词；DOC-04 13 §4.3 加 DOC-04 banner（300 行 10 子节读路提示，避免读者迷失）；DOC-07 不变量 19/36/41 在 INVARIANTS 中明确 T1/T2 链接；DOC-14 04 §3 头部加双凭证体系 mental model 导览图（Controller-managed vs Executor-local） |

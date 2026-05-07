@@ -155,6 +155,26 @@ Executor 之间不通信。Controller 也不主动反向连 Executor。
 
 ## 3. 凭证管理
 
+> 📍 **导览（v2.0.15 加 — DOC-14）：modelpull 的两套凭证体系并存**
+>
+> ```
+> ┌─────────────────────────┐    ┌─────────────────────────┐
+> │ Tenant 级凭证            │    │ Executor 本地凭证池       │
+> │ (本章 §3.1 §3.2 §3.3)   │    │ (14 §3 详细)             │
+> ├─────────────────────────┤    ├─────────────────────────┤
+> │ 存：Controller DB        │    │ 存：Executor 本地文件     │
+> │ 加密：envelope (KMS)    │    │ 加密：chmod 600 + Vault  │
+> │ 不变量 2 强制            │    │ 不变量 30 强制            │
+> │ 用例：HF Token / S3 STS │    │ 用例：corp gateway 认证 / │
+> │       per-tenant secret │    │       OOB HF token rotate │
+> └─────────────────────────┘    └─────────────────────────┘
+>          ↓                                 ↓
+>   Controller 注入 wire           Executor 本地查表使用
+>   (HF reverse-proxy)             (controller 仅知 alias)
+> ```
+>
+> **Why 两套**：tenant 级凭证安全模型重；executor 本地池为穿透 corp gateway 限速。两者作用域、生命周期、运维方式都不同。
+
 ### 3.1 HF Token：Reverse Proxy（解决 SEC-02）
 
 🔒 **不变量 2**：**Tenant-级** HF Token（`tenants.hf_tokens`）永不离开 Controller。
