@@ -188,10 +188,14 @@ In `DownloadTask` (after the `trace_id` column, line 56):
 ```python
     # ORM relationship — Phase 1 Week 3 UI scaffold consumes via
     # selectinload(DownloadTask.subtasks) in api/tasks.get_task.
+    # Cascade is intentionally narrow: the FK already has ondelete=CASCADE,
+    # so DB-level cleanup handles deletion. Adding ORM-level "delete-orphan"
+    # would risk scheduling orphan deletes if any code path triggers a lazy
+    # load of an empty in-memory subtasks collection on a flushed parent.
     subtasks: Mapped[list["FileSubTask"]] = relationship(
         "FileSubTask",
         back_populates="task",
-        cascade="all, delete-orphan",
+        cascade="save-update, merge",
         lazy="select",
     )
 ```
@@ -512,7 +516,7 @@ coverage
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint . --ext .ts,.vue --max-warnings=0",
@@ -531,6 +535,7 @@ coverage
   },
   "devDependencies": {
     "@types/node": "^20.16.10",
+    "@typescript-eslint/parser": "^7.18.0",
     "@vitejs/plugin-vue": "^5.1.4",
     "@vue/test-utils": "^2.4.6",
     "@vue/tsconfig": "^0.5.1",
@@ -586,16 +591,22 @@ packages:
 
 ```json
 {
-  "extends": "@vue/tsconfig/tsconfig.json",
   "compilerOptions": {
     "composite": true,
+    "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
     "types": ["node"]
   },
   "include": ["vite.config.ts", "vitest.config.ts"]
 }
 ```
+
+(W4-B: `@vue/tsconfig@0.5.x` does not export `tsconfig.json` — extending it errors. Vite/Vitest configs run in Node, not the browser, so this small standalone config is all we need.)
 
 - [ ] **Step 6: Create `frontend/vite.config.ts`**
 
@@ -1399,8 +1410,13 @@ client.interceptors.response.use(
     const status: number | undefined = error?.response?.status
     if (status === 401) {
       const auth = useAuthStore()
-      auth.logout()
-      router.push({ path: '/login', query: { reason: 'invalid_token' } })
+      // Burst guard: when N in-flight requests all 401, only the first one
+      // performs the logout + redirect (auth.logout() is idempotent but a
+      // single push is cleaner than N deduplicated by vue-router).
+      if (auth.isAuthenticated) {
+        auth.logout()
+        router.push({ path: '/login', query: { reason: 'invalid_token' } })
+      }
     }
     return Promise.reject(error)
   },
@@ -1569,9 +1585,10 @@ Terminal 2:
 
 ```bash
 cd frontend
-echo "VITE_API_BASE=http://localhost:8000" > .env.local
 pnpm dev
 ```
+
+(Do NOT set `VITE_API_BASE` for dev — the Vite proxy in `vite.config.ts` forwards `/api/*` to `:8000`, preserving the same origin so Authorization headers work and CORS isn't triggered. `VITE_API_BASE` is only for `pnpm preview` / production builds where there's no Vite dev server.)
 
 Browser at `http://localhost:5173/login`:
 
@@ -1705,7 +1722,7 @@ import type { TaskListResponse } from '@/api/types'
 
 export function useTaskList() {
   return useQuery({
-    queryKey: ['tasks'] as const,
+    queryKey: ['tasks'],
     queryFn: async () => {
       const r = await client.get<TaskListResponse>('/api/v1/tasks')
       return r.data
@@ -1829,7 +1846,7 @@ for i in 1 2 3; do
 done
 ```
 
-Terminal 3 (frontend):
+Terminal 3 (frontend — Vite proxy handles `/api/*` → `:8000`, do NOT set `VITE_API_BASE`):
 
 ```bash
 cd frontend
@@ -1840,7 +1857,7 @@ Browser at `http://localhost:5173/login`:
 
 1. Paste the same `$DLW_BEARER_TOKEN` value → push to `/`.
 2. See a table of 3 tasks with status badges.
-3. Wait 5s → table refetches (you can confirm via DevTools Network panel).
+3. Wait 5s → table refetches (you can confirm via DevTools Network panel; URLs should be relative `/api/v1/tasks` against `:5173`, NOT absolute against `:8000`).
 4. Logout → kicked back to `/login`.
 
 Stop all processes.
@@ -1902,20 +1919,26 @@ function fakeTask(status: TaskDetail['status']): TaskDetail {
 
 describe('computeRefetchInterval', () => {
   test('non-terminal status → 1000ms', () => {
-    expect(computeRefetchInterval(fakeTask('downloading'))).toBe(1000)
-    expect(computeRefetchInterval(fakeTask('queued'))).toBe(1000)
-    expect(computeRefetchInterval(fakeTask('scheduling'))).toBe(1000)
-    expect(computeRefetchInterval(fakeTask('pending'))).toBe(1000)
+    expect(computeRefetchInterval(fakeTask('downloading'), 'success')).toBe(1000)
+    expect(computeRefetchInterval(fakeTask('queued'), 'success')).toBe(1000)
+    expect(computeRefetchInterval(fakeTask('scheduling'), 'success')).toBe(1000)
+    expect(computeRefetchInterval(fakeTask('pending'), 'success')).toBe(1000)
   })
 
   test('terminal status → false (stop polling)', () => {
-    expect(computeRefetchInterval(fakeTask('succeeded'))).toBe(false)
-    expect(computeRefetchInterval(fakeTask('failed'))).toBe(false)
-    expect(computeRefetchInterval(fakeTask('cancelled'))).toBe(false)
+    expect(computeRefetchInterval(fakeTask('succeeded'), 'success')).toBe(false)
+    expect(computeRefetchInterval(fakeTask('failed'), 'success')).toBe(false)
+    expect(computeRefetchInterval(fakeTask('cancelled'), 'success')).toBe(false)
   })
 
-  test('undefined data (first fetch in flight) → 1000ms', () => {
-    expect(computeRefetchInterval(undefined)).toBe(1000)
+  test('undefined data + pending status (first fetch in flight) → 1000ms', () => {
+    expect(computeRefetchInterval(undefined, 'pending')).toBe(1000)
+  })
+
+  test('undefined data + error status → 5000ms backoff', () => {
+    // 5xx / network error during initial fetch — back off so we don't hammer
+    // a struggling backend at 1 req/sec.
+    expect(computeRefetchInterval(undefined, 'error')).toBe(5000)
   })
 })
 ```
@@ -1939,21 +1962,30 @@ import { client } from '@/api/client'
 import { TERMINAL_STATUSES, type TaskDetail } from '@/api/types'
 
 const POLL_INTERVAL_MS = 1_000
+const ERROR_BACKOFF_MS = 5_000
+
+type QueryStatus = 'pending' | 'error' | 'success'
 
 /** Pure helper — exported so tests don't need vue-query plumbing. */
-export function computeRefetchInterval(data: TaskDetail | undefined): number | false {
-  if (!data) return POLL_INTERVAL_MS
+export function computeRefetchInterval(
+  data: TaskDetail | undefined,
+  status: QueryStatus,
+): number | false {
+  if (!data) {
+    return status === 'error' ? ERROR_BACKOFF_MS : POLL_INTERVAL_MS
+  }
   return TERMINAL_STATUSES.has(data.status) ? false : POLL_INTERVAL_MS
 }
 
 export function useTaskDetail(taskId: Ref<string>) {
   return useQuery({
-    queryKey: ['task', taskId] as const,
+    queryKey: ['task', taskId],
     queryFn: async () => {
       const r = await client.get<TaskDetail>(`/api/v1/tasks/${taskId.value}`)
       return r.data
     },
-    refetchInterval: (query) => computeRefetchInterval(query.state.data),
+    refetchInterval: (query) =>
+      computeRefetchInterval(query.state.data, query.state.status as QueryStatus),
     staleTime: 0,
   })
 }
@@ -2167,7 +2199,7 @@ TID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
 echo "task: $TID"
 ```
 
-Terminal 3 (frontend):
+Terminal 3 (frontend — Vite proxy handles routing, do NOT set `VITE_API_BASE`):
 
 ```bash
 cd frontend
@@ -2268,13 +2300,28 @@ Insert these two jobs at the end of the `jobs:` block, before any aggregator job
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Typecheck
+        run: pnpm typecheck
+
       - name: Build
         run: pnpm build
 ```
 
-- [ ] **Step 2: If `ci.yml` has a `ci-status` aggregator job (`needs:` listing all required jobs), append `frontend-lint` and `frontend-build` to its `needs:` list**
+- [ ] **Step 2: Append the two new job names to the `ci` aggregator job's `needs:` list (mandatory — the aggregator drives the README CI Status badge)**
 
-Open `.github/workflows/ci.yml`, locate the aggregator (likely named `ci-status` or `all-checks`). Append the two new job names to its `needs:` array. If no aggregator exists, skip — branch protection rules can list them directly.
+Open `.github/workflows/ci.yml`, locate the `ci` aggregator job at line ~271 (`name: CI Status`). The current `needs:` array is:
+
+```yaml
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest]
+```
+
+Change it to:
+
+```yaml
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest, frontend-lint, frontend-build]
+```
+
+If this step is skipped, the README CI Status badge will report green even when `frontend-lint` or `frontend-build` fails — silently regressing CI quality.
 
 - [ ] **Step 3: Validate the YAML locally**
 
@@ -2304,7 +2351,9 @@ Find the closing of that block (likely a markdown horizontal rule `---` or anoth
 
 - [ ] **Step 2: Insert the new "Week 3 UI demo" block**
 
-```markdown
+The block uses three-backtick fences in the actual README.md (paste the content between the four-backtick markers below). The plan uses four-backtick fencing here so the inner three-backtick blocks render correctly:
+
+````markdown
 ## Week 3 UI demo
 
 A 3-page Vue 3 SPA driven by `pnpm dev` against the running controller.
@@ -2316,15 +2365,16 @@ uv run alembic upgrade head
 uv run uvicorn dlw.main:app --port 8000
 
 # Terminal 2 — seed a task so the list isn't empty
+# (Replace ${DLW_BEARER_TOKEN} with the token you set in the controller's env)
 curl -X POST http://localhost:8000/api/v1/tasks \
   -H "Authorization: Bearer $DLW_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"repo_id":"deepseek-ai/DeepSeek-V3","revision":"abc123def4567890abc123def4567890abc12345","storage_id":1}'
 
-# Terminal 3 — frontend
+# Terminal 3 — frontend (Vite proxy forwards /api/* to :8000;
+# do NOT set VITE_API_BASE for dev — only for `pnpm preview`/production builds)
 cd frontend
 pnpm install
-echo "VITE_API_BASE=http://localhost:8000" > .env.local
 pnpm dev    # http://localhost:5173
 ```
 
@@ -2332,8 +2382,7 @@ Open `http://localhost:5173/`, paste the value of `$DLW_BEARER_TOKEN`, see the
 seeded task in the list, click into it. The detail page polls every second
 until the task hits a terminal state. Pair with `dlw-executor` in another
 terminal to watch subtasks transition from `pending` → `assigned` → `succeeded`.
-
-```
+````
 
 - [ ] **Step 3: Commit**
 
@@ -2417,11 +2466,22 @@ Expected first run: all green. If anything fails, fix in a new commit on the sam
 
 ## Plan Revisions Log
 
-(Empty on first draft. Populated by the pre-execution multi-agent reviewer pass.)
+This plan was reviewed by 2 specialized agents (frontend-code-quality + architecture-integration) on 2026-05-08 after the first draft. 10 fixes applied (W4-A through W4-J) before subagent execution.
 
 | Tag | Severity | Issue | Fix applied |
 |-----|----------|-------|-------------|
-| _(none yet)_ | | | |
+| W4-A | CRITICAL | Task 3 `.eslintrc.cjs` references `@typescript-eslint/parser` but it is NOT in `devDependencies` → `pnpm lint` fails immediately on `Cannot find module '@typescript-eslint/parser'` | Added `@typescript-eslint/parser` to devDeps |
+| W4-B | CRITICAL | Task 3 `tsconfig.node.json` extends `@vue/tsconfig/tsconfig.json` but that path does not exist in `@vue/tsconfig@0.5.x` (only `tsconfig.dom.json` and the package root) → `vue-tsc --noEmit` fails | Removed the extends; `tsconfig.node.json` declares its own minimal compiler options for Vite/Vitest configs |
+| W4-C | CRITICAL | Tasks 7/8/10 smoke steps + Task 12 README tell devs to set `VITE_API_BASE=http://localhost:8000` for `pnpm dev`. With that env var set, axios baseURL becomes absolute → cross-origin request from `:5173` to `:8000` → CORS block (FastAPI has no CORS middleware in Phase 1) | Removed `VITE_API_BASE` env writes from all dev smoke + README; `VITE_API_BASE` is documented as production-only |
+| W4-D | CRITICAL | Task 11 Step 2 says "if no aggregator job exists, skip". The `ci` aggregator job DOES exist at `.github/workflows/ci.yml` line ~272 with a hard `needs:` list — leaving it unmodified means README badge stays green even when the new frontend jobs fail | Made Step 2 unconditional and named the existing aggregator job (`ci`) |
+| W4-E | important | Tasks 8/9 use `queryKey: [..., taskId] as const` — `as const` collapses to `readonly [...]` which conflicts with vue-query 5's `QueryKey` mutability expectations and may break generic inference | Dropped `as const` from both `useTaskList` and `useTaskDetail` queryKeys |
+| W4-F | important | Task 1 ORM relationship uses `cascade="all, delete-orphan"` — if any code path lazy-loads `parent.subtasks` after the parent is in-session (e.g., a future log line, debugger inspection), SQLAlchemy will schedule orphan deletes for committed subtasks. DB FK already has `ondelete=CASCADE` so ORM-level orphan delete is redundant + risky | Changed cascade to `save-update, merge` only |
+| W4-G | important | Task 9 `computeRefetchInterval` returns `1000` whenever `data` is undefined, including transient 5xx errors → 1 req/sec hammers a struggling backend | `computeRefetchInterval` now accepts query status; on `error` returns `5000` (5× backoff) while still returning `1000` on initial pending fetch |
+| W4-H | important | `build` script `"vue-tsc --noEmit && vite build"` couples typecheck with build — CI's typecheck runs twice (once in lint job, once in build job) and Windows shell-chain edge cases | Split: `build` is just `vite build`; CI's `frontend-build` job runs `pnpm typecheck` + `pnpm build` as separate steps |
+| W4-I | minor | On 401 burst (multiple in-flight requests when token expires), interceptor pushes `/login` N times — vue-router dedupes destination but `logout()` still runs N times (idempotent but wasteful) | Added early-return guard: `if (!auth.isAuthenticated) return Promise.reject(error)` at top of 401 branch (skips after first handler) |
+| W4-J | minor | Task 12 README block uses triple-backtick outer fence with triple-backtick inner code fences → markdown rendering breaks (inner fence terminates outer block) | Outer fence in plan changed to four-backtick (` ```` `); README sample inside is well-formed three-backtick markdown |
+
+Bonus: removed `@playwright/test` from devDeps (originally in spec §2 stack list) since this plan ships no Playwright test files — Phase 2 plan reinstates it.
 
 ---
 
