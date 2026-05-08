@@ -120,25 +120,22 @@ After M1, backend exposes `subtasks` array on `GET /api/v1/tasks/{id}`. List end
 
 - [ ] **Step 1: Write failing test (append to `tests/services/test_task_service.py`)**
 
+The existing test file already has an `env` fixture (function-scope, flush-only) seeding `tenant_id=1`, `project_id=1`, `user_id=1`, `storage_id=1`, and an autouse `_create_tables` fixture creating/dropping the schema. The new test must take `env` as a parameter to trigger seeding, and must NOT call `await db_session.commit()` — `db_session` rolls back per test for isolation.
+
+Append at end of `tests/services/test_task_service.py`:
+
 ```python
-# Append at end of tests/services/test_task_service.py
-
-
 @pytest.mark.slow
 async def test_create_task_populates_subtasks_relationship(
-    db_session: AsyncSession,
+    db_session: AsyncSession, env
 ) -> None:
-    """After create_task + flush, task.subtasks is a list of 2 FileSubTask rows.
+    """After create_task + flush, task.subtasks is populated via the new
+    DownloadTask.subtasks ORM relationship.
 
-    Locks the relationship so api/tasks.get_task can use
+    Locks the relationship contract so api/tasks.get_task can use
     selectinload(DownloadTask.subtasks).
     """
     from sqlalchemy.orm import selectinload
-    from sqlalchemy import select
-
-    from dlw.db.models.task import DownloadTask
-    from dlw.schemas.task import TaskCreate
-    from dlw.services.task_service import create_task
 
     body = TaskCreate(
         repo_id="o/relationship-probe",
@@ -149,9 +146,9 @@ async def test_create_task_populates_subtasks_relationship(
         db_session, body,
         owner_user_id=1, tenant_id=1, project_id=1,
     )
-    await db_session.commit()
+    # create_task already calls session.flush() — no commit needed; the
+    # db_session fixture rolls back at test end so other tests aren't polluted.
 
-    # Re-fetch with eager-load
     refreshed = (await db_session.execute(
         select(DownloadTask)
           .where(DownloadTask.id == task.id)
@@ -163,7 +160,7 @@ async def test_create_task_populates_subtasks_relationship(
     assert filenames == {"config.json", "model.safetensors"}
 ```
 
-Note: this test depends on the existing `_bootstrap` fixture in `tests/services/test_task_service.py` (or its module conftest) seeding `tenant_id=1`, `project_id=1`, `user_id=1`, `storage_id=1`. If the existing test file lacks such bootstrap, copy the bootstrap pattern from `tests/api/test_tasks.py` lines 15-36 into a module-scoped fixture.
+`select`, `DownloadTask`, `TaskCreate`, `create_task` are already imported at the top of the file. Add `from sqlalchemy.orm import selectinload` to the test body (or to the imports) only if not already present.
 
 - [ ] **Step 2: Run the test to confirm it fails**
 
