@@ -72,3 +72,38 @@ async def test_create_task_status_pending(db_session: AsyncSession, env) -> None
     task = await create_task(db_session, body, owner_user_id=1, tenant_id=1, project_id=1)
     assert task.status == "pending"
     assert task.is_simulation is False
+
+
+@pytest.mark.slow
+async def test_create_task_populates_subtasks_relationship(
+    db_session: AsyncSession, env
+) -> None:
+    """After create_task + flush, task.subtasks is populated via the new
+    DownloadTask.subtasks ORM relationship.
+
+    Locks the relationship contract so api/tasks.get_task can use
+    selectinload(DownloadTask.subtasks).
+    """
+    from sqlalchemy.orm import selectinload
+
+    body = TaskCreate(
+        repo_id="o/relationship-probe",
+        revision="a" * 40,
+        storage_id=1,
+    )
+    task = await create_task(
+        db_session, body,
+        owner_user_id=1, tenant_id=1, project_id=1,
+    )
+    # create_task already calls session.flush() — no commit needed; the
+    # db_session fixture rolls back at test end so other tests aren't polluted.
+
+    refreshed = (await db_session.execute(
+        select(DownloadTask)
+          .where(DownloadTask.id == task.id)
+          .options(selectinload(DownloadTask.subtasks))
+    )).scalar_one()
+
+    assert len(refreshed.subtasks) == 2
+    filenames = {s.filename for s in refreshed.subtasks}
+    assert filenames == {"config.json", "model.safetensors"}

@@ -21,7 +21,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from dlw.db.base import Base
 
@@ -54,6 +54,19 @@ class DownloadTask(Base):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # ORM relationship — Phase 1 Week 3 UI scaffold consumes via
+    # selectinload(DownloadTask.subtasks) in api/tasks.get_task.
+    # Cascade is intentionally narrow: the FK already has ondelete=CASCADE,
+    # so DB-level cleanup handles deletion. Adding ORM-level "delete-orphan"
+    # would risk scheduling orphan deletes if any code path triggers a lazy
+    # load of an empty in-memory subtasks collection on a flushed parent.
+    subtasks: Mapped[list["FileSubTask"]] = relationship(
+        "FileSubTask",
+        back_populates="task",
+        cascade="save-update, merge",
+        lazy="select",
+    )
 
 
 class FileSubTask(Base):
@@ -89,3 +102,9 @@ class FileSubTask(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    task: Mapped["DownloadTask"] = relationship(
+        "DownloadTask",
+        back_populates="subtasks",
+        lazy="select",
+    )
