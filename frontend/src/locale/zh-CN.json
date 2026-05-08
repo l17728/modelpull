@@ -1,0 +1,54 @@
+{
+  "app": {
+    "title": "modelpull",
+    "logout": "退出登录"
+  },
+  "login": {
+    "heading": "登录 modelpull",
+    "tokenLabel": "Bearer Token",
+    "tokenPlaceholder": "粘贴 DLW_BEARER_TOKEN 的值",
+    "submit": "登录",
+    "tokenRequired": "请输入 token"
+  },
+  "tasks": {
+    "listHeading": "任务列表",
+    "empty": "暂无任务，使用 curl POST /api/v1/tasks 创建一个",
+    "columns": {
+      "id": "ID",
+      "repo": "仓库",
+      "revision": "Revision",
+      "status": "状态",
+      "createdAt": "创建时间",
+      "actions": "操作"
+    },
+    "view": "查看",
+    "detailHeading": "任务详情",
+    "subtasksHeading": "子任务",
+    "polling": "实时刷新中…",
+    "completed": "已停止刷新（终态）",
+    "back": "返回列表",
+    "notFound": "任务不存在或已删除",
+    "subtaskColumns": {
+      "filename": "文件名",
+      "size": "大小",
+      "sha256": "SHA256",
+      "status": "状态"
+    }
+  },
+  "status": {
+    "pending": "排队中",
+    "queued": "排队中",
+    "scheduling": "调度中",
+    "downloading": "下载中",
+    "succeeded": "成功",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "assigned": "已分派",
+    "in_progress": "下载中"
+  },
+  "errors": {
+    "invalid_token": "Token 无效或已失效，请重新登录",
+    "service_unavailable": "服务暂不可用，正在重试…",
+    "network": "网络错误，请检查连接"
+  }
+}
