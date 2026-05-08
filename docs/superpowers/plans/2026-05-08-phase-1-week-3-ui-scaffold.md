@@ -1106,7 +1106,7 @@ describe('useAuthStore', () => {
 
 ```bash
 cd frontend
-pnpm test:unit -- --run tests/unit/auth.spec.ts
+pnpm test:unit tests/unit/auth.spec.ts
 ```
 
 Expected: FAIL with module-not-found for `@/stores/auth`.
@@ -1141,7 +1141,7 @@ export const useAuthStore = defineStore('auth', () => {
 - [ ] **Step 4: Run test to confirm it passes**
 
 ```bash
-pnpm test:unit -- --run tests/unit/auth.spec.ts
+pnpm test:unit tests/unit/auth.spec.ts
 ```
 
 Expected: PASS, 4 tests.
@@ -1324,7 +1324,7 @@ export default router
 - [ ] **Step 4: Run test to confirm it fails**
 
 ```bash
-pnpm test:unit -- --run tests/unit/client.spec.ts
+pnpm test:unit tests/unit/client.spec.ts
 ```
 
 Expected: FAIL — module-not-found for `@/api/client`.
@@ -1423,7 +1423,7 @@ client.interceptors.response.use(
 - [ ] **Step 7: Run test to confirm it passes**
 
 ```bash
-pnpm test:unit -- --run tests/unit/client.spec.ts
+pnpm test:unit tests/unit/client.spec.ts
 ```
 
 Expected: 2 tests PASS.
@@ -1445,7 +1445,7 @@ git commit -m "feat(frontend): axios client with auth + 401 logout interceptors"
 
 ```bash
 cd frontend
-pnpm typecheck && pnpm lint && pnpm test:unit -- --run && pnpm build
+pnpm typecheck && pnpm lint && pnpm test:unit && pnpm build
 ```
 
 Expected: all green; `dist/` produced.
@@ -1659,7 +1659,7 @@ describe('StatusBadge', () => {
 
 ```bash
 cd frontend
-pnpm test:unit -- --run tests/unit/StatusBadge.spec.ts
+pnpm test:unit tests/unit/StatusBadge.spec.ts
 ```
 
 Expected: FAIL — module-not-found for `@/components/StatusBadge.vue`.
@@ -1704,7 +1704,7 @@ const label = computed(() => {
 - [ ] **Step 4: Run test to confirm it passes**
 
 ```bash
-pnpm test:unit -- --run tests/unit/StatusBadge.spec.ts
+pnpm test:unit tests/unit/StatusBadge.spec.ts
 ```
 
 Expected: 8 cases PASS.
@@ -1818,7 +1818,7 @@ function formatDate(iso: string) {
 - [ ] **Step 7: Run typecheck + the full unit suite**
 
 ```bash
-pnpm typecheck && pnpm test:unit -- --run
+pnpm typecheck && pnpm test:unit
 ```
 
 Expected: 0 type errors; all unit tests pass.
@@ -1874,7 +1874,7 @@ git commit -m "feat(frontend): TaskList page + StatusBadge + 5s polling"
 
 ### Milestone 3 verification
 
-`pnpm typecheck && pnpm lint && pnpm test:unit -- --run && pnpm build` all green.
+`pnpm typecheck && pnpm lint && pnpm test:unit && pnpm build` all green.
 
 Manual: paste token → list of tasks visible, polled every 5s.
 
@@ -1944,7 +1944,7 @@ describe('computeRefetchInterval', () => {
 
 ```bash
 cd frontend
-pnpm test:unit -- --run tests/unit/useTaskDetail.spec.ts
+pnpm test:unit tests/unit/useTaskDetail.spec.ts
 ```
 
 Expected: FAIL — `@/composables/useTaskDetail` not found.
@@ -1991,7 +1991,7 @@ export function useTaskDetail(taskId: Ref<string>) {
 - [ ] **Step 4: Run test to confirm it passes**
 
 ```bash
-pnpm test:unit -- --run tests/unit/useTaskDetail.spec.ts
+pnpm test:unit tests/unit/useTaskDetail.spec.ts
 ```
 
 Expected: 3 tests PASS.
@@ -2270,7 +2270,7 @@ Insert these two jobs at the end of the `jobs:` block, before any aggregator job
         run: pnpm typecheck
 
       - name: Unit tests
-        run: pnpm test:unit -- --run
+        run: pnpm test:unit
 
   # ============================================================
   # Frontend: production build (smoke — fail CI if vite build fails)
@@ -2453,7 +2453,7 @@ Expected first run: all green. If anything fails, fix in a new commit on the sam
 
 - [ ] All 12 tasks committed on `feat/phase-1-week-3-ui-scaffold`
 - [ ] PR opened, all CI checks green (≥11 jobs)
-- [ ] `pnpm typecheck && pnpm lint && pnpm test:unit -- --run && pnpm build` all 0 errors locally
+- [ ] `pnpm typecheck && pnpm lint && pnpm test:unit && pnpm build` all 0 errors locally
 - [ ] Existing pytest suite still green (no backend regression from M1 schema split)
 - [ ] Manual smoke: paste token → see task list → click → see detail with subtasks + polling
 - [ ] README "Week 3 UI demo" block resolves to working commands
@@ -2477,6 +2477,7 @@ This plan was reviewed by 2 specialized agents (frontend-code-quality + architec
 | W4-H | important | `build` script `"vue-tsc --noEmit && vite build"` couples typecheck with build — CI's typecheck runs twice (once in lint job, once in build job) and Windows shell-chain edge cases | Split: `build` is just `vite build`; CI's `frontend-build` job runs `pnpm typecheck` + `pnpm build` as separate steps |
 | W4-I | minor | On 401 burst (multiple in-flight requests when token expires), interceptor pushes `/login` N times — vue-router dedupes destination but `logout()` still runs N times (idempotent but wasteful) | Added early-return guard: `if (!auth.isAuthenticated) return Promise.reject(error)` at top of 401 branch (skips after first handler) |
 | W4-J | minor | Task 12 README block uses triple-backtick outer fence with triple-backtick inner code fences → markdown rendering breaks (inner fence terminates outer block) | Outer fence in plan changed to four-backtick (` ```` `); README sample inside is well-formed three-backtick markdown |
+| W4-K | important | Caught during M2 milestone E2E execution: `pnpm test:unit -- --run` makes pnpm forward `--` literally to vitest, which then sees `["--", "--run"]` as positional path filters → vitest still runs tests but enters watch mode after, hanging CI runners and local terminals | Changed `package.json` `test:unit` script from `vitest` to `vitest run`; plan + CI now invoke `pnpm test:unit [path]` directly without `-- --run` |
 
 Bonus: removed `@playwright/test` from devDeps (originally in spec §2 stack list) since this plan ships no Playwright test files — Phase 2 plan reinstates it.
 
