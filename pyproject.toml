@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.6,<2.7",
     "structlog>=24.4,<24.5",
     "httpx>=0.27,<0.28",
+    "tenacity>=9.0,<10.0",
 ]
 
 [dependency-groups]
@@ -28,6 +29,9 @@ dev = [
     "ruff>=0.7,<0.8",
     "mypy>=1.13,<2.0",
 ]
+
+[project.scripts]
+dlw-executor = "dlw.executor.cli:main"
 
 [build-system]
 requires = ["hatchling"]
