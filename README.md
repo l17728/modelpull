@@ -137,10 +137,40 @@ done
 docker compose -f docker-compose.dev.yml exec executor ls -la /downloads
 ```
 
+### Week 3 UI demo: 浏览器看任务列表 + 实时进度
+
+A 3-page Vue 3 SPA driven by `pnpm dev` against the running controller. HTTP polling (5s on list, 1s on detail with terminal-state stop).
+
+````bash
+# Terminal 1 — controller
+docker compose -f docker-compose.dev.yml up -d postgres
+uv run alembic upgrade head
+uv run uvicorn dlw.main:app --port 8000
+
+# Terminal 2 — seed a task so the list isn't empty
+# (Replace ${DLW_BEARER_TOKEN} with the value you set in the controller's env)
+curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $DLW_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id":"deepseek-ai/DeepSeek-V3","revision":"abc123def4567890abc123def4567890abc12345","storage_id":1}'
+
+# Terminal 3 — frontend (Vite proxy forwards /api/* to :8000;
+# do NOT set VITE_API_BASE for dev — only for `pnpm preview`/production builds)
+cd frontend
+pnpm install
+pnpm dev    # http://localhost:5173
+````
+
+Open `http://localhost:5173/`, paste the value of `$DLW_BEARER_TOKEN`, see the
+seeded task in the list, click into it. The detail page polls every second
+until the task hits a terminal state. Pair with `dlw-executor` in another
+terminal to watch subtasks transition from `pending` → `assigned` → `succeeded`.
+
 完整开发计划：
 - Phase 1 Foundation：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
 - Phase 1 Week 2 Controller Core：[`docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md)
 - Phase 1 Week 3 Executor Process：[`docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md)
+- Phase 1 Week 3 UI Scaffold：[`docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md)
 
 ---
 
