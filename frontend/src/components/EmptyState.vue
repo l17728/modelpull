@@ -7,9 +7,18 @@ defineProps<{
 
 <template>
   <div class="empty-state">
-    <div class="icon">📭</div>
-    <div class="message">{{ message }}</div>
-    <div v-if="description" class="description">{{ description }}</div>
+    <div class="icon">
+      📭
+    </div>
+    <div class="message">
+      {{ message }}
+    </div>
+    <div
+      v-if="description"
+      class="description"
+    >
+      {{ description }}
+    </div>
     <div class="action">
       <slot />
     </div>

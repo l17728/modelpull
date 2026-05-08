@@ -18,7 +18,11 @@ function logout() {
   <el-container class="app-layout">
     <el-header class="app-header">
       <div class="brand">
-        <img src="/favicon.svg" alt="logo" class="logo" />
+        <img
+          src="/favicon.svg"
+          alt="logo"
+          class="logo"
+        >
         <span class="title">{{ t('app.title') }}</span>
       </div>
       <el-button
