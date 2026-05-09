@@ -66,9 +66,10 @@ filterwarnings = [
     # See: https://github.com/pytest-dev/pytest-asyncio/issues/706
     "ignore::DeprecationWarning:pytest_asyncio",
 ]
-addopts = "-v --tb=short --strict-markers"
+addopts = "-v --tb=short --strict-markers -m 'not manual'"
 markers = [
     "slow: marks tests requiring docker (testcontainers)",
+    "manual: marks tests not run in CI; require external services (real HF / minio binary)",
 ]
 
 [tool.coverage.run]
