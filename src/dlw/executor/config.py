@@ -32,6 +32,19 @@ class ExecutorSettings(BaseSettings):
     nic_speed_gbps: int = Field(default=1, ge=1, le=400)
     region: str = Field(default="local")
 
+    # Phase 1 W4 — HF Hub
+    hf_endpoint: str = Field(default="https://huggingface.co")
+    hf_token: str | None = Field(default=None)
+
+    # Phase 1 W4 — S3 / S3-compatible
+    s3_region: str = Field(default="us-east-1")
+    s3_endpoint_url: str | None = Field(default=None)
+    s3_path_style: bool = Field(default=True)
+
+    # Phase 1 W4 — pipeline tuning
+    multipart_part_size_bytes: int = Field(default=5 * 1024 * 1024, ge=5 * 1024 * 1024)
+    download_timeout_seconds: int = Field(default=300, ge=10, le=3600)
+
     @model_validator(mode="after")
     def _derive_host_id(self) -> "ExecutorSettings":
         """If host_id not set, derive from id by stripping any -worker-N suffix.
