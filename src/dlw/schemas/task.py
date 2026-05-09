@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from dlw.schemas.subtask import SubTaskRead
+
 
 class TaskCreate(BaseModel):
     """POST /api/v1/tasks request body."""
@@ -17,7 +19,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskRead(BaseModel):
-    """GET /api/v1/tasks/{id} response body (also items in list)."""
+    """Slim list-item shape — no subtasks (avoids N+1 across many tasks)."""
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -28,6 +30,11 @@ class TaskRead(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     error_message: str | None
+
+
+class TaskDetail(TaskRead):
+    """GET /api/v1/tasks/{id} response — adds subtasks list."""
+    subtasks: list[SubTaskRead] = []
 
 
 class TaskList(BaseModel):

@@ -120,3 +120,46 @@ async def test_post_task_validation_error_returns_422(client: AsyncClient, auth)
         "repo_id": "o/r", "revision": "0" * 40,
     }, headers=auth)
     assert r.status_code == 422
+
+
+@pytest.mark.slow
+async def test_get_task_by_id_includes_subtasks_array(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """GET /tasks/{id} returns subtasks: [...] (Phase 1 W3 UI scaffold contract)."""
+    create = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/with-subtasks",
+        "revision": "3" * 40,
+        "storage_id": 1,
+    }, headers=auth)
+    task_id = create.json()["id"]
+
+    r = await client.get(f"/api/v1/tasks/{task_id}", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert "subtasks" in body
+    assert isinstance(body["subtasks"], list)
+    assert len(body["subtasks"]) == 2
+    filenames = {s["filename"] for s in body["subtasks"]}
+    assert filenames == {"config.json", "model.safetensors"}
+    # Each subtask carries the SubTaskRead shape
+    for s in body["subtasks"]:
+        assert {"id", "task_id", "filename", "status"} <= set(s.keys())
+
+
+@pytest.mark.slow
+async def test_get_tasks_list_omits_subtasks_field(
+    client: AsyncClient, auth: dict[str, str]
+) -> None:
+    """List endpoint stays slim — TaskRead has no subtasks (avoids N+1)."""
+    await client.post("/api/v1/tasks", json={
+        "repo_id": "o/list-no-subtasks",
+        "revision": "4" * 40,
+        "storage_id": 1,
+    }, headers=auth)
+    r = await client.get("/api/v1/tasks", headers=auth)
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) > 0
+    for item in items:
+        assert "subtasks" not in item

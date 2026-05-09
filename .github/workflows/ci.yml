@@ -266,11 +266,76 @@ jobs:
           retention-days: 7
 
   # ============================================================
+  # Frontend: lint + typecheck + unit tests (Phase 1 W3 UI scaffold)
+  # ============================================================
+  frontend-lint:
+    name: Frontend lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+  # ============================================================
+  # Frontend: production build (smoke — fail CI if vite build fails)
+  # ============================================================
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+  # ============================================================
   # Aggregate gate
   # ============================================================
   ci:
     name: CI Status
-    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest]
+    needs: [openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest, frontend-lint, frontend-build]
     runs-on: ubuntu-latest
     if: always()
     steps:

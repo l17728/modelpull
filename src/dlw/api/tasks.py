@@ -2,6 +2,7 @@
 
 Week 2: tenant_id=1, project_id=1, owner_user_id=1 hardcoded. Multi-tenancy
 scoping via JWT claims comes in Phase 3.
+Week 3 UI scaffold: GET /{id} returns TaskDetail (with subtasks).
 """
 from __future__ import annotations
 
@@ -10,11 +11,12 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import selectinload
 
 from dlw.auth.bearer import require_bearer
 from dlw.db.models.task import DownloadTask
 from dlw.db.session import get_engine
-from dlw.schemas.task import TaskCreate, TaskList, TaskRead
+from dlw.schemas.task import TaskCreate, TaskDetail, TaskList, TaskRead
 from dlw.services.task_service import create_task
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -61,8 +63,12 @@ async def list_tasks(session: AsyncSession = Depends(_session)) -> TaskList:
 
 
 @router.get("/{task_id}", dependencies=[Depends(require_bearer)])
-async def get_task(task_id: uuid.UUID, session: AsyncSession = Depends(_session)) -> TaskRead:
-    task = await session.get(DownloadTask, task_id)
-    if task is None or task.tenant_id != _TENANT_ID:
+async def get_task(task_id: uuid.UUID, session: AsyncSession = Depends(_session)) -> TaskDetail:
+    row = (await session.execute(
+        select(DownloadTask)
+          .where(DownloadTask.id == task_id, DownloadTask.tenant_id == _TENANT_ID)
+          .options(selectinload(DownloadTask.subtasks))
+    )).scalar_one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="task not found")
-    return TaskRead.model_validate(task)
+    return TaskDetail.model_validate(row)
