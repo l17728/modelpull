@@ -18,6 +18,7 @@ class SubTaskRead(BaseModel):
     file_size: int | None
     expected_sha256: str | None
     status: str
+    s3_key: str | None = Field(default=None, max_length=1024)
 
 
 class SubTaskReport(BaseModel):
@@ -30,4 +31,5 @@ class SubTaskReport(BaseModel):
     )
     actual_sha256: str | None = Field(default=None, min_length=64, max_length=64)
     bytes_downloaded: int = Field(default=0, ge=0)
+    s3_key: str | None = Field(default=None, max_length=1024)
     error: str | None = Field(default=None, max_length=2048)

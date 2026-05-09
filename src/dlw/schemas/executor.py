@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from dlw.schemas.storage import StorageConfig
 from dlw.schemas.subtask import SubTaskRead
 
 
@@ -40,7 +41,15 @@ class ExecutorRead(BaseModel):
 
 
 class AssignmentResponse(BaseModel):
-    """POST /api/v1/executors/{id}/poll response — either subtask or empty."""
+    """POST /api/v1/executors/{id}/poll response — either subtask or empty.
+
+    Phase 1 W4: when assigned, includes repo_id + revision (executor needs to
+    construct HF URL) and storage_config (executor needs S3 bucket / endpoint).
+    """
     assigned: bool
     subtask: SubTaskRead | None = None
     assignment_token: uuid.UUID | None = None
+    # Phase 1 W4 additions (None when assigned=False):
+    repo_id: str | None = None
+    revision: str | None = None
+    storage_config: StorageConfig | None = None
