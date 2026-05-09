@@ -74,6 +74,112 @@ class HfS3StreamDownloader:
             config=boto_cfg,
         )
 
+    def _make_http_client(self) -> httpx.AsyncClient:
+        """Test seam — overridden in unit tests via monkeypatch."""
+        return httpx.AsyncClient(
+            timeout=self._s.download_timeout_seconds,
+            follow_redirects=True,
+        )
+
     async def download(self, *, assignment: Assignment) -> DownloadResult:
-        """Pipeline: see Task 10/11 for the full body."""
-        raise NotImplementedError("Task 10 wires the streaming body")
+        url = (f"{self._s.hf_endpoint.rstrip('/')}/{assignment.repo_id}"
+               f"/resolve/{assignment.revision}/{assignment.filename}")
+        s3 = self._make_s3_client(assignment.storage_config)
+        bucket = assignment.storage_config.bucket
+        key = self._compose_key(assignment)
+        part_size = self._s.multipart_part_size_bytes
+
+        headers: dict[str, str] = {}
+        if self._s.hf_token:
+            headers["Authorization"] = f"Bearer {self._s.hf_token}"
+
+        upload_id: str | None = None
+        sha = hashlib.sha256()
+        bytes_total = 0
+        parts: list[dict[str, Any]] = []
+        buf = bytearray()
+        part_no = 1
+
+        try:
+            async with self._make_http_client() as hc:
+                async with hc.stream("GET", url, headers=headers) as resp:
+                    resp.raise_for_status()
+
+                    upload_id = await asyncio.to_thread(
+                        lambda: s3.create_multipart_upload(
+                            Bucket=bucket, Key=key
+                        )["UploadId"]
+                    )
+
+                    async for chunk in resp.aiter_bytes(chunk_size=_HTTP_CHUNK_BYTES):
+                        sha.update(chunk)
+                        bytes_total += len(chunk)
+                        buf.extend(chunk)
+                        while len(buf) >= part_size:
+                            body = bytes(buf[:part_size])
+                            del buf[:part_size]
+                            etag = await asyncio.to_thread(
+                                self._upload_part,
+                                s3, bucket, key, upload_id, part_no, body,
+                            )
+                            parts.append({"PartNumber": part_no, "ETag": etag})
+                            part_no += 1
+
+                    # last (possibly < part_size; allowed for last only)
+                    if buf:
+                        etag = await asyncio.to_thread(
+                            self._upload_part,
+                            s3, bucket, key, upload_id, part_no, bytes(buf),
+                        )
+                        parts.append({"PartNumber": part_no, "ETag": etag})
+
+            # W5-D: 0-byte file → empty parts list would error S3 MalformedXML.
+            # Abort the (unused) multipart and use put_object instead.
+            if not parts:
+                if upload_id is not None:
+                    await asyncio.to_thread(lambda: s3.abort_multipart_upload(
+                        Bucket=bucket, Key=key, UploadId=upload_id,
+                    ))
+                await asyncio.to_thread(lambda: s3.put_object(
+                    Bucket=bucket, Key=key, Body=b"",
+                ))
+                return DownloadResult(
+                    bytes_written=bytes_total,
+                    actual_sha256=sha.hexdigest(),
+                    s3_key=key,
+                )
+
+            await asyncio.to_thread(
+                lambda: s3.complete_multipart_upload(
+                    Bucket=bucket, Key=key, UploadId=upload_id,
+                    MultipartUpload={"Parts": parts},
+                )
+            )
+            return DownloadResult(
+                bytes_written=bytes_total,
+                actual_sha256=sha.hexdigest(),
+                s3_key=key,
+            )
+        except BaseException:
+            if upload_id is not None:
+                try:
+                    await asyncio.to_thread(
+                        lambda: s3.abort_multipart_upload(
+                            Bucket=bucket, Key=key, UploadId=upload_id,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "multipart abort failed (will be GC'd later): %s", e
+                    )
+            raise
+
+    @staticmethod
+    def _upload_part(
+        s3: Any, bucket: str, key: str, upload_id: str,
+        part_no: int, body: bytes,
+    ) -> str:
+        return s3.upload_part(
+            Bucket=bucket, Key=key, UploadId=upload_id,
+            PartNumber=part_no, Body=body,
+        )["ETag"]
