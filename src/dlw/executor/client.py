@@ -91,6 +91,7 @@ class ControllerClient:
         actual_sha256: str | None,
         bytes_downloaded: int,
         error: str | None = None,
+        s3_key: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "status": status,
@@ -102,4 +103,6 @@ class ControllerClient:
             body["actual_sha256"] = actual_sha256
         if error is not None:
             body["error"] = error
+        if s3_key is not None:
+            body["s3_key"] = s3_key
         return await self._post(f"/api/v1/subtasks/{subtask_id}/report", body)

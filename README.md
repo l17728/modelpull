@@ -16,6 +16,7 @@
 ✅ 如果你是**架构师 / 分布式系统爱好者 / SRE / 想参与设计 review**，欢迎进。
 
 📚 **设计成果**（~28000 行 / 14 章 / OpenAPI / Helm + Prometheus + Grafana / 6 runbook）：
+
 - 入口：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
 - v2.0 GA 后才有代码 — 见 [ROADMAP](./ROADMAP.md)
 
@@ -166,11 +167,43 @@ seeded task in the list, click into it. The detail page polls every second
 until the task hits a terminal state. Pair with `dlw-executor` in another
 terminal to watch subtasks transition from `pending` → `assigned` → `succeeded`.
 
+### Week 4 demo: real HF Hub → MinIO
+
+End-to-end with real HuggingFace + local MinIO. Replaces Week 3's mock pipeline.
+
+````bash
+# Boot the full stack: PG + controller + executor + minio + bucket-init
+docker compose -f docker-compose.dev.yml up -d --build
+
+# Wait for ready
+until curl -s http://localhost:8000/health/ready | grep -q ok; do sleep 1; done
+
+# Create a download task pointing to a small public model (~90MB, multi-file)
+TOKEN_HEADER="Authorization: Bearer dev-token-change-me"
+TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
+  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
+  -d '{"repo_id":"sentence-transformers/all-MiniLM-L6-v2","revision":"main","storage_id":1}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "Task: $TASK_ID"
+
+# Watch executor pull from HF and upload to MinIO (~60-120s on a 100Mbps link)
+docker compose -f docker-compose.dev.yml logs -f executor
+
+# Check task status
+curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER" \
+  | python -c "import sys,json; t=json.load(sys.stdin); print(t['status']); print(len(t['subtasks']),'subtasks')"
+
+# Open MinIO console to see uploaded files
+echo "MinIO console: http://localhost:9001  (minioadmin / minioadmin)"
+````
+
 完整开发计划：
+
 - Phase 1 Foundation：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
 - Phase 1 Week 2 Controller Core：[`docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md)
 - Phase 1 Week 3 Executor Process：[`docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md)
 - Phase 1 Week 3 UI Scaffold：[`docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md)
+- Phase 1 Week 4 HF + S3：[`docs/superpowers/plans/2026-05-09-phase-1-week-4-hf-s3-multipart.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-4-hf-s3-multipart.md)
 
 ---
 
@@ -183,6 +216,7 @@ Qwen3-72B-Instruct (BF16)    144 GB / 30 文件
 ```
 
 单机从 HuggingFace 下载这些模型：
+
 - 国外环境：百兆带宽下需要 8-24 小时
 - 国内环境：HF 直连不可用，必须走镜像
 - 单机故障 / 中断：从头再来
@@ -248,21 +282,25 @@ flowchart LR
 ## 核心特性
 
 ### 🚀 多源调度（v2.0 头号特性）
+
 内置 6 个源驱动：HuggingFace · hf-mirror.com · ModelScope（魔搭）· WiseModel · OpenCSG · 自托管 S3 mirror。
 
 **一键多源加速**：
+
 1. 任务启动时**实时测速**所有候选源（5-15 秒）
 2. 用 LPT 启发式做**最优组合选择**（不一定全用，避免慢源拖累）
 3. 文件级路由 + 大文件 chunk 级并行
 4. 局部重平衡：源退化自动切换
 
 ### 🔒 分布式正确性
+
 - **Fence token + executor epoch**：防止双发 / 陈旧执行器写入
 - **三联校验崩溃恢复**：远端存在性 + ChecksumSHA256 + size，绝不假设"DB 标记 verified = 真的 verified"
 - **Multipart upload_id 持久化**：崩溃后能 abort 孤儿 multipart
 - **HF 是 SHA256 真值来源**：跨源下载完成后用 HF 的 sha 校验
 
 ### 🛡️ 安全 / 多租户 / 合规
+
 - mTLS + Executor JWT + 心跳 HMAC
 - HF Token reverse-proxy（永不下发到 executor）
 - S3 STS 临时凭证
@@ -271,6 +309,7 @@ flowchart LR
 - 审计日志链式哈希（tamper-evident）+ WORM 导出
 
 ### 📊 生产可运维
+
 - 4 个核心 SLI/SLO（API 可用性 99.9% / 任务完成率 99% / 吞吐 / E2E 时延）
 - 20+ Prometheus 告警（P0/P1/P2 三档分级 + hysteresis + inhibit_rules）
 - 6 份可执行 Runbook 脚本
@@ -278,6 +317,7 @@ flowchart LR
 - Chaos / GameDay 演练计划
 
 ### 🛠 平台集成
+
 - CLI（`dlw`）+ Python SDK（同步 + 异步）
 - HF cache 兼容（设 `HF_HOME` 透明走本系统）
 - Webhook（task.completed / failed）
@@ -286,6 +326,7 @@ flowchart LR
 - 增量 / 差分下载（仅下变化文件）
 
 ### 🤖 AI Copilot（v2.1）
+
 - 嵌入式聊天面板：`Ctrl+K` 打开，自然语言驱动 modelpull
 - 后端：Claude Code / OpenCode 无头模式，或 Anthropic SDK 直连
 - 工具协议：MCP server 暴露 `dlw_*` 工具 + `web_fetch` 受信源
@@ -293,6 +334,7 @@ flowchart LR
 - 示例 query：「下载 DeepSeek 最新发布的 V3」/「我哪些任务上周失败了？为什么？」/「对比 Qwen3-72B 和 Llama-3.1-70B」
 
 ### 📐 自适应下载运筹优化（v2.1）
+
 - 形式化为最优化问题：minimize makespan + α × switch_cost
 - 持续在线决策（30s 周期 + 事件触发）：改 source / 换 executor / 进一步切分大文件
 - **子分片**：慢的大文件再切成 sub-chunk，多 executor 并行下载，**通过 S3 multipart upload 协议拼装**（无需跨节点 FS 访问）
@@ -302,6 +344,7 @@ flowchart LR
 - 触发时机自适应：三级（hard / soft / 周期）+ 周期 [5s,120s] + 瓶颈聚焦 + 信息门控
 
 ### 🏢 企业内网部署支持（v2.1）
+
 - **反向控制通道**：Executor 在公司内网无入站 IP；启动后主动开 WSS 到外网 controller，corp proxy 穿透；controller 可近实时推命令（cancel / replan）
 - **限速维度探测**：自动识别 corp gateway 限速是按 connection / IP / user，driving 子分片策略选择
 - **本地凭证池**：每个 executor 配置文件管理多个 gateway 账号 / HF token / S3 AKSK；凭证不出本机（controller 仅知 alias）
@@ -450,10 +493,10 @@ CI 强制失败任何违反不变量的 PR。
 
 ---
 
-
 ## 现状声明
 
 ✅ **完成**：
+
 - 18000+ 行设计文档 + 部署物料
 - 完整 OpenAPI 3.1 spec（可生成 SDK）
 - 5 位虚拟 reviewer 的 70+ 条问题已修复（架构一致性 / 分布式正确性 / 安全 / 运维 / 盲区）
@@ -462,6 +505,7 @@ CI 强制失败任何违反不变量的 PR。
 - Helm chart + Prometheus 告警 + Grafana dashboard + 6 份 runbook 脚本
 
 🚧 **待开始**：
+
 - 后端代码实现（Python + FastAPI + SQLAlchemy）
 - 前端代码实现（Vue 3 + Pinia + Element Plus）
 - CLI / Python SDK 实现

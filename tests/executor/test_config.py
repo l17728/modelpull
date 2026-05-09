@@ -35,3 +35,33 @@ def test_host_id_defaults_to_id_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DLW_EXECUTOR_HOST_ID", raising=False)
     s = ExecutorSettings()
     assert s.host_id == "host-12.local"
+
+
+@pytest.mark.slow
+def test_w4_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 1 W4 fields have safe defaults (public HF + AWS S3)."""
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-w4-worker-1")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    s = ExecutorSettings()
+    assert s.hf_endpoint == "https://huggingface.co"
+    assert s.hf_token is None
+    assert s.s3_region == "us-east-1"
+    assert s.s3_endpoint_url is None
+    assert s.s3_path_style is True
+    assert s.multipart_part_size_bytes == 5 * 1024 * 1024
+    assert s.download_timeout_seconds == 300
+
+
+@pytest.mark.slow
+def test_w4_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-w4-worker-2")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    monkeypatch.setenv("DLW_EXECUTOR_HF_ENDPOINT", "https://hf-mirror.com")
+    monkeypatch.setenv("DLW_EXECUTOR_HF_TOKEN", "hf_xxx")
+    monkeypatch.setenv("DLW_EXECUTOR_S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("DLW_EXECUTOR_S3_REGION", "cn-east-1")
+    s = ExecutorSettings()
+    assert s.hf_endpoint == "https://hf-mirror.com"
+    assert s.hf_token == "hf_xxx"
+    assert s.s3_endpoint_url == "http://minio:9000"
+    assert s.s3_region == "cn-east-1"

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Single shared secret for Week 2 (multi-user OIDC PKCE in Phase 3)
     bearer_token: str = Field(default="dev-token-change-me")
 
+    # HF Hub metadata client (controller-side enumeration)
+    hf_endpoint: str = Field(default="https://huggingface.co")
+    hf_token: str | None = Field(default=None)
+
     log_level: str = Field(default="INFO")
 
     @property

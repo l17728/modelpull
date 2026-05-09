@@ -33,6 +33,8 @@ services:
       DLW_DB_PASSWORD: dlw_dev_password
       DLW_DB_NAME: dlw
       DLW_BEARER_TOKEN: dev-token-change-me
+      DLW_HF_ENDPOINT: ${DLW_HF_ENDPOINT:-https://huggingface.co}
+      DLW_HF_TOKEN: ${DLW_HF_TOKEN:-}
     ports:
       - "8000:8000"
     entrypoint: []
@@ -58,14 +60,52 @@ services:
     depends_on:
       controller:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+      init-bucket:
+        condition: service_completed_successfully
     environment:
       DLW_EXECUTOR_ID: docker-host-worker-1
       DLW_EXECUTOR_HOST_ID: docker-host
       DLW_EXECUTOR_CONTROLLER_URL: http://controller:8000
       DLW_EXECUTOR_BEARER_TOKEN: dev-token-change-me
       DLW_EXECUTOR_DOWNLOAD_DIR: /downloads
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      DLW_EXECUTOR_S3_ENDPOINT_URL: http://minio:9000
+      DLW_EXECUTOR_HF_ENDPOINT: ${DLW_EXECUTOR_HF_ENDPOINT:-https://huggingface.co}
+      DLW_EXECUTOR_HF_TOKEN: ${DLW_EXECUTOR_HF_TOKEN:-}
     volumes:
       - dlw-downloads:/downloads
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  init-bucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >-
+      /bin/sh -c "
+      set -e;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb -p local/modelpull-dev || true;
+      "
+    restart: "no"
 
 volumes:
   dlw-pg-data:

@@ -13,7 +13,7 @@ from dlw.db.models.executor import Executor
 from dlw.db.models.storage import StorageBackend
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.db.models.tenant import Project, Tenant, User
-from dlw.services.scheduler import claim_one_subtask
+from dlw.services.scheduler import claim_one_subtask, complete_subtask
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -155,3 +155,112 @@ async def test_third_claim_returns_none_when_all_assigned(
         sub3, _ = await claim_one_subtask(s, executor_id="exec-A")
         await s.commit()
     assert sub3 is None
+
+
+async def _make_pending_subtask_with_expected_sha(
+    session: AsyncSession, expected_sha: str | None,
+) -> uuid.UUID:
+    """Helper: create a tiny task with one subtask carrying expected_sha256."""
+    task = DownloadTask(
+        tenant_id=1, project_id=1, owner_user_id=1,
+        repo_id="o/r", revision="a" * 40, storage_id=1,
+        path_template="t/{tenant}", priority=1, status="pending",
+    )
+    session.add(task); await session.flush()
+    sub = FileSubTask(
+        task_id=task.id, tenant_id=1,
+        filename="config.json", file_size=4096,
+        expected_sha256=expected_sha, status="pending",
+    )
+    session.add(sub); await session.flush()
+    return sub.id
+
+
+@pytest.mark.slow
+async def test_complete_subtask_marks_failed_on_sha_mismatch(
+    db_session: AsyncSession, env,
+) -> None:
+    """W4: controller-side sha256 verification flips succeeded → failed on mismatch."""
+    sub_id = await _make_pending_subtask_with_expected_sha(db_session, "a" * 64)
+    # Pretend executor claimed it
+    sub = await db_session.get(FileSubTask, sub_id)
+    sub.status = "assigned"
+    sub.assignment_token = uuid.uuid4()
+    await db_session.flush()
+
+    sub_returned, parent = await complete_subtask(
+        db_session, sub_id,
+        final_status="succeeded",
+        actual_sha256="b" * 64,           # mismatch!
+        bytes_downloaded=4096,
+        error=None,
+        assignment_token=sub.assignment_token,
+    )
+    assert sub_returned.status == "failed"
+    assert sub_returned.last_error is not None
+    assert "sha256" in sub_returned.last_error.lower()
+
+
+@pytest.mark.slow
+async def test_complete_subtask_succeeds_when_sha_matches(
+    db_session: AsyncSession, env,
+) -> None:
+    sub_id = await _make_pending_subtask_with_expected_sha(db_session, "c" * 64)
+    sub = await db_session.get(FileSubTask, sub_id)
+    sub.status = "assigned"
+    sub.assignment_token = uuid.uuid4()
+    await db_session.flush()
+
+    sub_returned, _ = await complete_subtask(
+        db_session, sub_id,
+        final_status="succeeded",
+        actual_sha256="c" * 64,
+        bytes_downloaded=4096,
+        error=None,
+        assignment_token=sub.assignment_token,
+    )
+    assert sub_returned.status == "succeeded"
+
+
+@pytest.mark.slow
+async def test_complete_subtask_succeeds_when_expected_sha_is_null(
+    db_session: AsyncSession, env,
+) -> None:
+    """Non-LFS files have expected_sha256=None — verification skipped."""
+    sub_id = await _make_pending_subtask_with_expected_sha(db_session, None)
+    sub = await db_session.get(FileSubTask, sub_id)
+    sub.status = "assigned"
+    sub.assignment_token = uuid.uuid4()
+    await db_session.flush()
+
+    sub_returned, _ = await complete_subtask(
+        db_session, sub_id,
+        final_status="succeeded",
+        actual_sha256="d" * 64,           # would mismatch if expected was set
+        bytes_downloaded=4096,
+        error=None,
+        assignment_token=sub.assignment_token,
+    )
+    assert sub_returned.status == "succeeded"
+
+
+@pytest.mark.slow
+async def test_complete_subtask_persists_s3_key(
+    db_session: AsyncSession, env,
+) -> None:
+    sub_id = await _make_pending_subtask_with_expected_sha(db_session, None)
+    sub = await db_session.get(FileSubTask, sub_id)
+    sub.status = "assigned"
+    sub.assignment_token = uuid.uuid4()
+    await db_session.flush()
+
+    sub_returned, _ = await complete_subtask(
+        db_session, sub_id,
+        final_status="succeeded",
+        actual_sha256="e" * 64,
+        bytes_downloaded=1024,
+        error=None,
+        assignment_token=sub.assignment_token,
+        s3_key="phase1/o/r/abc123/config.json",
+    )
+    assert sub_returned.s3_key == "phase1/o/r/abc123/config.json"

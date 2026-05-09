@@ -112,3 +112,48 @@ async def test_unauthenticated_returns_401(client) -> None:
         "id": "x", "host_id": "y"
     })
     assert r.status_code == 401
+
+
+@pytest.mark.slow
+async def test_poll_returns_assignment_with_repo_and_storage_config(
+    client: AsyncClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W4: /poll response carries repo_id + revision + storage_config."""
+    from dlw.services.hf_metadata import RepoFile
+
+    async def fake_hf(*args, **kwargs):
+        return [RepoFile(path="config.json", size=4096, sha256=None)]
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake_hf)
+
+    # Drain any leftover pending subtasks from earlier tests so we can assert
+    # the exact repo_id returned by this test's task.
+    await client.post("/api/v1/executors/join", json={
+        "id": "host-x-drain", "host_id": "host-x",
+    }, headers=auth)
+    for _ in range(20):  # safety upper bound
+        dr = await client.post("/api/v1/executors/host-x-drain/poll", headers=auth)
+        if not dr.json().get("assigned"):
+            break
+
+    # Create a task → 1 subtask
+    r = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/storage-test",
+        "revision": "9" * 40,
+        "storage_id": 1,
+    }, headers=auth)
+    assert r.status_code == 201
+
+    # Join an executor
+    await client.post("/api/v1/executors/join", json={
+        "id": "host-x-worker-1", "host_id": "host-x",
+    }, headers=auth)
+
+    # Poll
+    pr = await client.post("/api/v1/executors/host-x-worker-1/poll", headers=auth)
+    assert pr.status_code == 200
+    body = pr.json()
+    assert body["assigned"] is True
+    assert body["repo_id"] == "o/storage-test"
+    assert body["revision"] == "9" * 40
+    assert "storage_config" in body
+    assert body["storage_config"]["bucket"]   # default falls back to storage.name

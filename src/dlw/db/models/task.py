@@ -95,6 +95,10 @@ class FileSubTask(Base):
     chunks_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     multipart_upload_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Phase 1 W4: object key in S3 / OSS (e.g., "phase1/owner/repo/rev/file.bin")
+    # Populated by complete_subtask when executor reports it. Used for debugging
+    # and Phase 2 multipart resume (joined with multipart_upload_id).
+    s3_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

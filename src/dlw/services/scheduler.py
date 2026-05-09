@@ -53,17 +53,16 @@ async def complete_subtask(
     bytes_downloaded: int,
     error: str | None,
     assignment_token: uuid.UUID | None = None,
+    s3_key: str | None = None,
 ) -> tuple[FileSubTask, DownloadTask]:
     """Mark subtask done, then check if parent task can transition.
 
-    Locking: parent task fetched with FOR UPDATE so two concurrent
-    completions racing on the LAST 2 subtasks cannot both observe
-    'all succeeded' and both write parent.status (W2-E).
-
-    Token verification: if assignment_token provided, must match the row's
-    stored token (cheap defence; W2-F).
-
-    Returns (subtask, parent_task). Caller commits.
+    Phase 1 W4 additions:
+      - sha256 verification: when final_status=='succeeded' and the row has
+        expected_sha256 set, mismatch flips final_status to 'failed' with a
+        descriptive error. Single source of truth for the verify gate.
+      - s3_key: optional kwarg; persisted to the row. Phase 1 uses it for
+        debugging; Phase 2 uses it for multipart resume keying.
     """
     sub = await session.get(FileSubTask, subtask_id)
     if sub is None:
@@ -73,14 +72,26 @@ async def complete_subtask(
     if assignment_token is not None and sub.assignment_token != assignment_token:
         raise ValueError(f"subtask {subtask_id} assignment_token mismatch")
 
+    # W4: sha256 verification gate
+    if (
+        final_status == "succeeded"
+        and sub.expected_sha256 is not None
+        and actual_sha256 != sub.expected_sha256
+    ):
+        final_status = "failed"
+        expected_short = sub.expected_sha256[:12]
+        actual_short = (actual_sha256 or "")[:12]
+        error = (f"sha256 mismatch: expected={expected_short}… "
+                 f"actual={actual_short}…")
+
     sub.status = final_status
     sub.actual_sha256 = actual_sha256
     sub.bytes_downloaded = bytes_downloaded
     sub.last_error = error
     sub.completed_at = datetime.now(UTC)
+    if s3_key is not None:
+        sub.s3_key = s3_key
 
-    # Lock parent before reading siblings — prevents two concurrent
-    # completions both flipping parent.status under the same observation
     parent = await session.get(
         DownloadTask, sub.task_id, with_for_update=True
     )
