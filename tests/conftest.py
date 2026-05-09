@@ -20,7 +20,12 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 
 def _pg_env() -> dict[str, str]:
@@ -108,6 +113,24 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     async with factory() as session:
         yield session
         await session.rollback()
+
+
+@pytest.fixture(autouse=True)
+def _patch_hf_global(monkeypatch: pytest.MonkeyPatch):
+    """Global default: HF returns 2 files so POST /tasks succeeds in all test modules.
+
+    Per-test overrides (e.g. to raise RepoNotFound) shadow this via a second
+    monkeypatch.setattr in the test body — monkeypatch stacks last-wins within
+    the same test.
+    """
+    from dlw.services.hf_metadata import RepoFile
+
+    async def fake(*args, **kwargs):
+        return [
+            RepoFile(path="config.json", size=4096, sha256=None),
+            RepoFile(path="model.safetensors", size=64 * 1024, sha256="a" * 64),
+        ]
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

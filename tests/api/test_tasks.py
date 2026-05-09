@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from dlw.config import get_settings
 from dlw.db.base import Base
 
-
 _TOKEN = "test-bearer-token-12345"
 
 
@@ -42,6 +41,19 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _patch_hf(monkeypatch: pytest.MonkeyPatch):
+    """Default: HF returns 2 files. Tests can override per-case."""
+    from dlw.services.hf_metadata import RepoFile
+
+    async def fake(*args, **kwargs):
+        return [
+            RepoFile(path="config.json", size=4096, sha256=None),
+            RepoFile(path="model.safetensors", size=64 * 1024, sha256="a" * 64),
+        ]
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
 
 
 @pytest.fixture
@@ -163,3 +175,67 @@ async def test_get_tasks_list_omits_subtasks_field(
     assert len(items) > 0
     for item in items:
         assert "subtasks" not in item
+
+
+@pytest.mark.slow
+async def test_post_task_404_when_hf_repo_missing(
+    client: AsyncClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dlw.services.hf_metadata import RepoNotFound
+
+    async def fake(*args, **kwargs):
+        raise RepoNotFound("not found")
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+
+    r = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/missing", "revision": "a" * 40, "storage_id": 1,
+    }, headers=auth)
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"].lower()
+
+
+@pytest.mark.slow
+async def test_post_task_422_when_repo_private(
+    client: AsyncClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dlw.services.hf_metadata import HfPrivateOrAuthRequired
+
+    async def fake(*args, **kwargs):
+        raise HfPrivateOrAuthRequired("private")
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+
+    r = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/private", "revision": "a" * 40, "storage_id": 1,
+    }, headers=auth)
+    assert r.status_code == 422
+    assert "private" in r.json()["detail"].lower() or "auth" in r.json()["detail"].lower()
+
+
+@pytest.mark.slow
+async def test_post_task_503_when_hf_unreachable(
+    client: AsyncClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dlw.services.hf_metadata import HfNetworkError
+
+    async def fake(*args, **kwargs):
+        raise HfNetworkError("dns")
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+
+    r = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/x", "revision": "a" * 40, "storage_id": 1,
+    }, headers=auth)
+    assert r.status_code == 503
+
+
+@pytest.mark.slow
+async def test_post_task_422_when_repo_empty(
+    client: AsyncClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake(*args, **kwargs):
+        return []
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+
+    r = await client.post("/api/v1/tasks", json={
+        "repo_id": "o/empty", "revision": "a" * 40, "storage_id": 1,
+    }, headers=auth)
+    assert r.status_code == 422

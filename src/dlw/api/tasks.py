@@ -1,8 +1,12 @@
 """Tasks API: POST / GET list / GET by id.
 
-Week 2: tenant_id=1, project_id=1, owner_user_id=1 hardcoded. Multi-tenancy
-scoping via JWT claims comes in Phase 3.
-Week 3 UI scaffold: GET /{id} returns TaskDetail (with subtasks).
+Phase 1 W4: POST /tasks now calls HF Hub via task_service to enumerate the
+repo's files at the given revision. Errors translated to user-visible HTTP
+status codes:
+  - HF 404 (repo or revision missing)        -> 404
+  - HF 401/403 (private or auth required)    -> 422 (Phase 1 only supports public)
+  - HF 5xx / network                          -> 503
+  - Empty repo                                -> 422
 """
 from __future__ import annotations
 
@@ -14,10 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from dlw.auth.bearer import require_bearer
+from dlw.config import get_settings
 from dlw.db.models.task import DownloadTask
 from dlw.db.session import get_engine
 from dlw.schemas.task import TaskCreate, TaskDetail, TaskList, TaskRead
-from dlw.services.task_service import create_task
+from dlw.services.hf_metadata import (
+    HfNetworkError,
+    HfPrivateOrAuthRequired,
+    RepoNotFound,
+)
+from dlw.services.task_service import EmptyRepo, create_task
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -27,12 +37,6 @@ _OWNER_USER_ID = 1
 
 
 async def _session():
-    """Per-request session backed by Phase 1's lru_cached singleton engine.
-
-    Do NOT call engine.dispose() here — would race with concurrent requests
-    sharing the same pool (same root cause as Phase 1 P1-A health.py fix).
-    Lifespan disposes the engine once at app shutdown.
-    """
     engine = get_engine()
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
@@ -41,10 +45,24 @@ async def _session():
 
 @router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_bearer)])
 async def post_task(body: TaskCreate, session: AsyncSession = Depends(_session)) -> TaskRead:
-    task = await create_task(
-        session, body,
-        owner_user_id=_OWNER_USER_ID, tenant_id=_TENANT_ID, project_id=_PROJECT_ID,
-    )
+    settings = get_settings()
+    try:
+        task = await create_task(
+            session, body,
+            owner_user_id=_OWNER_USER_ID, tenant_id=_TENANT_ID, project_id=_PROJECT_ID,
+            hf_endpoint=settings.hf_endpoint, hf_token=settings.hf_token,
+        )
+    except RepoNotFound as e:
+        raise HTTPException(status_code=404, detail=f"repo or revision not found: {e}") from e
+    except HfPrivateOrAuthRequired as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"repo is private or requires auth — Phase 1 supports public repos only: {e}",
+        ) from e
+    except HfNetworkError as e:
+        raise HTTPException(status_code=503, detail=f"huggingface unreachable: {e}") from e
+    except EmptyRepo as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     await session.commit()
     return TaskRead.model_validate(task)
 
