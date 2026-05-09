@@ -128,7 +128,7 @@ def _patch_hf_global(monkeypatch: pytest.MonkeyPatch):
     async def fake(*args, **kwargs):
         return [
             RepoFile(path="config.json", size=4096, sha256=None),
-            RepoFile(path="model.safetensors", size=64 * 1024, sha256="a" * 64),
+            RepoFile(path="model.safetensors", size=64 * 1024, sha256=None),
         ]
     monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
 

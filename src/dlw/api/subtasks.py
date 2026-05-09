@@ -28,6 +28,7 @@ async def post_report(
             bytes_downloaded=body.bytes_downloaded,
             error=body.error,
             assignment_token=body.assignment_token,
+            s3_key=body.s3_key,
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
