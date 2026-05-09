@@ -1,40 +1,52 @@
-"""E2E: real controller in-process + real ExecutorRunner — full happy path.
+"""E2E: real controller + real ExecutorRunner — full HF→S3 happy path.
 
-W3-C/D: monkeypatches _MOCK_FILES to small sizes so the test actually finishes
-in seconds. A 1GB random-bytes generation would block the event loop for many
-seconds even with asyncio.to_thread (the thread is just doing CPU work).
-
-W3-E: shares one httpx.ASGITransport(app=app) instance between the controller's
-test AsyncClient and the executor's ControllerClient — no private attribute
-access needed.
+W4 rewrite: replaces MockDownloader with HfS3StreamDownloader; HF served by
+httpx MockTransport (returns deterministic bytes per filename); S3 served by
+moto[s3] in-process. No Docker required.
 """
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import hashlib
+import json
+import os
+import uuid
 
+import boto3
 import httpx
 import pytest
+from moto import mock_aws
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.config import get_settings
 from dlw.db.base import Base
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
-from dlw.executor.downloader import MockDownloader
+from dlw.executor.downloader import HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
+from dlw.schemas.storage import StorageConfig
+from dlw.services.hf_metadata import RepoFile
 
 
-_TOKEN = "e2e-executor-token"
+_TOKEN = "e2e-w4-token"
+_BUCKET = "e2e-bucket"
 
 
 @pytest.fixture(scope="module", autouse=True)
 async def _bootstrap(engine):
-    """Seed default tenant/project/user/storage. engine is session-scoped (conftest)."""
+    """Tenant + project + user + storage row with proper JSON config."""
     from dlw.db.models.storage import StorageBackend
     from dlw.db.models.tenant import Project, Tenant, User
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    storage_config = json.dumps({
+        "bucket": _BUCKET,
+        "region": "us-east-1",
+        "endpoint_url": None,        # moto via env
+        "key_prefix": "phase1/",
+    }).encode("utf-8")
+
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
         s.add(Tenant(id=1, slug="d", display_name="D"))
@@ -42,8 +54,10 @@ async def _bootstrap(engine):
         s.add(Project(id=1, tenant_id=1, name="d"))
         s.add(User(id=1, tenant_id=1, oidc_subject="d",
                    email="d@l", role="tenant_admin"))
-        s.add(StorageBackend(id=1, tenant_id=1, name="d",
-                              backend_type="s3", config_encrypted=b""))
+        s.add(StorageBackend(
+            id=1, tenant_id=1, name="d", backend_type="s3",
+            config_encrypted=storage_config, region="us-east-1",
+        ))
         await s.commit()
     yield
     async with engine.begin() as conn:
@@ -53,74 +67,107 @@ async def _bootstrap(engine):
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
-@pytest.mark.skip(reason="W4 T13 rewrites this for moto + MockTransport (drops _MOCK_FILES dep)")
 @pytest.mark.slow
-async def test_executor_completes_real_task(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_e2e_hf_to_s3_full_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end with real controller + real executor (no mocks)."""
-    # W3-D: shrink mock files so 1GB safetensors doesn't burn 30+ seconds of CPU
-    import dlw.services.task_service as ts
-    monkeypatch.setattr(ts, "_MOCK_FILES", [
-        ("config.json", 4096, None),
-        ("model.safetensors", 64 * 1024, None),
-    ])
+    """End-to-end with mocked HF + moto S3, no MockDownloader."""
+    # Mock HF metadata (controller side)
+    file_a_bytes = b"a" * 4096
+    file_b_bytes = b"b" * (64 * 1024)
+    sha_a = hashlib.sha256(file_a_bytes).hexdigest()
+    sha_b = hashlib.sha256(file_b_bytes).hexdigest()
 
-    from dlw.main import create_app
-    app = create_app()
+    async def fake_list_repo_tree(*args, **kwargs):
+        # Note: sha is the LFS sha — config.json is non-LFS in real life,
+        # but for the test we set it so we can also exercise the verify path.
+        return [
+            RepoFile(path="config.json", size=len(file_a_bytes), sha256=sha_a),
+            RepoFile(path="model.safetensors", size=len(file_b_bytes), sha256=sha_b),
+        ]
+    monkeypatch.setattr(
+        "dlw.services.task_service.list_repo_tree", fake_list_repo_tree,
+    )
 
-    # W3-E: single shared ASGITransport, no private attribute access
-    asgi_transport = httpx.ASGITransport(app=app)
+    # Mock HF download (executor side)
+    def hf_handler(request: httpx.Request) -> httpx.Response:
+        # URL shape: {endpoint}/{repo}/resolve/{revision}/{filename}
+        path = request.url.path
+        if path.endswith("/config.json"):
+            return httpx.Response(200, content=file_a_bytes)
+        if path.endswith("/model.safetensors"):
+            return httpx.Response(200, content=file_b_bytes)
+        return httpx.Response(404, content=b"unexpected url")
+    hf_transport = httpx.MockTransport(hf_handler)
 
-    async with httpx.AsyncClient(
-        transport=asgi_transport, base_url="http://test"
-    ) as ctrl_client:
-        auth = {"Authorization": f"Bearer {_TOKEN}"}
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=_BUCKET)
 
-        r = await ctrl_client.post("/api/v1/tasks", json={
-            "repo_id": "o/e2e",
-            "revision": "0" * 40,
-            "storage_id": 1,
-        }, headers=auth)
-        assert r.status_code == 201
-        task_id = r.json()["id"]
+        from dlw.main import create_app
+        app = create_app()
+        asgi_transport = httpx.ASGITransport(app=app)
 
-        executor_client = ControllerClient(
-            base_url="http://test",
-            bearer_token=_TOKEN,
-            _transport=asgi_transport,
-        )
+        async with httpx.AsyncClient(
+            transport=asgi_transport, base_url="http://test"
+        ) as ctrl_client:
+            auth = {"Authorization": f"Bearer {_TOKEN}"}
 
-        settings = ExecutorSettings(
-            id="e2e-host-w1",
-            host_id="e2e-host",
-            controller_url="http://test",
-            bearer_token=_TOKEN,
-            heartbeat_interval_seconds=1,
-            poll_interval_seconds=1,
-            download_dir=str(tmp_path),
-        )
-        downloader = MockDownloader(download_dir=tmp_path)
-        runner = ExecutorRunner(
-            settings=settings, client=executor_client, downloader=downloader
-        )
+            r = await ctrl_client.post("/api/v1/tasks", json={
+                "repo_id": "o/e2e-w4",
+                "revision": "0" * 40,
+                "storage_id": 1,
+            }, headers=auth)
+            assert r.status_code == 201, r.text
+            task_id = r.json()["id"]
 
-        async with executor_client:
-            run_task = asyncio.create_task(runner.run())
-            await asyncio.sleep(4)
-            runner.request_shutdown()
-            await asyncio.wait_for(run_task, timeout=5)
+            executor_client = ControllerClient(
+                base_url="http://test",
+                bearer_token=_TOKEN,
+                _transport=asgi_transport,
+            )
+            settings = ExecutorSettings(
+                id="e2e-w4-host-worker-1",
+                host_id="e2e-w4-host",
+                controller_url="http://test",
+                bearer_token=_TOKEN,
+                heartbeat_interval_seconds=1,
+                poll_interval_seconds=1,
+            )
+            downloader = HfS3StreamDownloader(settings=settings)
+            # Inject the HF transport into the downloader's http client factory
+            downloader._make_http_client = lambda: httpx.AsyncClient(
+                transport=hf_transport,
+                timeout=settings.download_timeout_seconds,
+                follow_redirects=True,
+            )
 
-        r = await ctrl_client.get(f"/api/v1/tasks/{task_id}", headers=auth)
-        assert r.json()["status"] == "succeeded", r.json()
-        assert r.json()["completed_at"] is not None
+            runner = ExecutorRunner(
+                settings=settings, client=executor_client, downloader=downloader,
+            )
 
-        files = list(tmp_path.rglob("*"))
-        file_names = {p.name for p in files if p.is_file()}
-        assert "config.json" in file_names
-        assert "model.safetensors" in file_names
+            async with executor_client:
+                run_task = asyncio.create_task(runner.run())
+                # Allow time: 2 polls + 2 downloads
+                await asyncio.sleep(5)
+                runner.request_shutdown()
+                await asyncio.wait_for(run_task, timeout=10)
+
+            r = await ctrl_client.get(f"/api/v1/tasks/{task_id}", headers=auth)
+            body = r.json()
+            assert body["status"] == "succeeded", body
+            assert body["completed_at"] is not None
+
+            # Verify both files in S3
+            keys = [o["Key"] for o in
+                    s3.list_objects_v2(Bucket=_BUCKET).get("Contents", [])]
+            assert any(k.endswith("/config.json") for k in keys)
+            assert any(k.endswith("/model.safetensors") for k in keys)

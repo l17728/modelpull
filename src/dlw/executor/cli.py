@@ -9,11 +9,10 @@ import asyncio
 import logging
 import signal
 import sys
-from pathlib import Path
 
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
-from dlw.executor.downloader import MockDownloader
+from dlw.executor.downloader import HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
 
 
@@ -39,7 +38,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     client = ControllerClient(
         base_url=settings.controller_url, bearer_token=settings.bearer_token,
     )
-    downloader = MockDownloader(download_dir=Path(settings.download_dir))
+    downloader = HfS3StreamDownloader(settings=settings)
     runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
 
     loop = asyncio.get_running_loop()
