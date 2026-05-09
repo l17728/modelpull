@@ -1,60 +1,57 @@
-"""Tests for MockDownloader."""
-from __future__ import annotations
+"""Tests for HfS3StreamDownloader — skeleton + helpers (W4 Task 9).
 
-import hashlib
-from pathlib import Path
+Pipeline tests (HF→S3 stream) come in W4 Task 10/11.
+"""
+from __future__ import annotations
 
 import pytest
 
-from dlw.executor.downloader import DownloadResult, MockDownloader
+from dlw.executor.config import ExecutorSettings
+from dlw.executor.downloader import (
+    Assignment,
+    DownloadResult,
+    HfS3StreamDownloader,
+    StorageConfig,
+)
 
 
-@pytest.fixture
-def tmp_dir(tmp_path: Path) -> Path:
-    return tmp_path
-
-
-@pytest.mark.slow
-async def test_download_writes_file_of_correct_size(tmp_dir: Path) -> None:
-    d = MockDownloader(download_dir=tmp_dir)
-    result = await d.download(
-        task_id="task-1", filename="model.safetensors", file_size=8192,
+def _settings() -> ExecutorSettings:
+    return ExecutorSettings(
+        id="host-test-worker-1",
+        bearer_token="t",
     )
-    assert isinstance(result, DownloadResult)
-    assert result.bytes_written == 8192
-    file_path = tmp_dir / "task-1" / "model.safetensors"
-    assert file_path.exists()
-    assert file_path.stat().st_size == 8192
 
 
-@pytest.mark.slow
-async def test_download_returns_correct_sha256(tmp_dir: Path) -> None:
-    d = MockDownloader(download_dir=tmp_dir, seed=42)
-    result = await d.download(
-        task_id="task-2", filename="config.json", file_size=4096,
+def _assignment(*, repo_id="o/r", revision="a" * 40, filename="config.json",
+                key_prefix="phase1/", bucket="b") -> Assignment:
+    import uuid as _uuid
+    return Assignment(
+        subtask_id=_uuid.uuid4(),
+        task_id=_uuid.uuid4(),
+        repo_id=repo_id, revision=revision, filename=filename,
+        file_size=4096, expected_sha256=None,
+        storage_config=StorageConfig(bucket=bucket, key_prefix=key_prefix),
     )
-    file_path = tmp_dir / "task-2" / "config.json"
-    expected = hashlib.sha256(file_path.read_bytes()).hexdigest()
-    assert result.actual_sha256 == expected
-    assert len(result.actual_sha256) == 64
 
 
-@pytest.mark.slow
-async def test_download_zero_bytes_succeeds(tmp_dir: Path) -> None:
-    """file_size=0 (e.g., empty config) shouldn't crash."""
-    d = MockDownloader(download_dir=tmp_dir)
-    result = await d.download(
-        task_id="task-3", filename="empty.json", file_size=0,
-    )
-    assert result.bytes_written == 0
-    assert result.actual_sha256 == hashlib.sha256(b"").hexdigest()
+def test_compose_key_includes_prefix_repo_revision_filename() -> None:
+    d = HfS3StreamDownloader(settings=_settings())
+    a = _assignment(filename="model.safetensors", key_prefix="phase1/")
+    key = d._compose_key(a)
+    assert key == "phase1/o/r/" + ("a" * 40) + "/model.safetensors"
 
 
-@pytest.mark.slow
-async def test_download_creates_subdirs(tmp_dir: Path) -> None:
-    """Filenames with subpaths (e.g., 'subdir/model.bin') should auto-mkdir."""
-    d = MockDownloader(download_dir=tmp_dir)
-    await d.download(
-        task_id="task-4", filename="weights/layer1.bin", file_size=128,
-    )
-    assert (tmp_dir / "task-4" / "weights" / "layer1.bin").exists()
+def test_compose_key_handles_empty_prefix() -> None:
+    d = HfS3StreamDownloader(settings=_settings())
+    a = _assignment(key_prefix="")
+    key = d._compose_key(a)
+    assert key.startswith("o/r/")
+
+
+def test_compose_key_strips_prefix_trailing_slash() -> None:
+    d = HfS3StreamDownloader(settings=_settings())
+    a = _assignment(key_prefix="phase1////")
+    key = d._compose_key(a)
+    # No double slashes, single separator
+    assert "//" not in key
+    assert key.startswith("phase1/o/r/")
