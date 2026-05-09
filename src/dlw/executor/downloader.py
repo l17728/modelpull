@@ -21,6 +21,9 @@ from typing import Any
 import boto3
 import httpx
 from botocore.config import Config
+from tenacity import (
+    retry, retry_if_exception, stop_after_attempt, wait_exponential,
+)
 
 from dlw.executor.config import ExecutorSettings
 from dlw.schemas.storage import StorageConfig
@@ -28,6 +31,28 @@ from dlw.schemas.storage import StorageConfig
 logger = logging.getLogger(__name__)
 
 _HTTP_CHUNK_BYTES = 64 * 1024
+
+
+def _is_transient_http(exc: BaseException) -> bool:
+    """5xx HTTP + network/timeout/protocol = transient (retry-worthy).
+
+    4xx errors (404 / 401 / 403) are NOT transient — config / repo issues
+    won't fix themselves, so fail fast. ProtocolError/RemoteProtocolError
+    covers mid-stream HF drops (W5-C).
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 500 <= exc.response.status_code < 600
+    return isinstance(exc, (
+        httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError,
+    ))
+
+
+_TRANSIENT_RETRY = retry(
+    retry=retry_if_exception(_is_transient_http),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1.0, max=8.0),
+    reraise=True,
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +107,13 @@ class HfS3StreamDownloader:
         )
 
     async def download(self, *, assignment: Assignment) -> DownloadResult:
+        """Public entry — retries transient errors (5xx, network, timeout) × 3."""
+        @_TRANSIENT_RETRY
+        async def _retry_wrapper() -> DownloadResult:
+            return await self._download_once(assignment=assignment)
+        return await _retry_wrapper()
+
+    async def _download_once(self, *, assignment: Assignment) -> DownloadResult:
         url = (f"{self._s.hf_endpoint.rstrip('/')}/{assignment.repo_id}"
                f"/resolve/{assignment.revision}/{assignment.filename}")
         s3 = self._make_s3_client(assignment.storage_config)

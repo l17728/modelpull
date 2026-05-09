@@ -166,3 +166,138 @@ async def test_downloader_exact_5mb_yields_one_part(
     result = await d.download(assignment=a)
     assert result.bytes_written == len(body)
     assert result.actual_sha256 == expected_sha
+
+
+@pytest.mark.slow
+async def test_downloader_404_fails_fast_no_multipart(
+    s3_bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF 404 raises before create_multipart_upload — no orphaned MPU.
+
+    W5-E: use 4xx (not 5xx) so tenacity retry doesn't add 3s wait per CI run.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"not found")
+    transport = httpx.MockTransport(handler)
+
+    settings = ExecutorSettings(id="host-w4-worker-x", bearer_token="t")
+    d = HfS3StreamDownloader(settings=settings)
+    monkeypatch.setattr(d, "_make_http_client",
+        lambda: httpx.AsyncClient(transport=transport,
+                                   timeout=settings.download_timeout_seconds,
+                                   follow_redirects=True))
+    a = _assignment(filename="x.bin", bucket=s3_bucket)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await d.download(assignment=a)
+
+    s3 = _boto3.client("s3", region_name="us-east-1")
+    listing = s3.list_objects_v2(Bucket=s3_bucket)
+    assert listing.get("KeyCount", 0) == 0
+    mpu = s3.list_multipart_uploads(Bucket=s3_bucket)
+    assert "Uploads" not in mpu or len(mpu["Uploads"]) == 0
+
+
+@pytest.mark.slow
+async def test_downloader_aborts_multipart_on_mid_stream_drop(
+    s3_bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5-B: real abort path — first chunk arrives, then stream raises.
+
+    By the time the protocol error fires, create_multipart_upload has run
+    and at least one upload_part may be in flight. The abort_multipart_upload
+    in the BaseException handler must reclaim the in-progress upload.
+    """
+    # Stream that yields one 5MB chunk then raises — forces parts list non-empty
+    # before the protocol error so the abort path is genuinely exercised.
+    chunk_a = b"a" * (5 * 1024 * 1024)
+
+    async def streaming_body():
+        yield chunk_a
+        raise httpx.RemoteProtocolError("connection dropped mid-stream")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=streaming_body())
+
+    transport = httpx.MockTransport(handler)
+    settings = ExecutorSettings(id="host-w4-worker-mid", bearer_token="t")
+    d = HfS3StreamDownloader(settings=settings)
+    monkeypatch.setattr(d, "_make_http_client",
+        lambda: httpx.AsyncClient(transport=transport,
+                                   timeout=settings.download_timeout_seconds,
+                                   follow_redirects=True))
+    a = _assignment(filename="dropped.bin", bucket=s3_bucket)
+
+    # ProtocolError is transient → tenacity retries × 3 → all fail → reraise.
+    # Each attempt creates + aborts its own multipart upload.
+    with pytest.raises(httpx.RemoteProtocolError):
+        await d.download(assignment=a)
+
+    s3 = _boto3.client("s3", region_name="us-east-1")
+    # No completed object
+    assert s3.list_objects_v2(Bucket=s3_bucket).get("KeyCount", 0) == 0
+    # No in-progress multipart upload — abort fired on every attempt
+    mpu = s3.list_multipart_uploads(Bucket=s3_bucket)
+    assert "Uploads" not in mpu or len(mpu["Uploads"]) == 0
+
+
+@pytest.mark.slow
+async def test_downloader_handles_zero_byte_file(
+    s3_bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W5-D: 0-byte HF body should NOT call complete_multipart with empty parts.
+
+    Empty parts list to S3 returns MalformedXML. The downloader detects no
+    parts produced and falls back to put_object with empty body, then aborts
+    the unused multipart upload.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"")
+    transport = httpx.MockTransport(handler)
+
+    settings = ExecutorSettings(id="host-w4-worker-zero", bearer_token="t")
+    d = HfS3StreamDownloader(settings=settings)
+    monkeypatch.setattr(d, "_make_http_client",
+        lambda: httpx.AsyncClient(transport=transport,
+                                   timeout=settings.download_timeout_seconds,
+                                   follow_redirects=True))
+    a = _assignment(filename="empty.bin", bucket=s3_bucket)
+
+    result = await d.download(assignment=a)
+    assert result.bytes_written == 0
+    assert result.actual_sha256 == hashlib.sha256(b"").hexdigest()
+
+    # Object exists with 0 bytes
+    s3 = _boto3.client("s3", region_name="us-east-1")
+    obj = s3.get_object(Bucket=s3_bucket, Key=result.s3_key)
+    assert obj["Body"].read() == b""
+    # No leftover multipart upload
+    mpu = s3.list_multipart_uploads(Bucket=s3_bucket)
+    assert "Uploads" not in mpu or len(mpu["Uploads"]) == 0
+
+
+@pytest.mark.slow
+async def test_downloader_retries_transient_5xx(
+    s3_bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """503 then 200 → should retry and succeed on second attempt."""
+    call_count = 0
+    body = b"z" * 1024     # tiny body so we don't slow the test
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(503, content=b"slow")
+        return httpx.Response(200, content=body)
+
+    settings = ExecutorSettings(id="host-w4-worker-r", bearer_token="t")
+    d = HfS3StreamDownloader(settings=settings)
+    monkeypatch.setattr(d, "_make_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                   timeout=settings.download_timeout_seconds,
+                                   follow_redirects=True))
+    a = _assignment(filename="retry.bin", bucket=s3_bucket)
+
+    result = await d.download(assignment=a)
+    assert result.bytes_written == len(body)
+    assert call_count == 2
