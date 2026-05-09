@@ -18,7 +18,7 @@ import uuid
 
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
-from dlw.executor.downloader import MockDownloader
+from dlw.executor.downloader import HfS3StreamDownloader
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class ExecutorRunner:
         *,
         settings: ExecutorSettings,
         client: ControllerClient,
-        downloader: MockDownloader,
+        downloader: HfS3StreamDownloader,
     ) -> None:
         self._s = settings
         self._client = client
@@ -80,8 +80,11 @@ class ExecutorRunner:
                 resp = await self._client.poll(executor_id=self._s.id)
                 if resp.get("assigned"):
                     await self._execute_subtask(
-                        resp["subtask"],
-                        uuid.UUID(resp["assignment_token"]),
+                        subtask=resp["subtask"],
+                        assignment_token=uuid.UUID(resp["assignment_token"]),
+                        repo_id=resp["repo_id"],
+                        revision=resp["revision"],
+                        storage_config=resp["storage_config"],
                     )
                     continue  # immediately poll again — there may be more work
             except Exception as e:
@@ -95,21 +98,32 @@ class ExecutorRunner:
                 pass
 
     async def _execute_subtask(
-        self, subtask: dict, assignment_token: uuid.UUID
+        self, *, subtask: dict, assignment_token: uuid.UUID,
+        repo_id: str, revision: str, storage_config: dict,
     ) -> None:
+        from dlw.executor.downloader import Assignment
+        from dlw.schemas.storage import StorageConfig
+
         sub_id = uuid.UUID(subtask["id"])
         try:
-            result = await self._downloader.download(
-                task_id=str(subtask["task_id"]),
+            assignment = Assignment(
+                subtask_id=sub_id,
+                task_id=uuid.UUID(subtask["task_id"]),
+                repo_id=repo_id,
+                revision=revision,
                 filename=subtask["filename"],
-                file_size=subtask.get("file_size") or 0,
+                file_size=subtask.get("file_size"),
+                expected_sha256=subtask.get("expected_sha256"),
+                storage_config=StorageConfig(**storage_config),
             )
+            result = await self._downloader.download(assignment=assignment)
             await self._client.report(
                 subtask_id=sub_id,
                 status="succeeded",
                 assignment_token=assignment_token,
                 actual_sha256=result.actual_sha256,
                 bytes_downloaded=result.bytes_written,
+                s3_key=result.s3_key,
             )
         except Exception as e:
             logger.exception("subtask %s failed", sub_id)

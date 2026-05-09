@@ -10,7 +10,7 @@ import pytest
 
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
-from dlw.executor.downloader import DownloadResult, MockDownloader
+from dlw.executor.downloader import DownloadResult, HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
 
 
@@ -31,7 +31,7 @@ async def test_runner_join_then_heartbeat_in_idle(settings) -> None:
     client.join = AsyncMock(return_value={"id": "host-test-w1", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
-    downloader = MagicMock(spec=MockDownloader)
+    downloader = MagicMock(spec=HfS3StreamDownloader)
 
     runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
     task = asyncio.create_task(runner.run())
@@ -67,6 +67,12 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
                 "status": "assigned",
             },
             "assignment_token": str(token),
+            "repo_id": "o/test-repo",
+            "revision": "a" * 40,
+            "storage_config": {
+                "bucket": "test-bucket", "region": "us-east-1",
+                "endpoint_url": None, "key_prefix": "prefix/",
+            },
         },
         {"assigned": False, "subtask": None, "assignment_token": None},
     ]
@@ -74,9 +80,9 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
 
     download_result = DownloadResult(
         bytes_written=1024, actual_sha256="a" * 64,
-        file_path=Path(settings.download_dir) / "task-1" / "config.json",
+        s3_key="prefix/o/test-repo/" + "a" * 40 + "/config.json",
     )
-    downloader = MagicMock(spec=MockDownloader)
+    downloader = MagicMock(spec=HfS3StreamDownloader)
     downloader.download = AsyncMock(return_value=download_result)
 
     client.report = AsyncMock(return_value={"subtask_status": "succeeded", "task_status": "pending"})
@@ -107,12 +113,18 @@ async def test_runner_reports_failure_on_download_error(settings) -> None:
     client.poll = AsyncMock(side_effect=[
         {
             "assigned": True,
-            "subtask": {"id": str(sub_id), "task_id": "x", "filename": "f", "file_size": 100, "expected_sha256": None, "status": "assigned"},
+            "subtask": {"id": str(sub_id), "task_id": str(uuid.uuid4()), "filename": "f", "file_size": 100, "expected_sha256": None, "status": "assigned"},
             "assignment_token": str(token),
+            "repo_id": "o/fail-repo",
+            "revision": "b" * 40,
+            "storage_config": {
+                "bucket": "fail-bucket", "region": "us-east-1",
+                "endpoint_url": None, "key_prefix": "fp/",
+            },
         },
         {"assigned": False, "subtask": None, "assignment_token": None},
     ])
-    downloader = MagicMock(spec=MockDownloader)
+    downloader = MagicMock(spec=HfS3StreamDownloader)
     downloader.download = AsyncMock(side_effect=OSError("disk full"))
     client.report = AsyncMock(return_value={"subtask_status": "failed", "task_status": "failed"})
 
@@ -135,10 +147,76 @@ async def test_runner_graceful_shutdown(settings) -> None:
     client.join = AsyncMock(return_value={"id": "x", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
-    downloader = MagicMock(spec=MockDownloader)
+    downloader = MagicMock(spec=HfS3StreamDownloader)
 
     runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(0.3)
     runner.request_shutdown()
     await asyncio.wait_for(task, timeout=3)
+
+
+@pytest.mark.slow
+async def test_runner_passes_assignment_with_repo_and_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W4: runner forwards repo_id/revision/storage_config from /poll to downloader."""
+    from dlw.executor.downloader import Assignment, DownloadResult
+    from dlw.schemas.storage import StorageConfig
+
+    captured: dict[str, object] = {}
+
+    class FakeDownloader:
+        async def download(self, *, assignment: Assignment) -> DownloadResult:
+            captured["assignment"] = assignment
+            prefix = assignment.storage_config.key_prefix.strip("/")
+            return DownloadResult(
+                bytes_written=42,
+                actual_sha256="a" * 64,
+                s3_key=f"{prefix}/{assignment.repo_id}/{assignment.revision}/{assignment.filename}",
+            )
+
+    class FakeClient:
+        async def join(self, **kw): pass
+        async def heartbeat(self, **kw): pass
+        joined_polls = 0
+        async def poll(self, **kw):
+            FakeClient.joined_polls += 1
+            if FakeClient.joined_polls > 1:
+                return {"assigned": False}
+            import uuid as u
+            return {
+                "assigned": True,
+                "subtask": {
+                    "id": str(u.uuid4()), "task_id": str(u.uuid4()),
+                    "filename": "config.json", "file_size": 4096,
+                    "expected_sha256": None, "status": "assigned",
+                },
+                "assignment_token": str(u.uuid4()),
+                "repo_id": "o/runner-test", "revision": "z" * 40,
+                "storage_config": {
+                    "bucket": "b", "region": "us-east-1",
+                    "endpoint_url": None, "key_prefix": "p/",
+                },
+            }
+        async def report(self, **kw): captured["report_kw"] = kw
+
+    settings = ExecutorSettings(
+        id="host-r-worker-1", bearer_token="t",
+        heartbeat_interval_seconds=1, poll_interval_seconds=1,
+    )
+    runner = ExecutorRunner(
+        settings=settings, client=FakeClient(), downloader=FakeDownloader(),
+    )
+    run_task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2)
+    runner.request_shutdown()
+    await asyncio.wait_for(run_task, timeout=5)
+
+    a = captured["assignment"]
+    assert a.repo_id == "o/runner-test"
+    assert a.revision == "z" * 40
+    assert a.storage_config.bucket == "b"
+    assert a.storage_config.key_prefix == "p/"
+    assert captured["report_kw"]["status"] == "succeeded"
+    assert captured["report_kw"]["s3_key"].startswith("p/o/runner-test/")
