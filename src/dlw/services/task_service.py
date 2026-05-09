@@ -1,7 +1,9 @@
-"""Task service: creation + sub-task generation.
+"""Task service: creation + HF-driven sub-task generation.
 
-In Week 2 we mock sub-task generation as 2 placeholder files. Real HuggingFace
-Hub resolution comes in Week 4 plan.
+Phase 1 W4: enumerate real files via huggingface_hub. Public repos default;
+private repos require DLW_HF_TOKEN env on the controller.
+
+Caller is responsible for transaction boundary (commit/rollback).
 """
 from __future__ import annotations
 
@@ -9,12 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.schemas.task import TaskCreate
+from dlw.services.hf_metadata import list_repo_tree
 
-# Week 2 mock: every task gets exactly these 2 subtasks
-_MOCK_FILES: list[tuple[str, int | None, str | None]] = [
-    ("config.json", 4096, None),
-    ("model.safetensors", 1_073_741_824, None),
-]
+
+class EmptyRepo(Exception):
+    """HF returned zero downloadable files (after metadata filter)."""
 
 
 async def create_task(
@@ -24,11 +25,22 @@ async def create_task(
     owner_user_id: int,
     tenant_id: int,
     project_id: int,
+    hf_endpoint: str,
+    hf_token: str | None,
 ) -> DownloadTask:
-    """Persist a download task plus its mock subtasks atomically.
+    """Persist a download task plus one FileSubTask per HF repo file.
 
-    Caller is responsible for transaction boundary (commit/rollback).
+    Raises:
+      RepoNotFound | HfPrivateOrAuthRequired | HfNetworkError — from list_repo_tree
+      EmptyRepo — repo has no downloadable files at this revision
     """
+    files = await list_repo_tree(
+        body.repo_id, body.revision,
+        hf_endpoint=hf_endpoint, hf_token=hf_token,
+    )
+    if not files:
+        raise EmptyRepo(f"{body.repo_id}@{body.revision} has no files")
+
     task = DownloadTask(
         tenant_id=tenant_id,
         project_id=project_id,
@@ -43,13 +55,13 @@ async def create_task(
     session.add(task)
     await session.flush()
 
-    for filename, size, sha in _MOCK_FILES:
+    for f in files:
         session.add(FileSubTask(
             task_id=task.id,
             tenant_id=tenant_id,
-            filename=filename,
-            file_size=size,
-            expected_sha256=sha,
+            filename=f.path,
+            file_size=f.size,
+            expected_sha256=f.sha256,
             status="pending",
         ))
     await session.flush()

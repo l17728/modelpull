@@ -1,4 +1,4 @@
-"""Tests for dlw.services.task_service.create_task."""
+"""Tests for dlw.services.task_service.create_task (Phase 1 W4: real HF)."""
 from __future__ import annotations
 
 import pytest
@@ -10,7 +10,13 @@ from dlw.db.models.storage import StorageBackend
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.db.models.tenant import Project, Tenant, User
 from dlw.schemas.task import TaskCreate
-from dlw.services.task_service import create_task
+from dlw.services.hf_metadata import (
+    HfNetworkError,
+    HfPrivateOrAuthRequired,
+    RepoFile,
+    RepoNotFound,
+)
+from dlw.services.task_service import EmptyRepo, create_task
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -24,13 +30,9 @@ async def _create_tables(engine):
 
 @pytest.fixture
 async def env(db_session: AsyncSession):
-    """Tenant + project + user + storage fixtures (tenant_id=1 hardcoded for Week 2).
-
-    Uses flush() not commit() so per-test rollback (db_session fixture) cleans up.
-    """
+    """Tenant + project + user + storage fixtures (tenant_id=1 hardcoded for Phase 1)."""
     tenant = Tenant(id=1, slug="default", display_name="Default")
-    db_session.add(tenant)
-    await db_session.flush()
+    db_session.add(tenant); await db_session.flush()
     project = Project(id=1, tenant_id=1, name="default")
     db_session.add(project)
     user = User(
@@ -39,71 +41,131 @@ async def env(db_session: AsyncSession):
     )
     db_session.add(user)
     sb = StorageBackend(
-        id=1, tenant_id=1, name="default", backend_type="s3", config_encrypted=b""
+        id=1, tenant_id=1, name="default", backend_type="s3", config_encrypted=b"",
     )
     db_session.add(sb)
     await db_session.flush()
 
 
-@pytest.mark.slow
-async def test_create_task_persists_2_subtasks(db_session: AsyncSession, env) -> None:
-    body = TaskCreate(
-        repo_id="deepseek-ai/DeepSeek-V3",
-        revision="0123456789abcdef" * 2 + "01234567",
-        storage_id=1,
-    )
-    task = await create_task(db_session, body, owner_user_id=1, tenant_id=1, project_id=1)
-    assert task.id is not None
-    assert task.status == "pending"
-
-    subs = (await db_session.execute(
-        select(FileSubTask).where(FileSubTask.task_id == task.id)
-    )).scalars().all()
-    assert len(subs) == 2
-    filenames = sorted(s.filename for s in subs)
-    assert filenames == ["config.json", "model.safetensors"]
-    assert all(s.status == "pending" for s in subs)
-    assert all(s.tenant_id == 1 for s in subs)
+@pytest.fixture
+def patch_hf(monkeypatch: pytest.MonkeyPatch):
+    """Helper to monkeypatch list_repo_tree with a list of RepoFile."""
+    def _patch(files: list[RepoFile] | Exception):
+        async def fake(*args, **kwargs):
+            if isinstance(files, Exception):
+                raise files
+            return list(files)
+        monkeypatch.setattr(
+            "dlw.services.task_service.list_repo_tree", fake
+        )
+    return _patch
 
 
 @pytest.mark.slow
-async def test_create_task_status_pending(db_session: AsyncSession, env) -> None:
-    body = TaskCreate(repo_id="o/r", revision="0" * 40, storage_id=1)
-    task = await create_task(db_session, body, owner_user_id=1, tenant_id=1, project_id=1)
-    assert task.status == "pending"
-    assert task.is_simulation is False
-
-
-@pytest.mark.slow
-async def test_create_task_populates_subtasks_relationship(
-    db_session: AsyncSession, env
+async def test_create_task_persists_subtasks_from_hf_response(
+    db_session: AsyncSession, env, patch_hf,
 ) -> None:
-    """After create_task + flush, task.subtasks is populated via the new
-    DownloadTask.subtasks ORM relationship.
-
-    Locks the relationship contract so api/tasks.get_task can use
-    selectinload(DownloadTask.subtasks).
-    """
-    from sqlalchemy.orm import selectinload
-
+    patch_hf([
+        RepoFile(path="config.json", size=4096, sha256=None),
+        RepoFile(path="model.safetensors", size=1_000_000_000, sha256="a" * 64),
+        RepoFile(path="tokenizer.json", size=2_000_000, sha256="b" * 64),
+    ])
     body = TaskCreate(
-        repo_id="o/relationship-probe",
-        revision="a" * 40,
+        repo_id="o/test",
+        revision="0123456789abcdef" * 2 + "01234567",
         storage_id=1,
     )
     task = await create_task(
         db_session, body,
         owner_user_id=1, tenant_id=1, project_id=1,
+        hf_endpoint="https://huggingface.co", hf_token=None,
     )
-    # create_task already calls session.flush() — no commit needed; the
-    # db_session fixture rolls back at test end so other tests aren't polluted.
+    assert task.status == "pending"
 
+    subs = (await db_session.execute(
+        select(FileSubTask).where(FileSubTask.task_id == task.id)
+    )).scalars().all()
+    assert len(subs) == 3
+    by_name = {s.filename: s for s in subs}
+    assert by_name["config.json"].file_size == 4096
+    assert by_name["config.json"].expected_sha256 is None
+    assert by_name["model.safetensors"].file_size == 1_000_000_000
+    assert by_name["model.safetensors"].expected_sha256 == "a" * 64
+    assert all(s.status == "pending" for s in subs)
+    assert all(s.tenant_id == 1 for s in subs)
+
+
+@pytest.mark.slow
+async def test_create_task_relationship_populated(
+    db_session: AsyncSession, env, patch_hf,
+) -> None:
+    """Existing W3 UI scaffold contract: DownloadTask.subtasks relationship."""
+    from sqlalchemy.orm import selectinload
+
+    patch_hf([
+        RepoFile(path="a.bin", size=100, sha256=None),
+        RepoFile(path="b.bin", size=200, sha256=None),
+    ])
+    body = TaskCreate(repo_id="o/r", revision="a" * 40, storage_id=1)
+    task = await create_task(
+        db_session, body, owner_user_id=1, tenant_id=1, project_id=1,
+        hf_endpoint="https://huggingface.co", hf_token=None,
+    )
     refreshed = (await db_session.execute(
         select(DownloadTask)
           .where(DownloadTask.id == task.id)
           .options(selectinload(DownloadTask.subtasks))
     )).scalar_one()
+    assert {s.filename for s in refreshed.subtasks} == {"a.bin", "b.bin"}
 
-    assert len(refreshed.subtasks) == 2
-    filenames = {s.filename for s in refreshed.subtasks}
-    assert filenames == {"config.json", "model.safetensors"}
+
+@pytest.mark.slow
+async def test_create_task_raises_EmptyRepo_when_hf_returns_zero_files(
+    db_session: AsyncSession, env, patch_hf,
+) -> None:
+    patch_hf([])
+    body = TaskCreate(repo_id="o/empty", revision="a" * 40, storage_id=1)
+    with pytest.raises(EmptyRepo):
+        await create_task(
+            db_session, body, owner_user_id=1, tenant_id=1, project_id=1,
+            hf_endpoint="https://huggingface.co", hf_token=None,
+        )
+
+
+@pytest.mark.slow
+async def test_create_task_propagates_RepoNotFound(
+    db_session: AsyncSession, env, patch_hf,
+) -> None:
+    patch_hf(RepoNotFound("repo o/missing not found"))
+    body = TaskCreate(repo_id="o/missing", revision="a" * 40, storage_id=1)
+    with pytest.raises(RepoNotFound):
+        await create_task(
+            db_session, body, owner_user_id=1, tenant_id=1, project_id=1,
+            hf_endpoint="https://huggingface.co", hf_token=None,
+        )
+
+
+@pytest.mark.slow
+async def test_create_task_propagates_HfPrivateOrAuthRequired(
+    db_session: AsyncSession, env, patch_hf,
+) -> None:
+    patch_hf(HfPrivateOrAuthRequired("private"))
+    body = TaskCreate(repo_id="o/private", revision="a" * 40, storage_id=1)
+    with pytest.raises(HfPrivateOrAuthRequired):
+        await create_task(
+            db_session, body, owner_user_id=1, tenant_id=1, project_id=1,
+            hf_endpoint="https://huggingface.co", hf_token=None,
+        )
+
+
+@pytest.mark.slow
+async def test_create_task_propagates_HfNetworkError(
+    db_session: AsyncSession, env, patch_hf,
+) -> None:
+    patch_hf(HfNetworkError("dns"))
+    body = TaskCreate(repo_id="o/x", revision="a" * 40, storage_id=1)
+    with pytest.raises(HfNetworkError):
+        await create_task(
+            db_session, body, owner_user_id=1, tenant_id=1, project_id=1,
+            hf_endpoint="https://huggingface.co", hf_token=None,
+        )
