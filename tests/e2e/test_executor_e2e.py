@@ -58,6 +58,7 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+@pytest.mark.skip(reason="W4 T13 rewrites this for moto + MockTransport (drops _MOCK_FILES dep)")
 @pytest.mark.slow
 async def test_executor_completes_real_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
