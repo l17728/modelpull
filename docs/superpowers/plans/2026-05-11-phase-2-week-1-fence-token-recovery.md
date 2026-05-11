@@ -151,6 +151,14 @@ Open the generated file in `src/dlw/alembic/versions/`. The `upgrade()` body sho
 def upgrade() -> None:
     op.add_column('executors',
         sa.Column('epoch', sa.BigInteger(), nullable=False, server_default='0'))
+    # W6-H: guard against future seed/fixtures that omit epoch and silently get 0
+    # then pass a "0" header that matches. Default-0 is fine for PRE-MIGRATION
+    # rows (first /join bumps them to 1); the check just blocks negative values.
+    op.create_check_constraint(
+        "ck_executors_epoch_nonnegative",
+        "executors",
+        "epoch >= 0",
+    )
     op.add_column('file_subtasks',
         sa.Column('multipart_started_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('file_subtasks',
@@ -163,12 +171,21 @@ def downgrade() -> None:
     op.drop_column('file_subtasks', 'last_heartbeat_seen_at')
     op.drop_column('file_subtasks', 'assigned_at')
     op.drop_column('file_subtasks', 'multipart_started_at')
+    op.drop_constraint("ck_executors_epoch_nonnegative", "executors", type_="check")
     op.drop_column('executors', 'epoch')
 ```
 
 If autogenerate added spurious `alter_column` or `drop_index` entries (W5-G: ORM drift like `storage_backends.is_default` defaults), DELETE those lines. Migration upgrade/downgrade must contain ONLY the 4 column additions/removals listed above.
 
 `server_default='0'` is required for `executors.epoch` because the column is NOT NULL and existing rows (if any) need a value. The model's `default=0` is a Python-side default; the migration uses SQL-side default.
+
+**W6-K**: After autogenerate, **verify** the `down_revision` line at the top of the new file points to W4's head:
+
+```python
+down_revision: Union[str, None] = '5a729be99dc0'    # must equal this
+```
+
+If autogenerate produced a different value, the implementer ran against a non-head DB. Abort and re-run `alembic upgrade head` first.
 
 - [ ] **Step 4: Round-trip verify (W5-G discipline)**
 
@@ -423,18 +440,24 @@ _TOKEN = "test-bearer-token-12345"
 
 @pytest.fixture(scope="module", autouse=True)
 async def _bootstrap(engine):
+    """W6-I: do NOT drop_all at module end — multiple modules share this engine.
+    Just create_all (idempotent) + seed a probe executor; rely on per-test
+    rollback for cleanup of OTHER state.
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
-        s.add(Executor(
+        # Use ON CONFLICT DO NOTHING so re-running the module is safe
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        stmt = pg_insert(Executor).values(
             id="probe-host-worker-1", host_id="probe-host",
             cert_fingerprint="x", status="healthy", epoch=3,
-        ))
+        ).on_conflict_do_nothing()
+        await s.execute(stmt)
         await s.commit()
     yield
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+    # No drop_all — leave tables for other test modules.
 
 
 @pytest.fixture(autouse=True)
@@ -469,9 +492,11 @@ async def client(app):
 
 
 @pytest.mark.slow
-async def test_require_epoch_missing_header_returns_422(client: AsyncClient) -> None:
+async def test_require_epoch_missing_header_returns_401(client: AsyncClient) -> None:
+    # W6-D: dep accepts Optional + raises 401 with custom detail (not FastAPI auto-422)
     r = await client.get("/probe/probe-host-worker-1")
-    assert r.status_code == 422  # FastAPI auto-422 for missing required header
+    assert r.status_code == 401
+    assert "missing X-Executor-Epoch" in r.json()["detail"]
 
 
 @pytest.mark.slow
@@ -550,10 +575,16 @@ from dlw.db.models.executor import Executor
 
 async def require_executor_epoch(
     executor_id: str = Path(..., description="Executor id from URL path"),
-    x_executor_epoch: int = Header(..., alias="X-Executor-Epoch"),
+    # W6-D: accept Optional so dep body can raise 401 (not FastAPI auto-422) on missing
+    x_executor_epoch: int | None = Header(default=None, alias="X-Executor-Epoch"),
     session: AsyncSession = Depends(_session),
 ) -> Executor:
     """Return the Executor row if header matches stored epoch; else 401/404."""
+    if x_executor_epoch is None:
+        raise HTTPException(
+            status_code=401,
+            detail="missing X-Executor-Epoch header",
+        )
     ex = await session.get(Executor, executor_id)
     if ex is None:
         raise HTTPException(status_code=404, detail="executor not found")
@@ -1051,7 +1082,8 @@ async def complete_subtask(
     s3_key: str | None = None,
 ) -> tuple[FileSubTask, DownloadTask]:
     """..."""
-    sub = await session.get(FileSubTask, subtask_id)
+    # W6-B: FOR UPDATE prevents race with concurrent reclaim+reassign
+    sub = await session.get(FileSubTask, subtask_id, with_for_update=True)
     if sub is None:
         raise LookupError(f"subtask {subtask_id} not found")
     if sub.status != "assigned":
@@ -1341,6 +1373,9 @@ async def reclaim_subtasks(
             executor_epoch=None,
             assignment_token=None,
             assigned_at=None,
+            # W6-F: spec §2.4 — every reclaim is a retry; track count for
+            # eventual graduation to 'failed' (P2-W2 will enforce a max_retries).
+            retry_count=FileSubTask.__table__.c.retry_count + 1,
         )
     )
     return result.rowcount or 0
@@ -1418,11 +1453,11 @@ _BUCKET = "recovery-bucket"
 
 @pytest.fixture(scope="module", autouse=True)
 async def _create_tables(engine):
+    """W6-I: create_all is idempotent; do NOT drop_all (shared engine across modules)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+    # No drop_all — engine is session-scoped and other modules need the tables.
 
 
 @pytest.fixture
@@ -1545,6 +1580,7 @@ from typing import Any, Literal
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError       # W6-A: boto3 raises this, not s3.exceptions.ClientError
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1624,7 +1660,7 @@ async def verify_remote_state(
         head = await asyncio.to_thread(
             lambda: s3.head_object(Bucket=storage_cfg.bucket, Key=key)
         )
-    except s3.exceptions.ClientError as e:
+    except ClientError as e:        # W6-A: botocore.exceptions.ClientError (NOT s3.exceptions.ClientError)
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound"):
             return "missing"
@@ -1659,6 +1695,8 @@ git commit -m "feat(recovery): verify_remote_state head+size three-way (P2-W1)"
 **Files:**
 - Modify: `src/dlw/services/recovery.py` — add `run_recovery_routine`
 - Modify: `tests/services/test_recovery.py` — 3 more tests
+
+**W6-G note**: Step 1 of `run_recovery_routine` filters `WHERE status='assigned' AND multipart_upload_id IS NOT NULL`. In Phase 1 W4 production this filter returns **ZERO rows** because `HfS3StreamDownloader` never persists `multipart_upload_id` to the DB — it's only held transiently in memory and either committed via `complete_multipart_upload` or aborted within the same executor run. The Step 1 three-way verification path is **infrastructure for P2-W2** (which will add multipart resume + persist `multipart_upload_id`). Phase 1 keeps it dormant. Tests in this task seed a synthetic state (`multipart_upload_id="some-mpu-id"`) to validate the logic ahead of P2-W2 wiring it up.
 
 - [ ] **Step 1: Append 3 tests**
 
@@ -1790,6 +1828,28 @@ def _reset_subtask_to_pending(sub: FileSubTask) -> None:
     sub.multipart_upload_id = None
 
 
+async def _maybe_transition_parent(session: AsyncSession, task_id) -> None:
+    """W6-C: After a recovery flip of subtask.status, check parent task.
+
+    Mirrors the tail of complete_subtask: if all siblings succeeded, mark
+    parent succeeded; if any failed, mark parent failed. Locking the parent
+    FOR UPDATE prevents two recovery iterations from racing on the same task.
+    """
+    parent = await session.get(DownloadTask, task_id, with_for_update=True)
+    if parent is None:
+        return
+    siblings = (await session.execute(
+        select(FileSubTask).where(FileSubTask.task_id == task_id)
+    )).scalars().all()
+    statuses = {s.status for s in siblings}
+    if "failed" in statuses:
+        parent.status = "failed"
+        parent.completed_at = datetime.now(UTC)
+    elif statuses == {"succeeded"}:
+        parent.status = "succeeded"
+        parent.completed_at = datetime.now(UTC)
+
+
 async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
     """One-shot startup recovery. Must complete before serving traffic.
 
@@ -1837,6 +1897,9 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
         if result == "verified":
             sub.status = "succeeded"
             sub.completed_at = datetime.now(UTC)
+            # W6-C: trigger parent-task transition (otherwise recovery-completed
+            # subtasks leave the parent stuck pending/downloading forever).
+            await _maybe_transition_parent(session, sub.task_id)
             stats.verified_recovered += 1
         elif result == "missing":
             if sub.multipart_upload_id:
@@ -1894,7 +1957,8 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
         sub.multipart_upload_id = None
         stats.orphan_aborted += 1
 
-    await session.commit()
+    # W6-E: do NOT commit here — caller (lifespan or test) commits.
+    # Phase 1 W2 pattern: scheduler functions don't commit internally.
     logger.info("recovery_routine done: %s", stats.as_dict())
     return stats
 ```
@@ -2023,7 +2087,7 @@ async def reclaim_stale_executors(
             n, ex.id, ex.epoch,
         )
 
-    await session.commit()
+    # W6-E: caller commits — lifespan loop wraps each call in `async with factory()`
     return reclaimed_total
 ```
 
@@ -2109,14 +2173,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from dlw.services.recovery import run_recovery_routine
 
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+    # W6-J: spec §7 says recovery failure aborts startup. Permissive dev mode
+    # via DLW_STRICT_RECOVERY=false env override (defaults to strict).
+    import os
+    strict_recovery = os.environ.get("DLW_STRICT_RECOVERY", "true").lower() != "false"
     try:
         async with factory() as session:
             stats = await run_recovery_routine(session)
+            await session.commit()    # W6-E: caller commits (service is no-commit)
             logger.info("startup recovery: %s", stats.as_dict())
     except Exception:
-        # Recovery failure should NOT kill the controller in dev — log + continue.
-        # Production hook (Phase 2 W2+): metric + alert.
-        logger.exception("startup recovery_routine failed; controller will serve anyway")
+        if strict_recovery:
+            logger.exception("startup recovery_routine failed; aborting startup (strict mode)")
+            raise
+        logger.exception(
+            "startup recovery_routine failed; continuing in permissive mode "
+            "(DLW_STRICT_RECOVERY=false)"
+        )
 
     reclaim_task = asyncio.create_task(_reclaim_loop_main(factory))
 
@@ -2140,6 +2213,7 @@ async def _reclaim_loop_main(factory) -> None:
             await asyncio.sleep(_RECLAIM_INTERVAL_SECONDS)
             async with factory() as session:
                 await reclaim_stale_executors(session)
+                await session.commit()       # W6-E: caller commits
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2884,11 +2958,25 @@ Expected: 12 checks pass. If any fail, fix in a NEW commit (do NOT amend or forc
 
 ## Plan Revisions Log
 
-(Empty on first draft. Populated by the pre-execution multi-agent reviewer pass.)
+This plan was reviewed by 2 specialized agents (DB/SQL/fence-semantics + async/FastAPI/lifespan/test) on 2026-05-11. 11 fixes applied (W6-A through W6-K) before subagent execution; 2 false positives skipped.
 
 | Tag | Severity | Issue | Fix applied |
 |-----|----------|-------|-------------|
-| _(none yet)_ | | | |
+| W6-A | CRITICAL | `s3.exceptions.ClientError` is NOT a valid boto3 attribute. boto3 service clients expose service-modeled exceptions like `s3.exceptions.NoSuchKey` but `ClientError` lives on `botocore.exceptions`. `except s3.exceptions.ClientError` itself raises `AttributeError` at runtime, crashing `verify_remote_state` on the very 404 path it's meant to handle | Changed Task 8 imports + `except` clause to use `botocore.exceptions.ClientError` |
+| W6-B | CRITICAL | `complete_subtask` reads the subtask via non-locked `session.get(FileSubTask, ...)`. Between the get and the epoch verify, a concurrent reclaim+reassign could change `executor_epoch` without our seeing it (W2 already added FOR UPDATE on the PARENT — Phase 2 needs it on the subtask too) | Added `with_for_update=True` to the `session.get(FileSubTask, subtask_id)` call in Task 6 Step 4 |
+| W6-C | CRITICAL | Recovery routine Step 1 sets `sub.status = "succeeded"` directly but never triggers the parent-task transition logic (which lives in `complete_subtask`'s tail: query siblings, flip parent.status if all succeeded). If recovery is the LAST subtask to succeed, the parent `DownloadTask` is stuck pending/downloading forever with all subtasks done | Extracted parent-transition tail of `complete_subtask` into a shared helper `_maybe_transition_parent(session, task_id)`; recovery Step 1 calls it after every `verified` flip |
+| W6-D | CRITICAL | Spec §7 error matrix says "missing X-Executor-Epoch header → 401 (upgraded in dep)" but plan's `require_executor_epoch` uses `Header(...)` REQUIRED — FastAPI auto-rejects with 422 before dep body runs. Tests in Task 3 assert 422. Executor runner only catches 401 → bug client missing the header gets silent warning instead of rejoin | Changed `require_executor_epoch` to accept `Header(None, alias=...)` + explicit `if x_executor_epoch is None: raise HTTPException(401, detail="missing X-Executor-Epoch header")`; updated tests to assert 401 not 422 (matches spec) |
+| W6-E | CRITICAL | `reclaim_stale_executors` in `recovery.py` calls `await session.commit()` internally. (a) lifespan's `async with factory() as session:` also commits → double-commit. (b) test fixture `db_session` rolls back per test; internal commit overrides rollback → test data leaks to subsequent tests | Removed `await session.commit()` from both `reclaim_stale_executors` and `run_recovery_routine`; lifespan + test code now commit explicitly (matches Phase 1 W2 `scheduler.complete_subtask` pattern — commit-at-callsite) |
+| W6-F | important | `reclaim_subtasks` UPDATE clears `executor_id`/`executor_epoch`/`assignment_token` but does NOT increment `retry_count`. Spec §2.4 pseudocode explicitly includes `retry_count = retry_count + 1`. Without it, a repeatedly-crashing executor cycling claim→crash→reclaim never exhausts retries — subtask cycles forever | Added `retry_count=FileSubTask.__table__.c.retry_count + 1` to the UPDATE values in Task 7 Step 3 |
+| W6-G | important | Recovery routine Step 1 path (`WHERE status='assigned' AND multipart_upload_id IS NOT NULL`) returns ZERO rows in Phase 1 because W4's `HfS3StreamDownloader` never persists `multipart_upload_id` to DB (only held transient in memory, aborted or completed within same executor run). The whole three-way Step 1 is infrastructure for P2-W2's multipart-resume work, dormant in Phase 1 | Added explicit note at the top of Task 9 explaining this is Phase 2-W2 infrastructure; the test fixture seeds a synthetic state to validate the logic; production Phase 1 keeps it dormant |
+| W6-H | important | Task 1 migration lacks `CHECK (epoch >= 1)` constraint. Future test fixtures / seed scripts that omit `epoch=` get `epoch=0` from Python default → `require_executor_epoch` PASSES for any header sending `0` (zero-fence is degenerate but technically valid) | Added `sa.CheckConstraint("epoch >= 0", name="ck_executors_epoch_nonnegative")` to migration. (Note: >= 0 not >= 1, because server_default='0' is intentional for pre-existing rows during migration — first /join bumps to 1) |
+| W6-I | important | Both `tests/auth/test_executor_epoch.py` (Task 3) and `tests/services/test_recovery.py` (Task 8) define module-scoped `Base.metadata.create_all/drop_all` autouse fixtures. They share the session-scoped engine — pytest collection order means one module's drop fires during another's lifetime, breaking subsequent tests with "relation does not exist" | Task 3 fixture renamed to non-conflicting helper that ONLY seeds executors (no create_all/drop_all); relies on existing test_executors.py-style `_create_tables` already running. Recovery test reuses the same conftest-side `_create_tables` pattern from `tests/services/test_scheduler.py` (session-scope, not module-scope) |
+| W6-J | important | Lifespan recovery failure silently swallowed (`except Exception: logger.exception ... continue`) contradicts spec §7 row "Recovery routine head_object 5xx → lifespan startup fails; controller does NOT serve traffic". Plan and spec diverge without documentation | Made Task 11 lifespan code match spec: `except Exception: raise` (startup aborts). Documented permissive-mode option via `DLW_STRICT_RECOVERY=false` env override for dev (default strict); added to plan note. (Phase 1 had no recovery; abort behavior is new — operators see the failure immediately) |
+| W6-K | minor | Task 1 migration's `down_revision` not verified to point at W4's `5a729be99dc0` head; risk if implementer's local alembic state is stale | Added Step 3.5 explicit verification: open the generated file and assert `down_revision = '5a729be99dc0'` matches; abort if not |
+
+**False-positive findings (skipped, with reasoning)**:
+- "test_report_stale_epoch_returns_EPOCH_MISMATCH comment misleading" — the test behaviour is correct; only the inline comment was unclear. Not a code bug; comment polish can happen during implementation.
+- "redundant double DB lookup in verify_remote_state via _load_storage_config" — wasteful but not a correctness bug; SQLAlchemy identity map caches the rows. Optimisation deferred.
 
 ---
 
