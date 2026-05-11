@@ -478,6 +478,13 @@ paths:
       operationId: postHeartbeat
       parameters:
         - in: header
+          name: X-Executor-Epoch
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: Fence token. Must match the executor's current epoch.
+        - in: header
           name: X-Heartbeat-Nonce
           required: true
           schema: {type: string}
@@ -589,8 +596,24 @@ paths:
                         assignment_token: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
                         deadline_at: "2026-05-07T11:00:00Z"
         '401':
-          description: EPOCH_MISMATCH or CERT_REVOKED
+          description: Epoch mismatch (stale executor) or bearer token invalid
           content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [EPOCH_MISMATCH]
+                          expected:
+                            type: integer
+                          got:
+                            type: integer
             application/problem+json:
               schema: {$ref: '#/components/schemas/ProblemDetail'}
               example:
@@ -628,6 +651,49 @@ paths:
                   executor_jwt: {type: string}
                   expires_at: {type: string, format: date-time}
 
+  /executors/{executorId}/poll:
+    parameters:
+      - in: path
+        name: executorId
+        required: true
+        schema: {type: string}
+      - in: header
+        name: X-Executor-Epoch
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+        description: Fence token. Must match the executor's current epoch.
+    post:
+      tags: [executors]
+      summary: Poll for next subtask assignment
+      operationId: pollForSubtask
+      responses:
+        '200':
+          description: Assignment (or empty if no work available)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AssignmentResponse'}
+        '401':
+          description: Epoch mismatch (stale executor) or bearer token invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [EPOCH_MISMATCH]
+                          expected:
+                            type: integer
+                          got:
+                            type: integer
+
   /executors/{executorId}/subtasks/{subtaskId}/complete:
     parameters:
       - in: path
@@ -664,10 +730,83 @@ paths:
                 type: object
                 properties:
                   subtask_status: {$ref: '#/components/schemas/SubtaskStatus'}
+        '401':
+          description: Epoch mismatch (stale executor) or bearer token invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [EPOCH_MISMATCH]
+                          expected:
+                            type: integer
+                          got:
+                            type: integer
         '409':
           description: STALE_ASSIGNMENT or ALREADY_COMPLETED
         '410':
           description: TOKEN_EXPIRED
+
+  # ========== Subtask report (executor → controller) ==========
+  /subtasks/{subtaskId}/report:
+    parameters:
+      - in: path
+        name: subtaskId
+        required: true
+        schema: {type: string, format: uuid}
+      - in: header
+        name: X-Executor-Epoch
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+        description: Fence token. Must match the executor's current epoch.
+    post:
+      tags: [executors]
+      summary: Report subtask outcome (succeeded or failed)
+      operationId: reportSubtask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SubTaskReport'}
+      responses:
+        '200':
+          description: Outcome recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+        '401':
+          description: Epoch mismatch (stale executor) or bearer token invalid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        properties:
+                          code:
+                            type: string
+                            enum: [EPOCH_MISMATCH]
+                          expected:
+                            type: integer
+                          got:
+                            type: integer
+        '409':
+          description: STALE_ASSIGNMENT or epoch fence violation
 
   # ========== Tenants / Quota / Audit ==========
   /tenants/{tenantId}:
@@ -1898,3 +2037,126 @@ components:
         ai_cost_usd_cents_month: {type: integer}
         active_conversations: {type: integer}
         max_concurrent_conversations: {type: integer}
+
+    # ===== Executor v1 schemas (Phase 2 W1) =====
+
+    ExecutorRead:
+      type: object
+      required: [id, status, health_score, epoch]
+      description: Returned by /join and /heartbeat to confirm registration.
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        health_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        epoch:
+          type: integer
+          minimum: 0
+          description: Current epoch (fence token). Increments on every /join.
+
+    StorageConfig:
+      type: object
+      required: [bucket]
+      properties:
+        bucket:
+          type: string
+        region:
+          type: string
+          default: us-east-1
+        endpoint_url:
+          type: string
+          nullable: true
+        key_prefix:
+          type: string
+          default: ""
+
+    SubTaskRead:
+      type: object
+      required: [id, task_id, filename, status]
+      description: Subtask detail returned in assignment payload and GET subtask detail.
+      properties:
+        id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+          maxLength: 512
+        file_size:
+          type: integer
+          format: int64
+          nullable: true
+        expected_sha256:
+          type: string
+          nullable: true
+        status:
+          type: string
+        s3_key:
+          type: string
+          nullable: true
+          maxLength: 1024
+
+    AssignmentResponse:
+      type: object
+      required: [assigned]
+      description: Response from POST /poll — either a subtask assignment or empty.
+      properties:
+        assigned:
+          type: boolean
+        subtask:
+          $ref: '#/components/schemas/SubTaskRead'
+          nullable: true
+        assignment_token:
+          type: string
+          format: uuid
+          nullable: true
+        repo_id:
+          type: string
+          nullable: true
+        revision:
+          type: string
+          nullable: true
+        storage_config:
+          $ref: '#/components/schemas/StorageConfig'
+
+    SubTaskReport:
+      type: object
+      required: [status]
+      description: Request body for POST /subtasks/{subtaskId}/report — executor reports outcome.
+      properties:
+        status:
+          type: string
+          enum: [succeeded, failed]
+        assignment_token:
+          type: string
+          format: uuid
+          nullable: true
+          description: Token from /poll AssignmentResponse — verified against stored value.
+        actual_sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          nullable: true
+        bytes_downloaded:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        s3_key:
+          type: string
+          nullable: true
+          maxLength: 1024
+        error:
+          type: string
+          nullable: true
+          maxLength: 2048
+        executor_epoch:
+          type: integer
+          nullable: true
+          description: Executor's current epoch (fence). Must match subtask.executor_epoch.
