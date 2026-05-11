@@ -1,8 +1,10 @@
 """HTTP client wrapping the controller's executor + subtask endpoints.
 
-All methods raise httpx.HTTPStatusError on non-2xx — caller decides retry policy.
-Includes tenacity retry for transient (5xx, network) errors only; 4xx errors
-fall through and raise once with no retry.
+Phase 2 W1 additions:
+  - Persists the executor's current epoch from /join response.
+  - Attaches X-Executor-Epoch header on heartbeat / poll / report.
+  - Caller (runner) should observe `current_epoch()` and react to 401
+    EPOCH_MISMATCH by calling join() again.
 """
 from __future__ import annotations
 
@@ -46,6 +48,7 @@ class ControllerClient:
             timeout=timeout_seconds,
             transport=_transport,
         )
+        self._epoch: int | None = None        # P2-W1
 
     async def __aenter__(self) -> Self:
         return self
@@ -53,23 +56,44 @@ class ControllerClient:
     async def __aexit__(self, *exc_info: Any) -> None:
         await self._client.aclose()
 
-    async def _post(self, path: str, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+    def current_epoch(self) -> int | None:
+        """Returns the most recent epoch from /join, or None if not joined yet."""
+        return self._epoch
+
+    def _epoch_headers(self) -> dict[str, str]:
+        if self._epoch is None:
+            return {}
+        return {"X-Executor-Epoch": str(self._epoch)}
+
+    async def _post(
+        self,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        headers = {**(extra_headers or {})}
+
         @_retry
         async def _do() -> httpx.Response:
-            r = await self._client.post(path, json=json_body)
+            r = await self._client.post(path, json=json_body, headers=headers)
             if 500 <= r.status_code < 600:
-                r.raise_for_status()  # 5xx is transient — tenacity will retry
+                r.raise_for_status()
             return r
+
         r = await _do()
-        r.raise_for_status()  # 4xx falls through here, raised once (no retry)
+        r.raise_for_status()
         return r.json()
 
     async def join(
         self, *, executor_id: str, host_id: str, capabilities: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self._post("/api/v1/executors/join", {
+        body = await self._post("/api/v1/executors/join", {
             "id": executor_id, "host_id": host_id, "capabilities": capabilities,
         })
+        epoch = body.get("epoch")
+        if isinstance(epoch, int):
+            self._epoch = epoch
+        return body
 
     async def heartbeat(
         self, *, executor_id: str, health_score: int, parts_dir_bytes: int
@@ -77,10 +101,14 @@ class ControllerClient:
         return await self._post(
             f"/api/v1/executors/{executor_id}/heartbeat",
             {"health_score": health_score, "parts_dir_bytes": parts_dir_bytes},
+            extra_headers=self._epoch_headers(),
         )
 
     async def poll(self, *, executor_id: str) -> dict[str, Any]:
-        return await self._post(f"/api/v1/executors/{executor_id}/poll")
+        return await self._post(
+            f"/api/v1/executors/{executor_id}/poll",
+            extra_headers=self._epoch_headers(),
+        )
 
     async def report(
         self,
@@ -105,4 +133,8 @@ class ControllerClient:
             body["error"] = error
         if s3_key is not None:
             body["s3_key"] = s3_key
-        return await self._post(f"/api/v1/subtasks/{subtask_id}/report", body)
+        return await self._post(
+            f"/api/v1/subtasks/{subtask_id}/report",
+            body,
+            extra_headers=self._epoch_headers(),
+        )
