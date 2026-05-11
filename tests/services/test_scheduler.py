@@ -330,3 +330,61 @@ async def test_complete_subtask_accepts_matching_epoch(db_session, env) -> None:
         executor_epoch=5,             # matches
     )
     assert sub_returned.status == "succeeded"
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_resets_assigned(db_session, env) -> None:
+    """reclaim_subtasks: assigned → pending; clears executor_id/epoch/token."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "stale-host-worker-1", executor_epoch=7)
+    await db_session.flush()
+    assert sub.status == "assigned"
+    assert sub.executor_id == "stale-host-worker-1"
+
+    n = await reclaim_subtasks(db_session, "stale-host-worker-1", current_epoch=7)
+    await db_session.flush()
+    assert n == 1
+    refreshed = await db_session.get(FileSubTask, sub.id)
+    assert refreshed.status == "pending"
+    assert refreshed.executor_id is None
+    assert refreshed.executor_epoch is None
+    assert refreshed.assignment_token is None
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_skips_other_epoch(db_session, env) -> None:
+    """If executor re-joined and got new epoch, old-epoch reclaim is a no-op."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, _ = await claim_one_subtask(db_session, "newer-host-worker-1", executor_epoch=9)
+    await db_session.flush()
+
+    # Stale reclaim with old epoch
+    n = await reclaim_subtasks(db_session, "newer-host-worker-1", current_epoch=8)
+    await db_session.flush()
+    assert n == 0  # WHERE epoch=8 doesn't match epoch=9 → no-op
+    refreshed = await db_session.get(FileSubTask, sub.id)
+    assert refreshed.status == "assigned"
+    assert refreshed.executor_id == "newer-host-worker-1"
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_skips_succeeded(db_session, env) -> None:
+    """reclaim only touches status=assigned; succeeded rows are untouched."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "done-host-worker-1", executor_epoch=1)
+    await db_session.flush()
+    await complete_subtask(
+        db_session, sub.id, final_status="succeeded",
+        actual_sha256=None, bytes_downloaded=100, error=None,
+        assignment_token=token, executor_epoch=1,
+    )
+    await db_session.flush()
+
+    n = await reclaim_subtasks(db_session, "done-host-worker-1", current_epoch=1)
+    assert n == 0  # status='succeeded' is not in the WHERE clause

@@ -118,3 +118,38 @@ async def complete_subtask(
         parent.completed_at = datetime.now(UTC)
 
     return sub, parent
+
+
+async def reclaim_subtasks(
+    session: AsyncSession,
+    executor_id: str,
+    current_epoch: int,
+) -> int:
+    """Fenced reclaim: assigned → pending for one executor at one epoch.
+
+    Phase 2 W1: single UPDATE statement, fenced by (executor_id, executor_epoch).
+    If the executor has re-joined (epoch bumped) and started new work since the
+    stale check, current_epoch won't match the row's executor_epoch → 0 rows
+    affected. New work is preserved.
+
+    Returns the number of subtasks reclaimed.
+    """
+    from sqlalchemy import update
+
+    result = await session.execute(
+        update(FileSubTask)
+        .where(FileSubTask.executor_id == executor_id)
+        .where(FileSubTask.executor_epoch == current_epoch)
+        .where(FileSubTask.status == "assigned")
+        .values(
+            status="pending",
+            executor_id=None,
+            executor_epoch=None,
+            assignment_token=None,
+            assigned_at=None,
+            # W6-F: spec §2.4 — every reclaim is a retry; track count for
+            # eventual graduation to 'failed' (P2-W2 will enforce a max_retries).
+            retry_count=FileSubTask.__table__.c.retry_count + 1,
+        )
+    )
+    return result.rowcount or 0
