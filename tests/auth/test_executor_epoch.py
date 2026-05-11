@@ -16,15 +16,18 @@ _TOKEN = "test-bearer-token-12345"
 
 @pytest.fixture(scope="module", autouse=True)
 async def _bootstrap(engine):
-    """W6-I: do NOT drop_all at module end — multiple modules share this engine.
-    Just create_all (idempotent) + seed a probe executor; rely on per-test
-    rollback for cleanup of OTHER state.
+    """W6-M (revert W6-I): restore drop_all at module end.
+
+    W6-I was over-cautious — pytest runs modules sequentially (not in parallel
+    by default), so module-level drop_all firing on engine teardown doesn't
+    affect other modules. Keeping the table left over causes test_alembic.py
+    to fail because alembic upgrade-head can't create tables that already exist.
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
-        # Use ON CONFLICT DO NOTHING so re-running the module is safe
+        # ON CONFLICT DO NOTHING keeps the seed idempotent (defensive)
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         stmt = pg_insert(Executor).values(
             id="probe-host-worker-1", host_id="probe-host",
@@ -33,7 +36,8 @@ async def _bootstrap(engine):
         await s.execute(stmt)
         await s.commit()
     yield
-    # No drop_all — leave tables for other test modules.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
 
 
 @pytest.fixture(autouse=True)
