@@ -38,6 +38,7 @@ class ExecutorRead(BaseModel):
     id: str
     status: str
     health_score: int
+    epoch: int        # NEW (P2-W1 fence: clients persist this from /join response)
 
 
 class AssignmentResponse(BaseModel):
