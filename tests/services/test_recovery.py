@@ -203,3 +203,63 @@ async def test_run_recovery_routine_aborts_orphan_multiparts(
     await db_session.refresh(sub)
     assert sub.multipart_upload_id is None
     assert stats.orphan_aborted == 1
+
+
+@pytest.mark.slow
+async def test_reclaim_stale_executors_marks_unhealthy_and_reclaims(
+    db_session, env,
+) -> None:
+    """An executor whose last_heartbeat_at is too old becomes 'unhealthy',
+    and any of its 'assigned' subtasks return to 'pending'."""
+    # Insert a healthy executor with old heartbeat
+    stale_time = datetime.now(UTC) - timedelta(seconds=300)
+    db_session.add(Executor(
+        id="stale-host-worker-1", host_id="stale-host",
+        cert_fingerprint="x", status="healthy", epoch=1,
+        last_heartbeat_at=stale_time,
+    ))
+    await db_session.flush()
+
+    # Claim a subtask
+    task = DownloadTask(
+        tenant_id=1, project_id=1, owner_user_id=1,
+        repo_id="o/reclaim", revision="b" * 40, storage_id=1,
+        path_template="t", priority=1, status="pending",
+    )
+    db_session.add(task)
+    await db_session.flush()
+    sub = FileSubTask(
+        task_id=task.id, tenant_id=1, filename="x.bin",
+        file_size=100, status="assigned",
+        executor_id="stale-host-worker-1", executor_epoch=1,
+        assignment_token=uuid.uuid4(),
+    )
+    db_session.add(sub)
+    await db_session.flush()
+
+    n = await reclaim_stale_executors(db_session)
+    await db_session.flush()
+    assert n == 1   # one subtask reclaimed
+
+    ex = await db_session.get(Executor, "stale-host-worker-1")
+    assert ex.status == "unhealthy"
+    refreshed = await db_session.get(FileSubTask, sub.id)
+    assert refreshed.status == "pending"
+    assert refreshed.executor_id is None
+
+
+@pytest.mark.slow
+async def test_reclaim_stale_executors_skips_recently_active(
+    db_session, env,
+) -> None:
+    """Executor with recent heartbeat is left alone."""
+    db_session.add(Executor(
+        id="active-host-worker-1", host_id="active-host",
+        cert_fingerprint="x", status="healthy", epoch=1,
+        last_heartbeat_at=datetime.now(UTC),  # just now
+    ))
+    await db_session.flush()
+    n = await reclaim_stale_executors(db_session)
+    assert n == 0
+    ex = await db_session.get(Executor, "active-host-worker-1")
+    assert ex.status == "healthy"

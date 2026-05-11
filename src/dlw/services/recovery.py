@@ -294,9 +294,30 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
 
 async def reclaim_stale_executors(
     session: AsyncSession,
-    heartbeat_interval: timedelta = timedelta(seconds=30),
-    stale_multiplier: int = 3,
-) -> RecoveryStats:
-    """Periodic scan: mark unhealthy executors + reclaim their subtasks. Placeholder for P2-W1 skeleton."""
-    stats = RecoveryStats()
-    return stats
+    *,
+    heartbeat_threshold_seconds: int = 90,
+) -> int:
+    """Scan executors with stale heartbeat; mark them unhealthy + reclaim work.
+
+    Threshold default 90s = 1.5× the executor default heartbeat interval (60s).
+    Returns total number of subtasks reclaimed across all stale executors.
+    """
+    threshold = datetime.now(UTC) - timedelta(seconds=heartbeat_threshold_seconds)
+    stale = (await session.execute(
+        select(Executor)
+        .where(Executor.last_heartbeat_at < threshold)
+        .where(Executor.status == "healthy")
+    )).scalars().all()
+
+    reclaimed_total = 0
+    for ex in stale:
+        ex.status = "unhealthy"
+        n = await reclaim_subtasks(session, ex.id, ex.epoch)
+        reclaimed_total += n
+        logger.info(
+            "reclaimed %d subtasks from stale executor %s (epoch=%d)",
+            n, ex.id, ex.epoch,
+        )
+
+    # W6-E: caller commits — lifespan loop wraps each call in `async with factory()`
+    return reclaimed_total
