@@ -64,16 +64,19 @@ async def test_full_task_lifecycle_via_http() -> None:
         task_id = r.json()["id"]
         assert r.json()["status"] == "pending"
 
-        # 2. Register a worker executor
+        # 2. Register a worker executor — capture epoch (P2-W1 fence)
         r = await c.post("/api/v1/executors/join", json={
             "id": "e2e-worker-1", "host_id": "e2e-host",
             "capabilities": {"nic_speed_gbps": 25},
         }, headers=auth)
         assert r.status_code == 201, r.text
+        epoch = r.json()["epoch"]
+        fence = {**auth, "X-Executor-Epoch": str(epoch)}
 
         # 3. Heartbeat (executor reports liveness)
         r = await c.post("/api/v1/executors/e2e-worker-1/heartbeat",
-                         json={"health_score": 100}, headers=auth)
+                         json={"health_score": 100, "parts_dir_bytes": 0},
+                         headers=fence)
         assert r.status_code == 200
         assert r.json()["status"] == "healthy"
 
@@ -81,25 +84,25 @@ async def test_full_task_lifecycle_via_http() -> None:
         sub_ids: list[str] = []
         tokens: list[str] = []
         for _ in range(2):
-            r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=auth)
-            assert r.status_code == 200
+            r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=fence)
+            assert r.status_code == 200, r.text
             assert r.json()["assigned"] is True
             sub_ids.append(r.json()["subtask"]["id"])
             tokens.append(r.json()["assignment_token"])
         assert len(set(sub_ids)) == 2
 
         # 5. Third poll → no work
-        r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=auth)
+        r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=fence)
         assert r.json()["assigned"] is False
 
-        # 6. Report success for both subtasks (with token verification)
+        # 6. Report success for both subtasks (with token + epoch verification)
         for sid, tok in zip(sub_ids, tokens, strict=True):
             r = await c.post(f"/api/v1/subtasks/{sid}/report", json={
                 "status": "succeeded",
                 "assignment_token": tok,
                 "actual_sha256": "f" * 64,
                 "bytes_downloaded": 100_000_000,
-            }, headers=auth)
+            }, headers=fence)
             assert r.status_code == 200, r.text
 
         # 7. Task should now be succeeded
