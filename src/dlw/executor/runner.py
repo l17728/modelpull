@@ -75,6 +75,7 @@ class ExecutorRunner:
                 pass
 
     async def _poll_and_execute_loop(self) -> None:
+        import httpx as _httpx
         while not self._shutdown.is_set():
             try:
                 resp = await self._client.poll(executor_id=self._s.id)
@@ -87,6 +88,21 @@ class ExecutorRunner:
                         storage_config=resp["storage_config"],
                     )
                     continue  # immediately poll again — there may be more work
+            except _httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    detail = None
+                    try:
+                        detail = e.response.json().get("detail")
+                    except Exception:
+                        pass
+                    if isinstance(detail, dict) and detail.get("code") == "EPOCH_MISMATCH":
+                        logger.warning(
+                            "EPOCH_MISMATCH (expected=%s got=%s); re-joining",
+                            detail.get("expected"), detail.get("got"),
+                        )
+                        await self._rejoin()
+                        continue
+                logger.warning("poll failed: %s", e)
             except Exception as e:
                 logger.warning("poll failed: %s", e)
             try:
@@ -96,6 +112,20 @@ class ExecutorRunner:
                 )
             except asyncio.TimeoutError:
                 pass
+
+    async def _rejoin(self) -> None:
+        """Discard any in-flight state and re-issue /join (gets new epoch)."""
+        try:
+            await self._client.join(
+                executor_id=self._s.id,
+                host_id=self._s.host_id,
+                capabilities={
+                    "nic_speed_gbps": self._s.nic_speed_gbps,
+                    "region": self._s.region,
+                },
+            )
+        except Exception as e:
+            logger.warning("rejoin failed: %s", e)
 
     async def _execute_subtask(
         self, *, subtask: dict, assignment_token: uuid.UUID,
