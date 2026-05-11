@@ -62,10 +62,7 @@ async def post_poll(
     executor: Executor = Depends(require_executor_epoch),
     session: AsyncSession = Depends(_session),
 ) -> AssignmentResponse:
-    # NOTE: claim_one_subtask signature is updated to take executor_epoch in
-    # Task 5 — until then this call uses the W4 2-arg form. Task 5 also
-    # updates this line to pass executor.epoch. Keeping commits separable.
-    sub, token = await claim_one_subtask(session, executor.id)
+    sub, token = await claim_one_subtask(session, executor.id, executor.epoch)
     if sub is None:
         return AssignmentResponse(assigned=False)
 

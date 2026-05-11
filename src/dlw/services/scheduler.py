@@ -17,14 +17,14 @@ from dlw.db.models.task import DownloadTask, FileSubTask
 async def claim_one_subtask(
     session: AsyncSession,
     executor_id: str,
+    executor_epoch: int,                       # NEW (P2-W1)
 ) -> tuple[FileSubTask | None, uuid.UUID | None]:
     """Atomically grab one pending subtask for this executor.
 
     Returns (None, None) if no pending subtasks. Caller must commit() to
     finalize the claim (the row stays locked until commit/rollback).
 
-    Phase 2 will add: priority ordering, fairness across tenants,
-    executor_epoch fence-token write.
+    P2-W1: also writes executor_epoch (fence) and assigned_at (recovery threshold).
     """
     stmt = (
         select(FileSubTask)
@@ -40,7 +40,9 @@ async def claim_one_subtask(
     token = uuid.uuid4()
     sub.status = "assigned"
     sub.executor_id = executor_id
+    sub.executor_epoch = executor_epoch        # NEW (P2-W1)
     sub.assignment_token = token
+    sub.assigned_at = datetime.now(UTC)        # NEW (P2-W1)
     return sub, token
 
 
