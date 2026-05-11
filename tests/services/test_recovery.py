@@ -121,3 +121,85 @@ async def test_verify_remote_state_size_mismatch_returns_size_mismatch(
         s3.put_object(Bucket=_BUCKET, Key=key, Body=b"y" * 100)   # wrong size!
         result = await verify_remote_state(db_session, sub)
     assert result == "size_mismatch"
+
+
+@pytest.mark.slow
+async def test_run_recovery_routine_resets_long_assigned(
+    db_session, env,
+) -> None:
+    """Subtask assigned > 2× heartbeat ago + no multipart → reset to pending."""
+    task = DownloadTask(
+        tenant_id=1, project_id=1, owner_user_id=1,
+        repo_id="o/r", revision="a" * 40, storage_id=1,
+        path_template="t", priority=1, status="pending",
+    )
+    db_session.add(task)
+    await db_session.flush()
+    long_ago = datetime.now(UTC) - timedelta(seconds=300)
+    sub = FileSubTask(
+        task_id=task.id, tenant_id=1, filename="x.bin",
+        file_size=100, status="assigned",
+        executor_id="stale-host-worker-1", executor_epoch=1,
+        assignment_token=uuid.uuid4(), assigned_at=long_ago,
+        multipart_upload_id=None,
+    )
+    db_session.add(sub)
+    await db_session.flush()
+
+    stats = await run_recovery_routine(db_session)
+    await db_session.flush()
+    await db_session.refresh(sub)
+    assert sub.status == "pending"
+    assert sub.executor_id is None
+    assert sub.executor_epoch is None
+    assert stats.no_multipart_reset == 1
+
+
+@pytest.mark.slow
+async def test_run_recovery_routine_three_way_verified_marks_succeeded(
+    db_session, env, aws_env,
+) -> None:
+    """In-flight subtask whose S3 object is intact → marked succeeded."""
+    task, sub = await _make_task_with_subtask(db_session, file_size=2048)
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=_BUCKET)
+        key = f"phase2/o/recovery/{'a' * 40}/weight.bin"
+        s3.put_object(Bucket=_BUCKET, Key=key, Body=b"z" * 2048)
+
+        stats = await run_recovery_routine(db_session)
+    await db_session.flush()
+    await db_session.refresh(sub)
+    assert sub.status == "succeeded"
+    assert stats.verified_recovered == 1
+
+
+@pytest.mark.slow
+async def test_run_recovery_routine_aborts_orphan_multiparts(
+    db_session, env, aws_env,
+) -> None:
+    """Terminal subtask with multipart_upload_id still set → abort + clear field."""
+    task = DownloadTask(
+        tenant_id=1, project_id=1, owner_user_id=1,
+        repo_id="o/r", revision="a" * 40, storage_id=1,
+        path_template="t", priority=1, status="succeeded",
+    )
+    db_session.add(task)
+    await db_session.flush()
+    sub = FileSubTask(
+        task_id=task.id, tenant_id=1, filename="x.bin",
+        file_size=100, status="succeeded",
+        multipart_upload_id="orphan-mpu-id",
+    )
+    db_session.add(sub)
+    await db_session.flush()
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=_BUCKET)
+        stats = await run_recovery_routine(db_session)
+
+    await db_session.flush()
+    await db_session.refresh(sub)
+    assert sub.multipart_upload_id is None
+    assert stats.orphan_aborted == 1

@@ -112,13 +112,183 @@ async def verify_remote_state(
     return "verified"
 
 
-async def run_recovery_routine(
-    session: AsyncSession,
-    executor_id: str,
-    heartbeat_interval: timedelta = timedelta(seconds=30),
-) -> RecoveryStats:
-    """Startup-once recovery routine. Placeholder body for P2-W1 skeleton."""
+async def _abort_multipart_silently(
+    s3: Any, bucket: str, key: str, upload_id: str,
+) -> None:
+    """Swallow ClientError; S3 lifecycle is the safety net (Phase 3 ops)."""
+    try:
+        await asyncio.to_thread(
+            lambda: s3.abort_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload_id,
+            )
+        )
+    except Exception as e:
+        logger.warning(
+            "abort_multipart_upload failed (Bucket=%s Key=%s UploadId=%s): %s",
+            bucket, key, upload_id, e,
+        )
+
+
+async def _delete_object_silently(
+    s3: Any, bucket: str, key: str,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            lambda: s3.delete_object(Bucket=bucket, Key=key)
+        )
+    except Exception as e:
+        logger.warning("delete_object failed (Bucket=%s Key=%s): %s", bucket, key, e)
+
+
+def _reset_subtask_to_pending(sub: FileSubTask) -> None:
+    sub.status = "pending"
+    sub.executor_id = None
+    sub.executor_epoch = None
+    sub.assignment_token = None
+    sub.assigned_at = None
+    sub.multipart_upload_id = None
+
+
+async def _maybe_transition_parent(session: AsyncSession, task_id: Any) -> None:
+    """W6-C: After a recovery flip of subtask.status, check parent task.
+
+    Mirrors the tail of complete_subtask: if all siblings succeeded, mark
+    parent succeeded; if any failed, mark parent failed. Locking the parent
+    FOR UPDATE prevents two recovery iterations from racing on the same task.
+    """
+    parent = await session.get(DownloadTask, task_id, with_for_update=True)
+    if parent is None:
+        return
+    siblings = (await session.execute(
+        select(FileSubTask).where(FileSubTask.task_id == task_id)
+    )).scalars().all()
+    statuses = {s.status for s in siblings}
+    if "failed" in statuses:
+        parent.status = "failed"
+        parent.completed_at = datetime.now(UTC)
+    elif statuses == {"succeeded"}:
+        parent.status = "succeeded"
+        parent.completed_at = datetime.now(UTC)
+
+
+async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
+    """One-shot startup recovery. Must complete before serving traffic.
+
+    W6-G note: Step 1 filters WHERE status='assigned' AND multipart_upload_id
+    IS NOT NULL. In Phase 1 production this returns ZERO rows because W4's
+    HfS3StreamDownloader never persists multipart_upload_id to DB (transient
+    in memory only). Step 1 is infrastructure for P2-W2 multipart-resume.
+    Tests seed synthetic state to validate the logic ahead of P2-W2 wiring.
+
+    Phase 1 simplification: file_subtasks uses only pending/assigned/
+    succeeded/failed/cancelled. The intermediate downloading/uploading/
+    verifying_remote states from spec §3 don't exist yet — those arrive in
+    P2-W2. So this routine:
+      1. three-way (head + size) for status='assigned' WITH multipart_upload_id
+         (executor crashed mid-upload)
+      2. resets status='assigned' WITHOUT multipart_upload_id whose assigned_at
+         is stale (executor crashed before multipart started)
+      3. cleanup orphan multipart_upload_ids on terminal subtasks
+
+    W6-E: do NOT await session.commit() here — caller commits.
+    """
     stats = RecoveryStats()
+    threshold = datetime.now(UTC) - timedelta(seconds=120)  # 2× heartbeat default
+
+    # Step 1: three-way for in-flight with multipart
+    in_flight = (await session.execute(
+        select(FileSubTask)
+          .where(FileSubTask.status == "assigned")
+          .where(FileSubTask.multipart_upload_id.is_not(None))
+    )).scalars().all()
+
+    for sub in in_flight:
+        try:
+            storage_cfg, parent = await _load_storage_config(session, sub)
+            s3 = _make_s3_client(storage_cfg)
+            key = _compose_key(parent, sub, storage_cfg)
+        except RuntimeError:
+            # Orphan: parent or storage missing — log + skip
+            logger.warning(
+                "recovery: subtask %s missing parent/storage; skipping", sub.id,
+            )
+            continue
+
+        try:
+            result = await verify_remote_state(session, sub)
+        except Exception as e:
+            logger.warning(
+                "recovery: verify_remote_state %s failed: %s; skipping", sub.id, e,
+            )
+            continue
+
+        stats.three_way_checked += 1
+        if result == "verified":
+            sub.status = "succeeded"
+            sub.completed_at = datetime.now(UTC)
+            # W6-C: trigger parent-task transition (otherwise recovery-completed
+            # subtasks leave the parent stuck pending/downloading forever).
+            await _maybe_transition_parent(session, sub.task_id)
+            stats.verified_recovered += 1
+        elif result == "missing":
+            if sub.multipart_upload_id:
+                await _abort_multipart_silently(
+                    s3, storage_cfg.bucket, key, sub.multipart_upload_id,
+                )
+            _reset_subtask_to_pending(sub)
+            stats.reset_to_pending += 1
+        else:  # size_mismatch
+            if sub.multipart_upload_id:
+                await _abort_multipart_silently(
+                    s3, storage_cfg.bucket, key, sub.multipart_upload_id,
+                )
+            await _delete_object_silently(s3, storage_cfg.bucket, key)
+            _reset_subtask_to_pending(sub)
+            stats.size_mismatch_purged += 1
+
+    # Step 2: reset long-assigned without multipart
+    n = (await session.execute(
+        update(FileSubTask)
+        .where(FileSubTask.status == "assigned")
+        .where(FileSubTask.multipart_upload_id.is_(None))
+        .where(
+            or_(
+                FileSubTask.assigned_at.is_(None),
+                FileSubTask.assigned_at < threshold,
+            )
+        )
+        .values(
+            status="pending",
+            executor_id=None,
+            executor_epoch=None,
+            assignment_token=None,
+            assigned_at=None,
+        )
+    )).rowcount or 0
+    stats.no_multipart_reset = n
+
+    # Step 3: cleanup orphan multipart uploads on terminal subtasks
+    orphans = (await session.execute(
+        select(FileSubTask)
+          .where(FileSubTask.multipart_upload_id.is_not(None))
+          .where(FileSubTask.status.in_(["succeeded", "failed", "cancelled"]))
+    )).scalars().all()
+    for sub in orphans:
+        try:
+            storage_cfg, parent = await _load_storage_config(session, sub)
+            s3 = _make_s3_client(storage_cfg)
+            key = _compose_key(parent, sub, storage_cfg)
+            await _abort_multipart_silently(
+                s3, storage_cfg.bucket, key, sub.multipart_upload_id,
+            )
+        except RuntimeError:
+            logger.warning("recovery: orphan multipart on missing parent; skipping")
+        sub.multipart_upload_id = None
+        stats.orphan_aborted += 1
+
+    # W6-E: do NOT commit here — caller (lifespan or test) commits.
+    # Phase 1 W2 pattern: scheduler functions don't commit internally.
+    logger.info("recovery_routine done: %s", stats.as_dict())
     return stats
 
 
