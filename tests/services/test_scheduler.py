@@ -292,3 +292,41 @@ async def test_claim_writes_assigned_at(db_session: AsyncSession, env) -> None:
     assert sub is not None
     assert sub.assigned_at is not None
     assert before <= sub.assigned_at <= after
+
+
+@pytest.mark.slow
+async def test_complete_subtask_rejects_stale_epoch(db_session, env) -> None:
+    """P2-W1: complete_subtask must reject stale executor_epoch."""
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=5)
+    await db_session.flush()
+
+    # Executor sends report with epoch=4 (stale — controller bumped to 5 since claim)
+    with pytest.raises(ValueError, match="executor_epoch mismatch"):
+        await complete_subtask(
+            db_session, sub.id,
+            final_status="succeeded",
+            actual_sha256=None,
+            bytes_downloaded=4096,
+            error=None,
+            assignment_token=token,
+            executor_epoch=4,         # stale
+        )
+
+
+@pytest.mark.slow
+async def test_complete_subtask_accepts_matching_epoch(db_session, env) -> None:
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=5)
+    await db_session.flush()
+
+    sub_returned, _ = await complete_subtask(
+        db_session, sub.id,
+        final_status="succeeded",
+        actual_sha256=None,
+        bytes_downloaded=4096,
+        error=None,
+        assignment_token=token,
+        executor_epoch=5,             # matches
+    )
+    assert sub_returned.status == "succeeded"

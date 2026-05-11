@@ -55,6 +55,7 @@ async def complete_subtask(
     bytes_downloaded: int,
     error: str | None,
     assignment_token: uuid.UUID | None = None,
+    executor_epoch: int | None = None,                 # NEW (P2-W1)
     s3_key: str | None = None,
 ) -> tuple[FileSubTask, DownloadTask]:
     """Mark subtask done, then check if parent task can transition.
@@ -66,13 +67,19 @@ async def complete_subtask(
       - s3_key: optional kwarg; persisted to the row. Phase 1 uses it for
         debugging; Phase 2 uses it for multipart resume keying.
     """
-    sub = await session.get(FileSubTask, subtask_id)
+    # W6-B: FOR UPDATE prevents race with concurrent reclaim+reassign
+    sub = await session.get(FileSubTask, subtask_id, with_for_update=True)
     if sub is None:
         raise LookupError(f"subtask {subtask_id} not found")
     if sub.status != "assigned":
         raise ValueError(f"subtask {subtask_id} is not assigned (status={sub.status})")
     if assignment_token is not None and sub.assignment_token != assignment_token:
         raise ValueError(f"subtask {subtask_id} assignment_token mismatch")
+    if executor_epoch is not None and sub.executor_epoch != executor_epoch:    # NEW
+        raise ValueError(
+            f"subtask {subtask_id} executor_epoch mismatch "
+            f"(expected={sub.executor_epoch}, got={executor_epoch})"
+        )
 
     # W4: sha256 verification gate
     if (
