@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Demo dataset alpha — pinned SHA filled in M5 (Task 5) alongside dataset-catalog.md.
 # Placeholder during M1/M2 so seed_demo_data works against test DB; not a real revision.
 ALPHA_DEMO_REPO_ID = "sentence-transformers/all-MiniLM-L6-v2"
-ALPHA_DEMO_REVISION = "main"   # PLACEHOLDER — Task 5 replaces with pinned commit SHA
+ALPHA_DEMO_REVISION = "c9745ed1d9f207416be6d2e6f8de32d1f16199bf"   # pinned per docs/demo/dataset-catalog.md
 
 
 @dataclass(frozen=True)
