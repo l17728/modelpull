@@ -13,7 +13,7 @@ from dlw.api.health import router as health_router
 
 logger = logging.getLogger(__name__)
 
-_RECLAIM_INTERVAL_SECONDS = 30
+_SWEEP_INTERVAL_SECONDS = 30
 
 
 @asynccontextmanager
@@ -48,33 +48,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "(DLW_STRICT_RECOVERY=false)"
         )
 
-    reclaim_task = asyncio.create_task(_reclaim_loop_main(factory))
+    sweep_task = asyncio.create_task(_sweep_loop_main(factory))
 
     try:
         yield
     finally:
-        reclaim_task.cancel()
+        sweep_task.cancel()
         try:
-            await asyncio.wait_for(reclaim_task, timeout=2)
+            await asyncio.wait_for(sweep_task, timeout=2)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
         await reset_engine()
 
 
-async def _reclaim_loop_main(factory) -> None:
-    """Background task: every N seconds, scan stale executors + reclaim."""
-    from dlw.services.recovery import reclaim_stale_executors
+async def _sweep_loop_main(factory) -> None:
+    """Background task: every N seconds, transition stale executors + reclaim."""
+    from dlw.services.recovery import sweep_executor_timeouts
 
     while True:
         try:
-            await asyncio.sleep(_RECLAIM_INTERVAL_SECONDS)
+            await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             async with factory() as session:
-                await reclaim_stale_executors(session)
-                await session.commit()       # W6-E: caller commits
+                await sweep_executor_timeouts(session)
+                await session.commit()
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("reclaim_loop iteration failed; will retry next tick")
+            logger.exception("sweep_loop iteration failed; will retry next tick")
 
 
 def create_app() -> FastAPI:

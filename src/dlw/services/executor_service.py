@@ -8,8 +8,6 @@ on the next heartbeat.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,14 +50,24 @@ async def record_heartbeat(
     executor_id: str,
     body: ExecutorHeartbeat,
 ) -> Executor:
-    """Update last_heartbeat_at + health_score + parts_dir_bytes."""
+    """Update non-status fields + route status mutation through state machine.
+
+    W2a §3.6: state transitions (joining → healthy, suspect → degraded) and
+    counter resets are handled inside transition_executor. This function
+    retains responsibility for the non-status fields posted in the heartbeat
+    body (health_score, parts_dir_bytes).
+    """
+    from dlw.services.state_machine import transition_executor   # local import: avoids cycle
+
     ex = await session.get(Executor, executor_id)
     if ex is None:
         raise LookupError(f"executor {executor_id} not found (must POST /join first)")
-    ex.last_heartbeat_at = datetime.now(UTC)
     ex.health_score = body.health_score
     ex.parts_dir_bytes = body.parts_dir_bytes
-    if ex.status == "joining":
-        ex.status = "healthy"
-    ex.consecutive_heartbeat_failures = 0
+    await transition_executor(
+        session, ex,
+        event="heartbeat_ok",
+        reason="hb_received",
+        metadata={"health_score": body.health_score},
+    )
     return ex

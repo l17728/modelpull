@@ -197,6 +197,9 @@ jobs:
       - name: Run invariant lint
         run: python tools/lint_invariants.py
 
+      - name: No direct Executor.status writes (W2a)
+        run: python tools/lint_no_direct_status_write.py
+
       - name: Run invariant lint (strict — fail on cross-ref drift)
         # 暂时仅作 INFO；待 cross-ref 全部清理后改为 strict 阻断
         continue-on-error: true

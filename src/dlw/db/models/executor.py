@@ -35,6 +35,7 @@ class Executor(Base):
     )
     consecutive_task_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     degraded_failure_streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    degraded_recoveries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     nic_speed_gbps: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     disk_free_gb: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

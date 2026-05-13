@@ -46,6 +46,58 @@ CROSS_REF_RE = re.compile(r"(?:详见|→)\s*(\d{2})[\s\-]*[a-zA-Z\-_]*\s*§\s*(
 SECTION_RE = re.compile(r"^(#{2,4})\s+(\d+(?:\.\d+)*)\.?\s+", re.MULTILINE)
 
 
+# W2a §3.7: executors.status value domain.
+VALID_EXECUTOR_STATUS = {"joining", "healthy", "degraded", "suspect", "faulty"}
+
+
+def check_executor_status_domain() -> list[str]:
+    """Lint string literals assigned to a `status` kwarg/attr in two source files."""
+    errors: list[str] = []
+    files = [
+        ROOT / "src" / "dlw" / "services" / "state_machine.py",
+        ROOT / "src" / "dlw" / "services" / "executor_service.py",
+    ]
+    import ast as _ast
+    for f in files:
+        if not f.exists():
+            continue
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            # Pattern 1: `status="<literal>"` keyword argument (pg_insert.values, dict, etc.).
+            if isinstance(node, _ast.keyword) and node.arg == "status":
+                if isinstance(node.value, _ast.Constant) and isinstance(node.value.value, str):
+                    if node.value.value not in VALID_EXECUTOR_STATUS:
+                        errors.append(
+                            f"{f.relative_to(ROOT)}:{node.value.lineno}: "
+                            f"invalid status value: {node.value.value!r}"
+                        )
+            # Pattern 2: `ex.status = "<literal>"` attribute assignment.
+            elif isinstance(node, _ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], _ast.Attribute) \
+                    and node.targets[0].attr == "status" \
+                    and isinstance(node.value, _ast.Constant) \
+                    and isinstance(node.value.value, str):
+                if node.value.value not in VALID_EXECUTOR_STATUS:
+                    errors.append(
+                        f"{f.relative_to(ROOT)}:{node.lineno}: "
+                        f"invalid status value: {node.value.value!r}"
+                    )
+    return errors
+
+
+def check_d10_host_affinity_test_owner() -> list[str]:
+    """INVARIANT D-10 must have at least one discoverable test owner."""
+    import glob
+    tests_dir = ROOT / "tests"
+    if not tests_dir.exists():
+        # tests/ directory absent (e.g. isolated unit-test sandbox) — skip.
+        return []
+    matches = glob.glob(str(tests_dir / "**" / "test_*host*affinity*.py"), recursive=True)
+    if not matches:
+        return ["INVARIANT D-10 (host-affinity) has no test file matching `test_*host*affinity*.py`"]
+    return []
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -178,6 +230,9 @@ def main() -> int:
             print(f"WARN: {line}")
         if len(ref_failures) > 20:
             print(f"WARN: ... {len(ref_failures) - 20} more cross-ref warnings")
+
+    failures.extend(check_executor_status_domain())
+    failures.extend(check_d10_host_affinity_test_owner())
 
     # --- Report ---
     if failures:

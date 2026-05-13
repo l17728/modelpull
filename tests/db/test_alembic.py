@@ -53,6 +53,7 @@ EXPECTED_TABLES = {
     "alembic_version",
     "audit_log",
     "download_tasks",
+    "executor_status_history",
     "executors",
     "file_subtasks",
     "projects",
