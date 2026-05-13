@@ -33,7 +33,10 @@ async def test_runner_join_then_heartbeat_in_idle(settings) -> None:
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
     downloader = MagicMock(spec=HfS3StreamDownloader)
 
-    runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=downloader, chunk_downloader=MagicMock(),
+    )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
     runner.request_shutdown()
@@ -87,7 +90,10 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
 
     client.report = AsyncMock(return_value={"subtask_status": "succeeded", "task_status": "pending"})
 
-    runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=downloader, chunk_downloader=MagicMock(),
+    )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
     runner.request_shutdown()
@@ -128,7 +134,10 @@ async def test_runner_reports_failure_on_download_error(settings) -> None:
     downloader.download = AsyncMock(side_effect=OSError("disk full"))
     client.report = AsyncMock(return_value={"subtask_status": "failed", "task_status": "failed"})
 
-    runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=downloader, chunk_downloader=MagicMock(),
+    )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
     runner.request_shutdown()
@@ -149,7 +158,10 @@ async def test_runner_graceful_shutdown(settings) -> None:
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
     downloader = MagicMock(spec=HfS3StreamDownloader)
 
-    runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=downloader, chunk_downloader=MagicMock(),
+    )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(0.3)
     runner.request_shutdown()
@@ -206,7 +218,8 @@ async def test_runner_passes_assignment_with_repo_and_storage(
         heartbeat_interval_seconds=1, poll_interval_seconds=1,
     )
     runner = ExecutorRunner(
-        settings=settings, client=FakeClient(), downloader=FakeDownloader(),
+        settings=settings, client=FakeClient(),
+        stream_downloader=FakeDownloader(), chunk_downloader=MagicMock(),
     )
     run_task = asyncio.create_task(runner.run())
     await asyncio.sleep(2)
@@ -275,7 +288,10 @@ async def test_runner_rejoins_on_epoch_mismatch() -> None:
         async def download(self, **kw):
             raise AssertionError("downloader should NOT be invoked in this test")
 
-    runner = ExecutorRunner(settings=settings, client=FakeClient(), downloader=FakeDl())
+    runner = ExecutorRunner(
+        settings=settings, client=FakeClient(),
+        stream_downloader=FakeDl(), chunk_downloader=MagicMock(),
+    )
     run_task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)   # let 1-2 poll cycles run
     runner.request_shutdown()
