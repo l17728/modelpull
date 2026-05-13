@@ -292,32 +292,38 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
     return stats
 
 
-async def reclaim_stale_executors(
+async def sweep_executor_timeouts(
     session: AsyncSession,
     *,
     heartbeat_threshold_seconds: int = 90,
-) -> int:
-    """Scan executors with stale heartbeat; mark them unhealthy + reclaim work.
+) -> dict[str, int]:
+    """Per 03 §5: scan executors that missed heartbeats; transition through
+    the state machine; reclaim subtasks only on entry to suspect / faulty.
 
-    Threshold default 90s = 1.5× the executor default heartbeat interval (60s).
-    Returns total number of subtasks reclaimed across all stale executors.
+    Returns observability counters: {"transitioned": N, "reclaimed": M}.
+    Caller commits.
     """
+    from dlw.services.state_machine import transition_executor   # local: avoids cycle
+
     threshold = datetime.now(UTC) - timedelta(seconds=heartbeat_threshold_seconds)
-    stale = (await session.execute(
+    candidates = (await session.execute(
         select(Executor)
+        .where(Executor.status.in_(("healthy", "degraded", "suspect")))
         .where(Executor.last_heartbeat_at < threshold)
-        .where(Executor.status == "healthy")
+        .with_for_update(skip_locked=True)
     )).scalars().all()
 
-    reclaimed_total = 0
-    for ex in stale:
-        ex.status = "unhealthy"
-        n = await reclaim_subtasks(session, ex.id, ex.epoch)
-        reclaimed_total += n
-        logger.info(
-            "reclaimed %d subtasks from stale executor %s (epoch=%d)",
-            n, ex.id, ex.epoch,
+    counters = {"transitioned": 0, "reclaimed": 0}
+    for ex in candidates:
+        t = await transition_executor(
+            session, ex,
+            event="heartbeat_timeout",
+            reason="sweep_timeout",
+            metadata={"threshold_s": heartbeat_threshold_seconds},
         )
-
-    # W6-E: caller commits — lifespan loop wraps each call in `async with factory()`
-    return reclaimed_total
+        if t is None:
+            continue
+        counters["transitioned"] += 1
+        if t.to_status in ("suspect", "faulty"):
+            counters["reclaimed"] += await reclaim_subtasks(session, ex.id, ex.epoch)
+    return counters

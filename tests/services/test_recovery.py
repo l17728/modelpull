@@ -17,8 +17,8 @@ from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.db.models.tenant import Project, Tenant, User
 from dlw.services.recovery import (
     RecoveryStats,
-    reclaim_stale_executors,
     run_recovery_routine,
+    sweep_executor_timeouts,
     verify_remote_state,
 )
 
@@ -206,21 +206,20 @@ async def test_run_recovery_routine_aborts_orphan_multiparts(
 
 
 @pytest.mark.slow
-async def test_reclaim_stale_executors_marks_unhealthy_and_reclaims(
+async def test_sweep_transitions_stale_to_suspect_and_reclaims_w1(
     db_session, env,
 ) -> None:
-    """An executor whose last_heartbeat_at is too old becomes 'unhealthy',
-    and any of its 'assigned' subtasks return to 'pending'."""
-    # Insert a healthy executor with old heartbeat
+    """W2a successor of the W1 test: stale executor with counter==2 advances
+    to suspect on the 3rd timeout, and its 'assigned' subtask returns to 'pending'."""
     stale_time = datetime.now(UTC) - timedelta(seconds=300)
     db_session.add(Executor(
         id="stale-host-worker-1", host_id="stale-host",
         cert_fingerprint="x", status="healthy", epoch=1,
         last_heartbeat_at=stale_time,
+        consecutive_heartbeat_failures=2,   # W2a: 3rd timeout flips status.
     ))
     await db_session.flush()
 
-    # Claim a subtask
     task = DownloadTask(
         tenant_id=1, project_id=1, owner_user_id=1,
         repo_id="o/reclaim", revision="b" * 40, storage_id=1,
@@ -237,29 +236,27 @@ async def test_reclaim_stale_executors_marks_unhealthy_and_reclaims(
     db_session.add(sub)
     await db_session.flush()
 
-    n = await reclaim_stale_executors(db_session)
+    counters = await sweep_executor_timeouts(db_session)
     await db_session.flush()
-    assert n == 1   # one subtask reclaimed
+    assert counters["reclaimed"] == 1
 
     ex = await db_session.get(Executor, "stale-host-worker-1")
-    assert ex.status == "unhealthy"
+    assert ex.status == "suspect"
     refreshed = await db_session.get(FileSubTask, sub.id)
     assert refreshed.status == "pending"
     assert refreshed.executor_id is None
 
 
 @pytest.mark.slow
-async def test_reclaim_stale_executors_skips_recently_active(
-    db_session, env,
-) -> None:
-    """Executor with recent heartbeat is left alone."""
+async def test_sweep_skips_recently_active(db_session, env) -> None:
+    """Executor with recent heartbeat is left alone, counter unchanged."""
     db_session.add(Executor(
         id="active-host-worker-1", host_id="active-host",
         cert_fingerprint="x", status="healthy", epoch=1,
-        last_heartbeat_at=datetime.now(UTC),  # just now
+        last_heartbeat_at=datetime.now(UTC),
     ))
     await db_session.flush()
-    n = await reclaim_stale_executors(db_session)
-    assert n == 0
+    counters = await sweep_executor_timeouts(db_session)
+    assert counters == {"transitioned": 0, "reclaimed": 0}
     ex = await db_session.get(Executor, "active-host-worker-1")
     assert ex.status == "healthy"
