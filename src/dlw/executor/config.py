@@ -45,6 +45,24 @@ class ExecutorSettings(BaseSettings):
     multipart_part_size_bytes: int = Field(default=5 * 1024 * 1024, ge=5 * 1024 * 1024)
     download_timeout_seconds: int = Field(default=300, ge=10, le=3600)
 
+    # Phase 2 W2b1 — chunk-level downloader
+    chunk_level_threshold_bytes: int = Field(
+        default=100 * 1024 * 1024, ge=5 * 1024 * 1024,
+        description="Files >= this size use DirectOffsetDownloader; smaller use HfS3StreamDownloader.",
+    )
+    chunk_size_bytes: int = Field(
+        default=16 * 1024 * 1024, ge=5 * 1024 * 1024,
+        description="Per-chunk size for DirectOffsetDownloader (must satisfy S3 multipart 5 MiB min).",
+    )
+    chunk_concurrency: int = Field(
+        default=4, ge=1, le=16,
+        description="Parallel HTTP Range workers in DirectOffsetDownloader pass 1.",
+    )
+    parts_dir_path: str = Field(
+        default="./parts",
+        description="Local staging dir for chunk-level downloads. Configure to a writable PV in prod.",
+    )
+
     @model_validator(mode="after")
     def _derive_host_id(self) -> "ExecutorSettings":
         """If host_id not set, derive from id by stripping any -worker-N suffix.
