@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import uuid
+from unittest.mock import MagicMock
 
 import boto3
 import httpx
@@ -151,7 +152,8 @@ async def test_e2e_hf_to_s3_full_pipeline(
             )
 
             runner = ExecutorRunner(
-                settings=settings, client=executor_client, downloader=downloader,
+                settings=settings, client=executor_client,
+                stream_downloader=downloader, chunk_downloader=MagicMock(),
             )
 
             async with executor_client:

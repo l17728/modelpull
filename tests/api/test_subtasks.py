@@ -91,7 +91,7 @@ async def _setup_assigned_subtask(client, auth, repo_id="o/sub-test") -> tuple[s
     }, headers=auth)
     epoch = rj.json()["epoch"]
     await client.post(f"/api/v1/executors/{exec_id}/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(epoch)})
     r = await client.post(
         f"/api/v1/executors/{exec_id}/poll",
@@ -122,8 +122,9 @@ async def test_report_two_subtasks_succeed_then_task_succeeds(client, auth) -> N
     }, headers=auth)
     epoch = rj.json()["epoch"]
     # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
     await client.post("/api/v1/executors/ex-full/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(epoch)})
     sub_ids = []
     for _ in range(2):
@@ -152,8 +153,9 @@ async def test_report_one_failure_marks_task_failed(client, auth) -> None:
     }, headers=auth)
     epoch = rj.json()["epoch"]
     # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
     await client.post("/api/v1/executors/ex-fail/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(epoch)})
     r = await client.post(
         "/api/v1/executors/ex-fail/poll",
@@ -228,8 +230,9 @@ async def test_report_stale_epoch_returns_EPOCH_MISMATCH(
     epoch = rj.json()["epoch"]
 
     # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
     await client.post("/api/v1/executors/report-host-worker-1/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(epoch)})
 
     # Claim subtask via poll

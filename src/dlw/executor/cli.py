@@ -10,6 +10,7 @@ import logging
 import signal
 import sys
 
+from dlw.executor.chunk_downloader import DirectOffsetDownloader
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.downloader import HfS3StreamDownloader
@@ -38,8 +39,12 @@ async def _async_main(args: argparse.Namespace) -> int:
     client = ControllerClient(
         base_url=settings.controller_url, bearer_token=settings.bearer_token,
     )
-    downloader = HfS3StreamDownloader(settings=settings)
-    runner = ExecutorRunner(settings=settings, client=client, downloader=downloader)
+    stream = HfS3StreamDownloader(settings=settings)
+    chunk = DirectOffsetDownloader(settings=settings)
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=stream, chunk_downloader=chunk,
+    )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

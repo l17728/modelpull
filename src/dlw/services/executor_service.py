@@ -64,6 +64,8 @@ async def record_heartbeat(
         raise LookupError(f"executor {executor_id} not found (must POST /join first)")
     ex.health_score = body.health_score
     ex.parts_dir_bytes = body.parts_dir_bytes
+    if body.disk_free_gb is not None:
+        ex.disk_free_gb = body.disk_free_gb
     await transition_executor(
         session, ex,
         event="heartbeat_ok",

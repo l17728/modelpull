@@ -5,10 +5,16 @@ SKIP LOCKED ensures two concurrent claimants never get the same row.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+
+_K_CANDIDATES = int(os.environ.get("DLW_SCHEDULER_CANDIDATES", "16"))
+_DISK_SAFETY_MARGIN_BYTES = int(
+    os.environ.get("DLW_DISK_SAFETY_MARGIN_BYTES", str(200 * 1024 * 1024))
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.executor import Executor
@@ -51,25 +57,31 @@ async def claim_one_subtask(
         .exists()
     )
 
+    # W2b1: candidate scan with disk pre-flight.
+    GiB = 1024 ** 3
+    free_bytes = (e_self.disk_free_gb or 0) * GiB - (e_self.parts_dir_bytes or 0)
+
     stmt = (
         select(FileSubTask)
         .where(FileSubTask.status == "pending")
         .where(~same_host_holds)
         .order_by(FileSubTask.created_at)
-        .limit(1)
+        .limit(_K_CANDIDATES)
         .with_for_update(skip_locked=True)
     )
-    sub = (await session.execute(stmt)).scalar_one_or_none()
-    if sub is None:
-        return None, None
-
-    token = uuid.uuid4()
-    sub.status = "assigned"
-    sub.executor_id = executor_id
-    sub.executor_epoch = executor_epoch
-    sub.assignment_token = token
-    sub.assigned_at = datetime.now(UTC)
-    return sub, token
+    candidates = (await session.execute(stmt)).scalars().all()
+    for sub in candidates:
+        size = sub.file_size or 0
+        if size + _DISK_SAFETY_MARGIN_BYTES <= free_bytes:
+            token = uuid.uuid4()
+            sub.status = "assigned"
+            sub.executor_id = executor_id
+            sub.executor_epoch = executor_epoch
+            sub.assignment_token = token
+            sub.assigned_at = datetime.now(UTC)
+            return sub, token
+    # No candidate fit; other locked rows release on session commit.
+    return None, None
 
 
 async def complete_subtask(
@@ -106,6 +118,18 @@ async def complete_subtask(
             f"subtask {subtask_id} executor_epoch mismatch "
             f"(expected={sub.executor_epoch}, got={executor_epoch})"
         )
+
+    # W2b1: paused_disk_full short-circuits — environmental, not a quality signal.
+    if final_status == "paused_disk_full":
+        sub.status = "paused_disk_full"
+        sub.executor_id = None
+        sub.executor_epoch = None
+        sub.assignment_token = None
+        sub.assigned_at = None
+        sub.last_error = error
+        # Don't transition parent task; don't call transition_executor.
+        parent = await session.get(DownloadTask, sub.task_id)
+        return sub, parent
 
     # W4: sha256 verification gate
     if (

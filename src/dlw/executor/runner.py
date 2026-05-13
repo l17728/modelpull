@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import uuid
 
+from dlw.executor.chunk_downloader import DirectOffsetDownloader, DiskFullError
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.downloader import HfS3StreamDownloader
+from dlw.executor.parts_dir import startup_gc, total_parts_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +32,31 @@ class ExecutorRunner:
         *,
         settings: ExecutorSettings,
         client: ControllerClient,
-        downloader: HfS3StreamDownloader,
+        stream_downloader: HfS3StreamDownloader,
+        chunk_downloader: DirectOffsetDownloader,
     ) -> None:
         self._s = settings
         self._client = client
-        self._downloader = downloader
+        self._stream_downloader = stream_downloader
+        self._chunk_downloader = chunk_downloader
         self._shutdown = asyncio.Event()
+
+    def _choose_downloader(self, file_size: int | None):
+        threshold = self._s.chunk_level_threshold_bytes
+        if file_size is None or file_size >= threshold:
+            return self._chunk_downloader
+        return self._stream_downloader
 
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
     async def run(self) -> None:
+        # W2b1 §3.2: clean up any stale .parts/ dirs from a previous crash.
+        # active_subtask_ids=set() removes everything — W2b1 has no resume.
+        removed = startup_gc(self._s.parts_dir_path, active_subtask_ids=set())
+        if removed:
+            logger.info("startup_gc removed %d stale parts dirs", removed)
+
         # 1. Join (one-shot)
         await self._client.join(
             executor_id=self._s.id,
@@ -61,8 +78,19 @@ class ExecutorRunner:
     async def _heartbeat_loop(self) -> None:
         while not self._shutdown.is_set():
             try:
+                try:
+                    import os as _os
+                    _probe = self._s.parts_dir_path
+                    if not _os.path.exists(_probe):
+                        _probe = _os.path.dirname(_os.path.abspath(_probe)) or "."
+                    _du = shutil.disk_usage(_probe)
+                    _disk_free_gb = int(_du.free // (1024 ** 3))
+                except OSError:
+                    _disk_free_gb = None
                 await self._client.heartbeat(
-                    executor_id=self._s.id, health_score=100, parts_dir_bytes=0
+                    executor_id=self._s.id, health_score=100,
+                    parts_dir_bytes=total_parts_bytes(self._s.parts_dir_path),
+                    disk_free_gb=_disk_free_gb,
                 )
             except Exception as e:
                 logger.warning("heartbeat failed: %s", e)
@@ -146,7 +174,20 @@ class ExecutorRunner:
                 expected_sha256=subtask.get("expected_sha256"),
                 storage_config=StorageConfig(**storage_config),
             )
-            result = await self._downloader.download(assignment=assignment)
+            downloader = self._choose_downloader(assignment.file_size)
+            try:
+                result = await downloader.download(assignment=assignment)
+            except DiskFullError as e:
+                logger.warning("subtask %s paused_disk_full: %s", sub_id, e)
+                await self._client.report(
+                    subtask_id=sub_id,
+                    status="paused_disk_full",
+                    assignment_token=assignment_token,
+                    actual_sha256=None,
+                    bytes_downloaded=0,
+                    error=str(e),
+                )
+                return
             await self._client.report(
                 subtask_id=sub_id,
                 status="succeeded",

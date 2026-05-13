@@ -14,65 +14,25 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import uuid
-from dataclasses import dataclass
 from typing import Any
 
-import boto3
 import httpx
-from botocore.config import Config
-from tenacity import (
-    retry, retry_if_exception, stop_after_attempt, wait_exponential,
-)
 
+from dlw.executor._io import (
+    _HTTP_CHUNK_BYTES,
+    _TRANSIENT_RETRY,
+    compose_key as _compose_key_io,
+    make_http_client,
+    make_s3_client,
+    upload_part as _upload_part_io,
+)
 from dlw.executor.config import ExecutorSettings
+from dlw.executor.types import Assignment, DownloadResult  # re-exported for callers
 from dlw.schemas.storage import StorageConfig
 
+__all__ = ["Assignment", "DownloadResult", "HfS3StreamDownloader"]
+
 logger = logging.getLogger(__name__)
-
-_HTTP_CHUNK_BYTES = 64 * 1024
-
-
-def _is_transient_http(exc: BaseException) -> bool:
-    """5xx HTTP + network/timeout/protocol = transient (retry-worthy).
-
-    4xx errors (404 / 401 / 403) are NOT transient — config / repo issues
-    won't fix themselves, so fail fast. ProtocolError/RemoteProtocolError
-    covers mid-stream HF drops (W5-C).
-    """
-    if isinstance(exc, httpx.HTTPStatusError):
-        return 500 <= exc.response.status_code < 600
-    return isinstance(exc, (
-        httpx.NetworkError, httpx.TimeoutException, httpx.ProtocolError,
-    ))
-
-
-_TRANSIENT_RETRY = retry(
-    retry=retry_if_exception(_is_transient_http),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1.0, max=8.0),
-    reraise=True,
-)
-
-
-@dataclass(frozen=True)
-class Assignment:
-    """Slim payload passed from runner to downloader."""
-    subtask_id: uuid.UUID
-    task_id: uuid.UUID
-    repo_id: str
-    revision: str
-    filename: str
-    file_size: int | None
-    expected_sha256: str | None
-    storage_config: StorageConfig
-
-
-@dataclass(frozen=True)
-class DownloadResult:
-    bytes_written: int
-    actual_sha256: str
-    s3_key: str
 
 
 class HfS3StreamDownloader:
@@ -82,29 +42,14 @@ class HfS3StreamDownloader:
         self._s = settings
 
     def _compose_key(self, a: Assignment) -> str:
-        prefix = a.storage_config.key_prefix.strip("/")
-        parts = [p for p in (prefix, a.repo_id, a.revision, a.filename) if p]
-        return "/".join(parts)
+        return _compose_key_io(a)
 
     def _make_s3_client(self, cfg: StorageConfig) -> Any:
-        addressing = "path" if self._s.s3_path_style else "virtual"
-        boto_cfg = Config(
-            region_name=cfg.region,
-            s3={"addressing_style": addressing},
-        )
-        return boto3.client(
-            "s3",
-            region_name=cfg.region,
-            endpoint_url=cfg.endpoint_url or self._s.s3_endpoint_url,
-            config=boto_cfg,
-        )
+        return make_s3_client(self._s, cfg)
 
     def _make_http_client(self) -> httpx.AsyncClient:
         """Test seam — overridden in unit tests via monkeypatch."""
-        return httpx.AsyncClient(
-            timeout=self._s.download_timeout_seconds,
-            follow_redirects=True,
-        )
+        return make_http_client(self._s)
 
     async def download(self, *, assignment: Assignment) -> DownloadResult:
         """Public entry — retries transient errors (5xx, network, timeout) × 3."""
@@ -211,7 +156,4 @@ class HfS3StreamDownloader:
         s3: Any, bucket: str, key: str, upload_id: str,
         part_no: int, body: bytes,
     ) -> str:
-        return s3.upload_part(
-            Bucket=bucket, Key=key, UploadId=upload_id,
-            PartNumber=part_no, Body=body,
-        )["ETag"]
+        return _upload_part_io(s3, bucket, key, upload_id, part_no, body)

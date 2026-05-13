@@ -115,8 +115,9 @@ async def test_poll_returns_subtask_when_work_available(client, auth) -> None:
     epoch = r_join.json()["epoch"]
     # W2a: claim_one_subtask requires status='healthy'|'degraded'; join sets
     # 'joining'. One heartbeat transitions the executor to 'healthy'.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
     await client.post("/api/v1/executors/exec-poll-w/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(epoch)})
     r = await client.post("/api/v1/executors/exec-poll-w/poll",
                           headers={**auth, "X-Executor-Epoch": str(epoch)})
@@ -154,8 +155,9 @@ async def test_poll_returns_assignment_with_repo_and_storage_config(
     }, headers=auth)
     drain_epoch = r_drain_join.json()["epoch"]
     # W2a: claim_one_subtask requires healthy/degraded status; transition via heartbeat.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming during drain.
     await client.post("/api/v1/executors/host-x-drain/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(drain_epoch)})
     for _ in range(20):  # safety upper bound
         dr = await client.post("/api/v1/executors/host-x-drain/poll",
@@ -177,8 +179,9 @@ async def test_poll_returns_assignment_with_repo_and_storage_config(
     }, headers=auth)
     worker_epoch = r_worker_join.json()["epoch"]
     # W2a: heartbeat transitions joining → healthy so poll can claim work.
+    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
     await client.post("/api/v1/executors/host-x-worker-1/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                       headers={**auth, "X-Executor-Epoch": str(worker_epoch)})
 
     # Poll
