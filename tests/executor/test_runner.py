@@ -220,3 +220,67 @@ async def test_runner_passes_assignment_with_repo_and_storage(
     assert a.storage_config.key_prefix == "p/"
     assert captured["report_kw"]["status"] == "succeeded"
     assert captured["report_kw"]["s3_key"].startswith("p/o/runner-test/")
+
+
+@pytest.mark.slow
+async def test_runner_rejoins_on_epoch_mismatch() -> None:
+    """Runner: on 401 EPOCH_MISMATCH, abort current poll + re-join + continue."""
+    import httpx as _httpx
+    import uuid as _u
+    from dlw.executor.runner import ExecutorRunner
+    from dlw.executor.config import ExecutorSettings
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[str] = []
+            self._poll_returns_401_once = True
+            self._epoch: int | None = None
+
+        def current_epoch(self): return self._epoch
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+
+        async def join(self, *, executor_id, host_id, capabilities):
+            self.calls.append("join")
+            self._epoch = 2 if "join" in self.calls[:-1] else 1
+            return {"id": executor_id, "epoch": self._epoch, "status": "joining",
+                    "health_score": 100}
+
+        async def heartbeat(self, **kw):
+            self.calls.append("heartbeat")
+
+        async def poll(self, **kw):
+            self.calls.append("poll")
+            if self._poll_returns_401_once:
+                self._poll_returns_401_once = False
+                req = _httpx.Request("POST", "http://x/poll")
+                resp = _httpx.Response(
+                    401, json={"detail": {"code": "EPOCH_MISMATCH",
+                                          "expected": 2, "got": 1}}
+                )
+                raise _httpx.HTTPStatusError(
+                    "401", request=req, response=resp,
+                )
+            return {"assigned": False}
+
+        async def report(self, **kw): pass
+
+    settings = ExecutorSettings(
+        id="rj-host-worker-1", host_id="rj-host", bearer_token="t",
+        heartbeat_interval_seconds=1, poll_interval_seconds=1,
+    )
+
+    class FakeDl:
+        async def download(self, **kw):
+            raise AssertionError("downloader should NOT be invoked in this test")
+
+    runner = ExecutorRunner(settings=settings, client=FakeClient(), downloader=FakeDl())
+    run_task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)   # let 1-2 poll cycles run
+    runner.request_shutdown()
+    await asyncio.wait_for(run_task, timeout=3)
+
+    # join called at least twice (initial + after EPOCH_MISMATCH)
+    assert runner._client.calls.count("join") >= 2
+    assert "poll" in runner._client.calls

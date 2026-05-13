@@ -91,6 +91,20 @@ class FileSubTask(Base):
     executor_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     assignment_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
+    # Phase 2 W1 recovery: timestamps used by reclaim + recovery_routine.
+    # multipart_started_at is set when the executor begins multipart_upload;
+    # assigned_at is set on claim_one_subtask (used by recovery threshold);
+    # last_heartbeat_seen_at is updated when controller sees this subtask in a
+    # heartbeat report (P2-W2 will populate it; P2-W1 just adds the column).
+    multipart_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    assigned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_heartbeat_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     chunks_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunks_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

@@ -65,7 +65,7 @@ async def test_claim_returns_subtask_when_pending_exists(
     db_session: AsyncSession, engine
 ) -> None:
     await _make_pending_task(db_session, n_subtasks=1)
-    sub, token = await claim_one_subtask(db_session, executor_id="exec-A")
+    sub, token = await claim_one_subtask(db_session, executor_id="exec-A", executor_epoch=1)
     await db_session.commit()
     assert sub is not None
     assert token is not None
@@ -84,7 +84,7 @@ async def test_claim_returns_none_when_no_pending(db_session: AsyncSession) -> N
             update(FileSubTask).where(FileSubTask.status == "pending").values(status="assigned")
         )
         await cleanup.commit()
-    sub, token = await claim_one_subtask(db_session, executor_id="exec-A")
+    sub, token = await claim_one_subtask(db_session, executor_id="exec-A", executor_epoch=1)
     await db_session.commit()
     assert sub is None
     assert token is None
@@ -101,7 +101,7 @@ async def test_two_concurrent_claims_get_different_subtasks(
 
     async def claim_in_own_session() -> uuid.UUID | None:
         async with factory() as s:
-            sub, _ = await claim_one_subtask(s, executor_id="exec-A")
+            sub, _ = await claim_one_subtask(s, executor_id="exec-A", executor_epoch=1)
             await s.commit()
             return sub.id if sub else None
 
@@ -122,7 +122,7 @@ async def test_one_subtask_two_claimants_only_one_wins(
 
     async def claim_in_own_session() -> uuid.UUID | None:
         async with factory() as s:
-            sub, _ = await claim_one_subtask(s, executor_id="exec-A")
+            sub, _ = await claim_one_subtask(s, executor_id="exec-A", executor_epoch=1)
             await s.commit()
             return sub.id if sub else None
 
@@ -145,14 +145,14 @@ async def test_third_claim_returns_none_when_all_assigned(
         await cleanup.commit()
     await _make_pending_task(db_session, n_subtasks=2)
     async with factory() as s:
-        sub1, _ = await claim_one_subtask(s, executor_id="exec-A")
+        sub1, _ = await claim_one_subtask(s, executor_id="exec-A", executor_epoch=1)
         await s.commit()
     async with factory() as s:
-        sub2, _ = await claim_one_subtask(s, executor_id="exec-A")
+        sub2, _ = await claim_one_subtask(s, executor_id="exec-A", executor_epoch=1)
         await s.commit()
     assert sub1 is not None and sub2 is not None
     async with factory() as s:
-        sub3, _ = await claim_one_subtask(s, executor_id="exec-A")
+        sub3, _ = await claim_one_subtask(s, executor_id="exec-A", executor_epoch=1)
         await s.commit()
     assert sub3 is None
 
@@ -264,3 +264,127 @@ async def test_complete_subtask_persists_s3_key(
         s3_key="phase1/o/r/abc123/config.json",
     )
     assert sub_returned.s3_key == "phase1/o/r/abc123/config.json"
+
+
+async def _make_pending_subtask(session: AsyncSession) -> uuid.UUID:
+    """Helper: create a task with one pending subtask; returns the subtask id."""
+    return await _make_pending_subtask_with_expected_sha(session, None)
+
+
+@pytest.mark.slow
+async def test_claim_writes_executor_epoch(db_session: AsyncSession, env) -> None:
+    """P2-W1: claim_one_subtask must persist the executor_epoch passed in."""
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=5)
+    assert sub is not None
+    assert sub.executor_epoch == 5
+
+
+@pytest.mark.slow
+async def test_claim_writes_assigned_at(db_session: AsyncSession, env) -> None:
+    """P2-W1: claim_one_subtask must set assigned_at to a recent timestamp."""
+    from datetime import UTC, datetime, timedelta
+
+    before = datetime.now(UTC) - timedelta(seconds=1)
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=1)
+    after = datetime.now(UTC) + timedelta(seconds=1)
+    assert sub is not None
+    assert sub.assigned_at is not None
+    assert before <= sub.assigned_at <= after
+
+
+@pytest.mark.slow
+async def test_complete_subtask_rejects_stale_epoch(db_session, env) -> None:
+    """P2-W1: complete_subtask must reject stale executor_epoch."""
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=5)
+    await db_session.flush()
+
+    # Executor sends report with epoch=4 (stale — controller bumped to 5 since claim)
+    with pytest.raises(ValueError, match="executor_epoch mismatch"):
+        await complete_subtask(
+            db_session, sub.id,
+            final_status="succeeded",
+            actual_sha256=None,
+            bytes_downloaded=4096,
+            error=None,
+            assignment_token=token,
+            executor_epoch=4,         # stale
+        )
+
+
+@pytest.mark.slow
+async def test_complete_subtask_accepts_matching_epoch(db_session, env) -> None:
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "host-x-worker-1", executor_epoch=5)
+    await db_session.flush()
+
+    sub_returned, _ = await complete_subtask(
+        db_session, sub.id,
+        final_status="succeeded",
+        actual_sha256=None,
+        bytes_downloaded=4096,
+        error=None,
+        assignment_token=token,
+        executor_epoch=5,             # matches
+    )
+    assert sub_returned.status == "succeeded"
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_resets_assigned(db_session, env) -> None:
+    """reclaim_subtasks: assigned → pending; clears executor_id/epoch/token."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "stale-host-worker-1", executor_epoch=7)
+    await db_session.flush()
+    assert sub.status == "assigned"
+    assert sub.executor_id == "stale-host-worker-1"
+
+    n = await reclaim_subtasks(db_session, "stale-host-worker-1", current_epoch=7)
+    await db_session.flush()
+    assert n == 1
+    refreshed = await db_session.get(FileSubTask, sub.id)
+    assert refreshed.status == "pending"
+    assert refreshed.executor_id is None
+    assert refreshed.executor_epoch is None
+    assert refreshed.assignment_token is None
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_skips_other_epoch(db_session, env) -> None:
+    """If executor re-joined and got new epoch, old-epoch reclaim is a no-op."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, _ = await claim_one_subtask(db_session, "newer-host-worker-1", executor_epoch=9)
+    await db_session.flush()
+
+    # Stale reclaim with old epoch
+    n = await reclaim_subtasks(db_session, "newer-host-worker-1", current_epoch=8)
+    await db_session.flush()
+    assert n == 0  # WHERE epoch=8 doesn't match epoch=9 → no-op
+    refreshed = await db_session.get(FileSubTask, sub.id)
+    assert refreshed.status == "assigned"
+    assert refreshed.executor_id == "newer-host-worker-1"
+
+
+@pytest.mark.slow
+async def test_reclaim_subtasks_skips_succeeded(db_session, env) -> None:
+    """reclaim only touches status=assigned; succeeded rows are untouched."""
+    from dlw.services.scheduler import reclaim_subtasks
+
+    sub_id = await _make_pending_subtask(db_session)
+    sub, token = await claim_one_subtask(db_session, "done-host-worker-1", executor_epoch=1)
+    await db_session.flush()
+    await complete_subtask(
+        db_session, sub.id, final_status="succeeded",
+        actual_sha256=None, bytes_downloaded=100, error=None,
+        assignment_token=token, executor_epoch=1,
+    )
+    await db_session.flush()
+
+    n = await reclaim_subtasks(db_session, "done-host-worker-1", current_epoch=1)
+    assert n == 0  # status='succeeded' is not in the WHERE clause

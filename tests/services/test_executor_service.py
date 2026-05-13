@@ -1,6 +1,7 @@
 """Tests for executor_service: join + heartbeat upsert."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -67,3 +68,49 @@ async def test_heartbeat_unknown_executor_raises(db_session: AsyncSession) -> No
             db_session, "no-such-executor",
             ExecutorHeartbeat(),
         )
+
+
+@pytest.fixture(scope="module")
+async def env():
+    """No-op: _create_tables autouse fixture ensures tables exist."""
+
+
+@pytest.mark.slow
+async def test_join_first_time_returns_epoch_1(db_session: AsyncSession, env) -> None:
+    """First /join for a brand new executor_id assigns epoch=1."""
+    body = ExecutorJoin(id="new-host-worker-1", host_id="new-host")
+    ex = await join_executor(db_session, body)
+    assert ex.epoch == 1
+
+
+@pytest.mark.slow
+async def test_join_existing_executor_increments_epoch(
+    db_session: AsyncSession, env,
+) -> None:
+    """Repeated /join for same id bumps epoch atomically: 1 → 2 → 3."""
+    body = ExecutorJoin(id="bump-host-worker-1", host_id="bump-host")
+    ex1 = await join_executor(db_session, body); await db_session.commit()
+    assert ex1.epoch == 1
+    ex2 = await join_executor(db_session, body); await db_session.commit()
+    assert ex2.epoch == 2
+    ex3 = await join_executor(db_session, body); await db_session.commit()
+    assert ex3.epoch == 3
+
+
+@pytest.mark.slow
+async def test_join_concurrent_returns_distinct_epochs(
+    engine, env,
+) -> None:
+    """asyncio.gather × 2 join calls for the same id must yield distinct epochs."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    body = ExecutorJoin(id="race-host-worker-1", host_id="race-host")
+
+    async def join_in_own_session():
+        async with factory() as s:
+            ex = await join_executor(s, body)
+            await s.commit()
+            return ex.epoch
+
+    epochs = await asyncio.gather(join_in_own_session(), join_in_own_session())
+    assert sorted(epochs) == [1, 2]  # PG atomic; one wins INSERT, the other UPDATE

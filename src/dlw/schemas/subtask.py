@@ -33,3 +33,7 @@ class SubTaskReport(BaseModel):
     bytes_downloaded: int = Field(default=0, ge=0)
     s3_key: str | None = Field(default=None, max_length=1024)
     error: str | None = Field(default=None, max_length=2048)
+    executor_epoch: int | None = Field(
+        default=None,
+        description="Executor's current epoch (fence). Must match subtask.executor_epoch.",
+    )

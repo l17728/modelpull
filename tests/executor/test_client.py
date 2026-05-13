@@ -102,3 +102,76 @@ async def test_unauthenticated_returns_401(transport) -> None:
     async with ControllerClient(base_url="http://test", bearer_token="bad", _transport=t) as c:
         with pytest.raises(httpx.HTTPStatusError):
             await c.heartbeat(executor_id="ex-1", health_score=100, parts_dir_bytes=0)
+
+
+@pytest.mark.slow
+async def test_client_persists_epoch_from_join_response() -> None:
+    """After join(), client should store the response epoch internally."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={
+            "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 7,
+        })
+
+    transport = httpx.MockTransport(handler)
+    async with ControllerClient(
+        base_url="http://test", bearer_token="t", _transport=transport,
+    ) as c:
+        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
+        assert c.current_epoch() == 7
+
+
+@pytest.mark.slow
+async def test_client_attaches_epoch_header_on_heartbeat() -> None:
+    """heartbeat must send X-Executor-Epoch matching the join response."""
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append({k.lower(): v for k, v in request.headers.items()})
+        if request.url.path.endswith("/join"):
+            return httpx.Response(201, json={
+                "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 5,
+            })
+        return httpx.Response(200, json={
+            "id": "h-w-1", "status": "healthy", "health_score": 100, "epoch": 5,
+        })
+
+    transport = httpx.MockTransport(handler)
+    async with ControllerClient(
+        base_url="http://test", bearer_token="t", _transport=transport,
+    ) as c:
+        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
+        await c.heartbeat(executor_id="h-w-1", health_score=100, parts_dir_bytes=0)
+
+    assert "x-executor-epoch" in seen_headers[1]
+    assert seen_headers[1]["x-executor-epoch"] == "5"
+
+
+@pytest.mark.slow
+async def test_client_attaches_epoch_header_on_report() -> None:
+    seen_headers: list[dict[str, str]] = []
+    import uuid as _uuid
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append({k.lower(): v for k, v in request.headers.items()})
+        if request.url.path.endswith("/join"):
+            return httpx.Response(201, json={
+                "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 11,
+            })
+        return httpx.Response(200, json={
+            "subtask_status": "succeeded", "task_status": "succeeded",
+        })
+
+    transport = httpx.MockTransport(handler)
+    async with ControllerClient(
+        base_url="http://test", bearer_token="t", _transport=transport,
+    ) as c:
+        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
+        await c.report(
+            subtask_id=_uuid.uuid4(),
+            status="succeeded",
+            assignment_token=_uuid.uuid4(),
+            actual_sha256="a" * 64,
+            bytes_downloaded=4096,
+        )
+
+    assert seen_headers[1]["x-executor-epoch"] == "11"

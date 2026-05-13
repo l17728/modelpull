@@ -22,6 +22,10 @@ class Executor(Base):
     parent_executor_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cert_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Phase 2 W1 fence token: monotonic counter bumped atomically on every /join.
+    # First /join sets epoch=1; re-join (post-crash or after EPOCH_MISMATCH) bumps it.
+    # All non-join executor requests carry X-Executor-Epoch which controller verifies.
+    epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     health_score: Mapped[int] = mapped_column(SmallInteger, default=100, nullable=False)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
