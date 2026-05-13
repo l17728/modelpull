@@ -119,6 +119,18 @@ async def complete_subtask(
             f"(expected={sub.executor_epoch}, got={executor_epoch})"
         )
 
+    # W2b1: paused_disk_full short-circuits — environmental, not a quality signal.
+    if final_status == "paused_disk_full":
+        sub.status = "paused_disk_full"
+        sub.executor_id = None
+        sub.executor_epoch = None
+        sub.assignment_token = None
+        sub.assigned_at = None
+        sub.last_error = error
+        # Don't transition parent task; don't call transition_executor.
+        parent = await session.get(DownloadTask, sub.task_id)
+        return sub, parent
+
     # W4: sha256 verification gate
     if (
         final_status == "succeeded"

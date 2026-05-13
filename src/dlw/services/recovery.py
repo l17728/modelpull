@@ -292,6 +292,34 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
     return stats
 
 
+async def sweep_paused_disk_full(session: AsyncSession) -> int:
+    """W2b1 §3.7: recover paused_disk_full subtasks whose owning executor now
+    has enough disk. Returns count recovered to pending. Caller commits."""
+    from dlw.services.scheduler import _DISK_SAFETY_MARGIN_BYTES
+
+    GiB = 1024 ** 3
+
+    rows = (await session.execute(
+        select(FileSubTask, Executor)
+        .join(Executor, Executor.id == FileSubTask.executor_id)
+        .where(FileSubTask.status == "paused_disk_full")
+        .with_for_update(skip_locked=True, of=FileSubTask)
+    )).all()
+
+    recovered = 0
+    for sub, ex in rows:
+        size = sub.file_size or 0
+        free_bytes = (ex.disk_free_gb or 0) * GiB - (ex.parts_dir_bytes or 0)
+        if size + _DISK_SAFETY_MARGIN_BYTES <= free_bytes:
+            sub.status = "pending"
+            sub.executor_id = None
+            sub.executor_epoch = None
+            sub.assignment_token = None
+            sub.assigned_at = None
+            recovered += 1
+    return recovered
+
+
 async def sweep_executor_timeouts(
     session: AsyncSession,
     *,

@@ -62,14 +62,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 async def _sweep_loop_main(factory) -> None:
-    """Background task: every N seconds, transition stale executors + reclaim."""
-    from dlw.services.recovery import sweep_executor_timeouts
+    """Background task: every N seconds, transition stale executors + reclaim
+    + recover paused_disk_full subtasks."""
+    from dlw.services.recovery import sweep_executor_timeouts, sweep_paused_disk_full
 
     while True:
         try:
             await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             async with factory() as session:
                 await sweep_executor_timeouts(session)
+                await sweep_paused_disk_full(session)
                 await session.commit()
         except asyncio.CancelledError:
             raise

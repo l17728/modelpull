@@ -23,7 +23,7 @@ class SubTaskRead(BaseModel):
 
 class SubTaskReport(BaseModel):
     """POST /api/v1/subtasks/{id}/report request body — executor reports outcome."""
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "failed", "paused_disk_full"]
     assignment_token: uuid.UUID | None = Field(
         default=None,
         description="Token from /poll's AssignmentResponse — verified against "
