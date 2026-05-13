@@ -2049,6 +2049,8 @@ components:
           type: string
         status:
           type: string
+          enum: [joining, healthy, degraded, suspect, faulty]
+          description: Executor lifecycle state (W2a §6).
         health_score:
           type: integer
           minimum: 0
