@@ -14,7 +14,7 @@
 
 Two orthogonal-but-co-shipped concerns that both touch `executors`:
 
-1. **Executor state machine.** Replace the Phase-1 boolean `{healthy, unhealthy}` with the four-state finite machine specified in `03 §5.3` — `{healthy, degraded, suspect, faulty}` — eliminating the D3 "degraded↔suspect pump" by tracking `degraded_failure_streak` and `degraded_recoveries` and graduating to `faulty` once the streak hits 10. Every status change is durably recorded in a new `executor_status_history` table. All status writes are routed through a single service function `transition_executor()`; a CI lint forbids direct `ex.status =` writes elsewhere.
+1. **Executor state machine.** Replace the Phase-1 ad-hoc value domain `{joining, healthy, unhealthy}` — W1 introduced `joining` as a rejoin reset that the next heartbeat flips to `healthy` — with the five-state finite machine `{joining, healthy, degraded, suspect, faulty}` aligned with `03 §5.3`. `joining` is retained because the atomic INSERT-or-bump in `join_executor` (W1) needs an initial status that does not yet imply scheduling eligibility; the next heartbeat transitions `joining → healthy` through the state machine. The D3 "degraded↔suspect pump" is eliminated by tracking `degraded_failure_streak` and `degraded_recoveries` and graduating to `faulty` once the streak hits 10. Every status change is durably recorded in a new `executor_status_history` table. All status writes are routed through a single service function `transition_executor()`; a CI lint forbids direct `ex.status =` writes elsewhere (the only allowlisted writer is `state_machine.py`; `join_executor` uses `pg_insert.values(status=...)` which is a SQL-builder kwarg, not a Python attribute assignment, so the lint pattern does not match it).
 
 2. **Scheduler host-affinity reverse constraint.** Make `claim_one_subtask` aware of executor health (only `healthy` / `degraded` can be assigned new work) and add the negative side of INVARIANT D-10: a subtask cannot be assigned to an executor on a host that already has another executor holding an `assigned` sibling subtask for the same file. In W2a a file maps to exactly one subtask (`UniqueConstraint(task_id, filename)`), so the constraint is effectively a NOOP at runtime today — but the SQL is the load-bearing piece for W2b's chunk-level expansion (where one file fans out to N chunk subtasks), and W2a verifies its semantics with synthetic test data.
 
@@ -215,7 +215,9 @@ await session.commit()
 
 `transition_executor` updates `last_heartbeat_at` + zeroes `consecutive_heartbeat_failures` internally on `heartbeat_ok`. The endpoint no longer touches `ex.status` directly.
 
-`POST /executors` (`/join`) is unchanged in W2a — new executors still come up `healthy` with `epoch += 1` (W1 behaviour). Probationary onboarding is Phase 3.
+`POST /executors` (`/join`) is unchanged in W2a — W1's `join_executor` continues to write `status="joining"` atomically via `pg_insert.values(...)` + `ON CONFLICT DO UPDATE`. The first heartbeat after join flips it to `healthy` through `transition_executor(event=heartbeat_ok)`. Probationary onboarding is Phase 3.
+
+**`record_heartbeat` (in `src/dlw/services/executor_service.py`) is refactored.** Its existing inline `if ex.status == "joining": ex.status = "healthy"` write is removed; the function instead calls `transition_executor(session, ex, event="heartbeat_ok", reason="hb_received", metadata={"health_score": body.health_score})`. The other side-effects of `record_heartbeat` (writing `health_score` and `parts_dir_bytes` from the request body) stay inline — these are non-status fields and outside the state machine's domain.
 
 **Faulty executor heartbeat handling.** A `faulty` executor that still sends heartbeats: `transition_executor(event=heartbeat_ok)` zeroes `consecutive_heartbeat_failures` and updates `last_heartbeat_at`, but does NOT change status (the rule table in §6 only flips `suspect → degraded` on heartbeat_ok; other states are unchanged). This is intentional for W2a — admin-driven recovery (`reason='admin'`) is the only path back to healthy / degraded from faulty. A future spec (Phase 2 W3 with HMAC heartbeat or Phase 3 with admin CLI) can add a 403 gate at the endpoint level.
 
@@ -240,7 +242,7 @@ Wired into the existing `Invariant + cross-ref lint` job in `.github/workflows/c
 
 The tool exits non-zero with a clear message listing offending file:line. Self-test fixture under `tests/lint/fixtures/bad_executor_status_write.py` proves the lint catches a violation.
 
-**Also extends the existing `tools/lint_invariants.py`** in the same job: add an assertion that the `executors.status` value domain is exactly `{healthy, degraded, suspect, faulty}` (lints `src/dlw/db/models/executor.py` + `src/dlw/services/state_machine.py` for any string literal assigned to a `status` field outside that set), and assert at least one test file name matches `*host*affinity*` (so INVARIANT D-10 has a discoverable test owner).
+**Also extends the existing `tools/lint_invariants.py`** in the same job: add an assertion that the `executors.status` value domain is exactly `{joining, healthy, degraded, suspect, faulty}` (lints `src/dlw/services/state_machine.py` + `src/dlw/services/executor_service.py` for any string literal assigned to a `status` kwarg or attribute outside that set), and assert at least one test file name matches `*host*affinity*` (so INVARIANT D-10 has a discoverable test owner).
 
 ---
 
@@ -272,7 +274,8 @@ def upgrade() -> None:
         ["executor_id", sa.text("transitioned_at DESC")],
     )
 
-    # 2. Data migration: legacy 'unhealthy' → 'faulty'
+    # 2. Data migration: legacy 'unhealthy' → 'faulty'. 'joining' rows
+    #    are left untouched — they remain valid in the W2a domain.
     op.execute("UPDATE executors SET status = 'faulty' WHERE status = 'unhealthy'")
 
     # 3. Synthetic history row for each migrated executor
@@ -298,7 +301,7 @@ def downgrade() -> None:
 
 The `status` column stays `String(32)` (no PG enum). The value domain is enforced by:
 
-- INVARIANT lint (`tools/lint_invariants.py`) — add a new asserted set `{healthy, degraded, suspect, faulty}` for `executors.status`.
+- INVARIANT lint (`tools/lint_invariants.py`) — add a new asserted set `{joining, healthy, degraded, suspect, faulty}` for `executors.status`.
 - `transition_executor()` being the single writer.
 
 ---
@@ -321,7 +324,7 @@ This is the single source of truth that `transition_executor()` implements. CI t
 
 | Event | Counter changes | Transition rule |
 |-------|-----------------|-----------------|
-| `heartbeat_ok` | `consecutive_heartbeat_failures := 0`; `last_heartbeat_at := now()` | `suspect → degraded` (reason `"hb_recovered"`); else status unchanged |
+| `heartbeat_ok` | `consecutive_heartbeat_failures := 0`; `last_heartbeat_at := now()` | `joining → healthy` (reason `"first_hb"`); `suspect → degraded` (reason `"hb_recovered"`); else status unchanged |
 | `heartbeat_timeout` | `consecutive_heartbeat_failures += 1` | `healthy → suspect` when counter ≥ `HB_TIMEOUT_TO_SUSPECT` (3); `degraded → suspect` same threshold (reason `"hb_timeout_3_from_degraded"`); `suspect → faulty` when counter ≥ `HB_TIMEOUT_TO_FAULTY` (6) |
 | `task_success` | `consecutive_task_failures := 0`; if `degraded`: `degraded_recoveries += 1` | `degraded → healthy` when `degraded_recoveries ≥ DEGRADED_RECOVER_OK` (5); reset `degraded_failure_streak := 0` and `degraded_recoveries := 0` on entry to healthy |
 | `task_failure` | if `healthy`: `consecutive_task_failures += 1`; if `degraded`: `degraded_failure_streak += 1` | `healthy → degraded` when `consecutive_task_failures ≥ TASK_FAIL_TO_DEGRADED` (3); `degraded → faulty` when `degraded_failure_streak ≥ DEGRADED_STREAK_FAULTY` (10) |
@@ -329,6 +332,7 @@ This is the single source of truth that `transition_executor()` implements. CI t
 
 **Invariants enforced inside `transition_executor`:**
 
+- `joining` accepts only `heartbeat_ok` and `admin` events. Receiving `task_success` / `task_failure` / `heartbeat_timeout` on `joining` logs a `WARNING` and is a no-op (joining executors hold no work yet — a heartbeat_timeout sweep can hit a stale joining row, but the right correction is admin intervention or the next /join bumping the row).
 - `suspect` and `faulty` are terminal-for-work: receiving `task_success` / `task_failure` on either logs a `WARNING` (a zombie completion or a race the W1 fence missed) but does not mutate counters or status.
 - Every transition writes exactly one `executor_status_history` row, atomic with the status change (same SQLAlchemy unit-of-work, same session, same commit by caller).
 - Counter resets on entry to `healthy` are mandatory (the entire D3 fix hinges on `degraded_failure_streak := 0` happening when we leave degraded).
@@ -396,8 +400,8 @@ No new env vars (the five tunables in §3.1 default-to-spec values; env override
 - [ ] `tools/lint_no_direct_status_write.py` reports 0 violations on `main` and the W2a branch.
 - [ ] The lint self-test fixture (under `tests/lint/fixtures/`) provably fails the linter — verified by `tests/lint/test_no_direct_status_write.py`.
 - [ ] `tools/lint_invariants.py` extended check: `executors.status` value domain `{healthy, degraded, suspect, faulty}` and `INVARIANT D-10` appears in at least one test name (`test_*host*affinity*`).
-- [ ] Code review: `Executor.status` is written in exactly one source file — `src/dlw/services/state_machine.py`.
-- [ ] OpenAPI spec `api/openapi.yaml`: `ExecutorRead.status` enum lists the four new values; spectral CI passes.
+- [ ] Code review: `Executor.status` is written via Python attribute assignment in exactly one source file — `src/dlw/services/state_machine.py`. `join_executor` continues to set the initial `joining` status via SQL-builder kwargs (`pg_insert.values(status="joining")`), which is not Python attribute assignment and is correctly excluded by the lint pattern.
+- [ ] OpenAPI spec `api/openapi.yaml`: `ExecutorRead.status` enum lists `{joining, healthy, degraded, suspect, faulty}`; spectral CI passes.
 - [ ] No new runtime deps; no new dev deps; no new CI jobs.
 
 ---
