@@ -35,6 +35,7 @@ dev = [
 
 [project.scripts]
 dlw-executor = "dlw.executor.cli:main"
+dlw-seed = "dlw.cli.seed:main"
 
 [build-system]
 requires = ["hatchling"]
