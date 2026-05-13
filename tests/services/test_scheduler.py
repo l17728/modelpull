@@ -40,6 +40,16 @@ async def env(engine: AsyncEngine):
                               backend_type="s3", config_encrypted=b""))
         s.add(Executor(id="exec-A", host_id="ha",
                         cert_fingerprint="fp", status="healthy"))
+        # W2a: claim_one_subtask now checks executor eligibility; seed all IDs
+        # used in W1 tests so the new status-eligibility gate doesn't block them.
+        s.add(Executor(id="host-x-worker-1", host_id="hx",
+                        cert_fingerprint="fp", status="healthy"))
+        s.add(Executor(id="stale-host-worker-1", host_id="hs",
+                        cert_fingerprint="fp", status="healthy"))
+        s.add(Executor(id="newer-host-worker-1", host_id="hn",
+                        cert_fingerprint="fp", status="healthy"))
+        s.add(Executor(id="done-host-worker-1", host_id="hd",
+                        cert_fingerprint="fp", status="healthy"))
         await s.commit()
 
 

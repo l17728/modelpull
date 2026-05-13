@@ -77,7 +77,11 @@ async def joined_executor(client: AsyncClient, auth: dict[str, str]) -> tuple[st
 
 
 async def _setup_assigned_subtask(client, auth, repo_id="o/sub-test") -> tuple[str, str, int]:
-    """Helper: create task → join executor → poll → return (subtask_id, exec_id, epoch)."""
+    """Helper: create task → join executor → heartbeat → poll → return (subtask_id, exec_id, epoch).
+
+    W2a: claim_one_subtask requires status='healthy'|'degraded'. A heartbeat
+    after join transitions the executor from 'joining' to 'healthy'.
+    """
     await client.post("/api/v1/tasks", json={
         "repo_id": repo_id, "revision": "0" * 40, "storage_id": 1,
     }, headers=auth)
@@ -86,6 +90,9 @@ async def _setup_assigned_subtask(client, auth, repo_id="o/sub-test") -> tuple[s
         "id": exec_id, "host_id": "h"
     }, headers=auth)
     epoch = rj.json()["epoch"]
+    await client.post(f"/api/v1/executors/{exec_id}/heartbeat",
+                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      headers={**auth, "X-Executor-Epoch": str(epoch)})
     r = await client.post(
         f"/api/v1/executors/{exec_id}/poll",
         headers={**auth, "X-Executor-Epoch": str(epoch)},
@@ -114,6 +121,10 @@ async def test_report_two_subtasks_succeed_then_task_succeeds(client, auth) -> N
         "id": "ex-full", "host_id": "h"
     }, headers=auth)
     epoch = rj.json()["epoch"]
+    # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    await client.post("/api/v1/executors/ex-full/heartbeat",
+                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      headers={**auth, "X-Executor-Epoch": str(epoch)})
     sub_ids = []
     for _ in range(2):
         r = await client.post(
@@ -140,6 +151,10 @@ async def test_report_one_failure_marks_task_failed(client, auth) -> None:
         "id": "ex-fail", "host_id": "h"
     }, headers=auth)
     epoch = rj.json()["epoch"]
+    # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    await client.post("/api/v1/executors/ex-fail/heartbeat",
+                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      headers={**auth, "X-Executor-Epoch": str(epoch)})
     r = await client.post(
         "/api/v1/executors/ex-fail/poll",
         headers={**auth, "X-Executor-Epoch": str(epoch)},
@@ -211,6 +226,11 @@ async def test_report_stale_epoch_returns_EPOCH_MISMATCH(
         "id": "report-host-worker-1", "host_id": "report-host",
     }, headers=auth)
     epoch = rj.json()["epoch"]
+
+    # W2a: heartbeat transitions joining → healthy before poll can claim work.
+    await client.post("/api/v1/executors/report-host-worker-1/heartbeat",
+                      json={"health_score": 100, "parts_dir_bytes": 0},
+                      headers={**auth, "X-Executor-Epoch": str(epoch)})
 
     # Claim subtask via poll
     rp = await client.post(

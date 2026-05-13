@@ -18,18 +18,43 @@ from dlw.db.models.task import DownloadTask, FileSubTask
 async def claim_one_subtask(
     session: AsyncSession,
     executor_id: str,
-    executor_epoch: int,                       # NEW (P2-W1)
+    executor_epoch: int,
 ) -> tuple[FileSubTask | None, uuid.UUID | None]:
     """Atomically grab one pending subtask for this executor.
 
-    Returns (None, None) if no pending subtasks. Caller must commit() to
-    finalize the claim (the row stays locked until commit/rollback).
+    W2a §3.3: enforces two constraints in addition to W1's status='pending'.
+      (a) calling executor must exist and be in ('healthy', 'degraded'); else
+          returns (None, None) without locking any row.
+      (b) reverse host-affinity per INVARIANT D-10: no row whose (task_id,
+          filename) is held by another executor on the same host_id.
 
-    P2-W1: also writes executor_epoch (fence) and assigned_at (recovery threshold).
+    Caller must commit() to finalize the claim.
     """
+    from sqlalchemy.orm import aliased
+
+    # (a) Self-eligibility — read first, return early if ineligible.
+    e_self = await session.get(Executor, executor_id)
+    if e_self is None or e_self.status not in ("healthy", "degraded"):
+        return None, None
+
+    # (b) Reverse host-affinity NOT EXISTS clause.
+    sib = aliased(FileSubTask)
+    e_other = aliased(Executor)
+    same_host_holds = (
+        select(sib.id)
+        .join(e_other, e_other.id == sib.executor_id)
+        .where(sib.task_id == FileSubTask.task_id)
+        .where(sib.filename == FileSubTask.filename)
+        .where(sib.status == "assigned")
+        .where(e_other.host_id == e_self.host_id)
+        .where(e_other.id != executor_id)
+        .exists()
+    )
+
     stmt = (
         select(FileSubTask)
         .where(FileSubTask.status == "pending")
+        .where(~same_host_holds)
         .order_by(FileSubTask.created_at)
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -41,9 +66,9 @@ async def claim_one_subtask(
     token = uuid.uuid4()
     sub.status = "assigned"
     sub.executor_id = executor_id
-    sub.executor_epoch = executor_epoch        # NEW (P2-W1)
+    sub.executor_epoch = executor_epoch
     sub.assignment_token = token
-    sub.assigned_at = datetime.now(UTC)        # NEW (P2-W1)
+    sub.assigned_at = datetime.now(UTC)
     return sub, token
 
 
