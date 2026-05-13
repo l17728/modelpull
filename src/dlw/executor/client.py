@@ -96,11 +96,22 @@ class ControllerClient:
         return body
 
     async def heartbeat(
-        self, *, executor_id: str, health_score: int, parts_dir_bytes: int
+        self,
+        *,
+        executor_id: str,
+        health_score: int,
+        parts_dir_bytes: int,
+        disk_free_gb: int | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "health_score": health_score,
+            "parts_dir_bytes": parts_dir_bytes,
+        }
+        if disk_free_gb is not None:
+            body["disk_free_gb"] = disk_free_gb
         return await self._post(
             f"/api/v1/executors/{executor_id}/heartbeat",
-            {"health_score": health_score, "parts_dir_bytes": parts_dir_bytes},
+            body,
             extra_headers=self._epoch_headers(),
         )
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import uuid
 
 from dlw.executor.chunk_downloader import DirectOffsetDownloader, DiskFullError
@@ -77,9 +78,19 @@ class ExecutorRunner:
     async def _heartbeat_loop(self) -> None:
         while not self._shutdown.is_set():
             try:
+                try:
+                    import os as _os
+                    _probe = self._s.parts_dir_path
+                    if not _os.path.exists(_probe):
+                        _probe = _os.path.dirname(_os.path.abspath(_probe)) or "."
+                    _du = shutil.disk_usage(_probe)
+                    _disk_free_gb = int(_du.free // (1024 ** 3))
+                except OSError:
+                    _disk_free_gb = None
                 await self._client.heartbeat(
                     executor_id=self._s.id, health_score=100,
                     parts_dir_bytes=total_parts_bytes(self._s.parts_dir_path),
+                    disk_free_gb=_disk_free_gb,
                 )
             except Exception as e:
                 logger.warning("heartbeat failed: %s", e)

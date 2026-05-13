@@ -81,10 +81,12 @@ async def test_claim_skips_when_same_host_other_executor_holds_file(
     db_session.add(Executor(
         id="ex-A1", host_id="host-1", cert_fingerprint="x",
         status="healthy", epoch=1,
+        disk_free_gb=100, parts_dir_bytes=0,
     ))
     db_session.add(Executor(
         id="ex-A2", host_id="host-1", cert_fingerprint="x",
         status="healthy", epoch=1,
+        disk_free_gb=100, parts_dir_bytes=0,
     ))
     task, _existing = await _seed_pending_subtask(db_session)
     # Mark the existing subtask as assigned to ex-A1.
@@ -108,6 +110,7 @@ async def test_claim_skips_when_same_host_other_executor_holds_file(
     db_session.add(Executor(
         id="ex-B1", host_id="host-2", cert_fingerprint="x",
         status="healthy", epoch=1,
+        disk_free_gb=100, parts_dir_bytes=0,
     ))
     await db_session.flush()
     sub, token = await claim_one_subtask(db_session, "ex-B1", 1)

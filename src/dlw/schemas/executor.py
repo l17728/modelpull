@@ -29,6 +29,8 @@ class ExecutorHeartbeat(BaseModel):
     """POST /api/v1/executors/{id}/heartbeat — periodic liveness ping."""
     health_score: int = Field(default=100, ge=0, le=100)
     parts_dir_bytes: int = Field(default=0, ge=0)
+    # W2b1: optional disk capacity report; None means "no update" (backward-compat).
+    disk_free_gb: int | None = Field(default=None, ge=0)
 
 
 class ExecutorRead(BaseModel):

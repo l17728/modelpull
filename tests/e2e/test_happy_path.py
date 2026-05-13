@@ -74,8 +74,9 @@ async def test_full_task_lifecycle_via_http() -> None:
         fence = {**auth, "X-Executor-Epoch": str(epoch)}
 
         # 3. Heartbeat (executor reports liveness)
+        # W2b1: include disk_free_gb so disk pre-flight allows claiming.
         r = await c.post("/api/v1/executors/e2e-worker-1/heartbeat",
-                         json={"health_score": 100, "parts_dir_bytes": 0},
+                         json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
                          headers=fence)
         assert r.status_code == 200
         assert r.json()["status"] == "healthy"

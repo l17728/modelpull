@@ -5,10 +5,16 @@ SKIP LOCKED ensures two concurrent claimants never get the same row.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+
+_K_CANDIDATES = int(os.environ.get("DLW_SCHEDULER_CANDIDATES", "16"))
+_DISK_SAFETY_MARGIN_BYTES = int(
+    os.environ.get("DLW_DISK_SAFETY_MARGIN_BYTES", str(200 * 1024 * 1024))
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.executor import Executor
@@ -51,25 +57,31 @@ async def claim_one_subtask(
         .exists()
     )
 
+    # W2b1: candidate scan with disk pre-flight.
+    GiB = 1024 ** 3
+    free_bytes = (e_self.disk_free_gb or 0) * GiB - (e_self.parts_dir_bytes or 0)
+
     stmt = (
         select(FileSubTask)
         .where(FileSubTask.status == "pending")
         .where(~same_host_holds)
         .order_by(FileSubTask.created_at)
-        .limit(1)
+        .limit(_K_CANDIDATES)
         .with_for_update(skip_locked=True)
     )
-    sub = (await session.execute(stmt)).scalar_one_or_none()
-    if sub is None:
-        return None, None
-
-    token = uuid.uuid4()
-    sub.status = "assigned"
-    sub.executor_id = executor_id
-    sub.executor_epoch = executor_epoch
-    sub.assignment_token = token
-    sub.assigned_at = datetime.now(UTC)
-    return sub, token
+    candidates = (await session.execute(stmt)).scalars().all()
+    for sub in candidates:
+        size = sub.file_size or 0
+        if size + _DISK_SAFETY_MARGIN_BYTES <= free_bytes:
+            token = uuid.uuid4()
+            sub.status = "assigned"
+            sub.executor_id = executor_id
+            sub.executor_epoch = executor_epoch
+            sub.assignment_token = token
+            sub.assigned_at = datetime.now(UTC)
+            return sub, token
+    # No candidate fit; other locked rows release on session commit.
+    return None, None
 
 
 async def complete_subtask(
