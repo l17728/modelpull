@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
 
 
@@ -116,6 +117,19 @@ async def complete_subtask(
     elif statuses == {"succeeded"}:
         parent.status = "succeeded"
         parent.completed_at = datetime.now(UTC)
+
+    # W2a §3.3: route executor health update through the state machine.
+    # Unreachable if the W1 epoch-mismatch raised earlier (zombie completion).
+    if sub.executor_id is not None:
+        from dlw.services.state_machine import transition_executor   # local: avoids cycle
+        ex = await session.get(Executor, sub.executor_id)
+        if ex is not None:
+            await transition_executor(
+                session, ex,
+                event="task_success" if final_status == "succeeded" else "task_failure",
+                reason=f"sub_{sub.id}",
+                metadata={"subtask_id": str(sub.id), "filename": sub.filename},
+            )
 
     return sub, parent
 
