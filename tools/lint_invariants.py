@@ -85,6 +85,47 @@ def check_executor_status_domain() -> list[str]:
     return errors
 
 
+VALID_SUBTASK_STATUS = {
+    "pending", "assigned", "succeeded", "failed", "cancelled", "paused_disk_full",
+}
+
+
+def check_subtask_status_domain() -> list[str]:
+    """Lint string literals assigned to a `status` kwarg/attr in service modules
+    where FileSubTask rows are mutated. Identical AST patterns to W2a's
+    check_executor_status_domain; only the value-domain set + scanned files differ."""
+    errors: list[str] = []
+    files = [
+        ROOT / "src" / "dlw" / "services" / "scheduler.py",
+        ROOT / "src" / "dlw" / "services" / "recovery.py",
+        ROOT / "src" / "dlw" / "services" / "task_service.py",
+    ]
+    import ast as _ast
+    for f in files:
+        if not f.exists():
+            continue
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.keyword) and node.arg == "status":
+                if isinstance(node.value, _ast.Constant) and isinstance(node.value.value, str):
+                    if node.value.value not in VALID_SUBTASK_STATUS:
+                        errors.append(
+                            f"{f.relative_to(ROOT)}:{node.value.lineno}: "
+                            f"invalid subtask status: {node.value.value!r}"
+                        )
+            elif (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], _ast.Attribute)
+                    and node.targets[0].attr == "status"
+                    and isinstance(node.value, _ast.Constant)
+                    and isinstance(node.value.value, str)):
+                if node.value.value not in VALID_SUBTASK_STATUS:
+                    errors.append(
+                        f"{f.relative_to(ROOT)}:{node.lineno}: "
+                        f"invalid subtask status: {node.value.value!r}"
+                    )
+    return errors
+
+
 def check_d10_host_affinity_test_owner() -> list[str]:
     """INVARIANT D-10 must have at least one discoverable test owner."""
     import glob
@@ -232,6 +273,7 @@ def main() -> int:
             print(f"WARN: ... {len(ref_failures) - 20} more cross-ref warnings")
 
     failures.extend(check_executor_status_domain())
+    failures.extend(check_subtask_status_domain())
     failures.extend(check_d10_host_affinity_test_owner())
 
     # --- Report ---
