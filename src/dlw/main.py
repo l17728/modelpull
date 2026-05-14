@@ -132,6 +132,8 @@ def create_app() -> FastAPI:
     app.include_router(executors_router)
     from dlw.api.subtasks import router as subtasks_router
     app.include_router(subtasks_router)
+    from dlw.api.hf_proxy import router as hf_proxy_router
+    app.include_router(hf_proxy_router)
     return app
 
 
