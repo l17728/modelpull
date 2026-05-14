@@ -238,3 +238,67 @@ async def test_proxy_404_on_missing_subtask(proxy_app) -> None:
             "X-Assignment-Token": str(uuid.uuid4()),
         })
     assert r.status_code == 404
+
+
+@pytest.mark.slow
+async def test_proxy_rejects_not_your_subtask(proxy_app) -> None:
+    """Authenticated executor B cannot proxy-fetch executor A's subtask."""
+    async with AsyncClient(transport=ASGITransport(app=proxy_app),
+                           base_url="http://test") as c:
+        reg_a = await register_test_executor(
+            c, enrollment_token=_ENROLL,
+            executor_id="hp-owner-a", host_id="hp-host",
+        )
+        reg_b = await register_test_executor(
+            c, enrollment_token=_ENROLL,
+            executor_id="hp-owner-b", host_id="hp-host",
+        )
+        sub_id, token, _ = await _create_task_and_claim(c, reg_a)
+        r = await c.get(f"/api/v1/hf-proxy/subtask/{sub_id}", headers={
+            **executor_request_headers(reg_b),
+            "X-Assignment-Token": token,
+        })
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "NOT_YOUR_SUBTASK"
+
+
+@pytest.mark.slow
+async def test_proxy_rejects_stale_assignment_token(proxy_app) -> None:
+    async with AsyncClient(transport=ASGITransport(app=proxy_app),
+                           base_url="http://test") as c:
+        reg = await register_test_executor(
+            c, enrollment_token=_ENROLL,
+            executor_id="hp-worker-stale", host_id="hp-host",
+        )
+        sub_id, _token, _ = await _create_task_and_claim(c, reg)
+        r = await c.get(f"/api/v1/hf-proxy/subtask/{sub_id}", headers={
+            **executor_request_headers(reg),
+            "X-Assignment-Token": str(uuid.uuid4()),   # wrong token
+        })
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "STALE_ASSIGNMENT"
+
+
+@pytest.mark.slow
+async def test_proxy_rejects_epoch_mismatch(proxy_app, db_session) -> None:
+    async with AsyncClient(transport=ASGITransport(app=proxy_app),
+                           base_url="http://test") as c:
+        reg = await register_test_executor(
+            c, enrollment_token=_ENROLL,
+            executor_id="hp-worker-epoch", host_id="hp-host",
+        )
+        sub_id, token, _ = await _create_task_and_claim(c, reg)
+        # Corrupt the subtask's stamped epoch so it no longer matches the
+        # authenticated executor's current epoch.
+        await db_session.execute(
+            update(FileSubTask)
+            .where(FileSubTask.id == uuid.UUID(sub_id))
+            .values(executor_epoch=99_999)
+        )
+        await db_session.commit()
+        r = await c.get(f"/api/v1/hf-proxy/subtask/{sub_id}", headers={
+            **executor_request_headers(reg),
+            "X-Assignment-Token": token,
+        })
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "EPOCH_MISMATCH"

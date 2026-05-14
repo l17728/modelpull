@@ -45,6 +45,23 @@ async def hf_proxy_subtask(
     sub = await session.get(FileSubTask, subtask_id)
     if sub is None:
         raise HTTPException(status_code=404, detail="subtask not found")
+    if sub.executor_id != auth_ex.id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "NOT_YOUR_SUBTASK",
+                    "subtask_executor": sub.executor_id,
+                    "authenticated": auth_ex.id},
+        )
+    if str(sub.assignment_token) != x_assignment_token:
+        raise HTTPException(
+            status_code=409, detail={"code": "STALE_ASSIGNMENT"},
+        )
+    if sub.executor_epoch != auth_ex.epoch:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "EPOCH_MISMATCH",
+                    "expected": sub.executor_epoch, "got": auth_ex.epoch},
+        )
 
     task = await session.get(DownloadTask, sub.task_id)
     if task is None:                       # FK guarantees this won't happen
