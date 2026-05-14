@@ -15,15 +15,27 @@ from dlw.db.models.executor import Executor
 
 
 def _extract_peer_cert(request: Request) -> bytes | None:
-    """Two paths: (a) direct uvicorn TLS — peercert in scope; (b) trusted-proxy
-    forwarded header — only honored when DLW_TLS_TRUSTED_PROXY=1."""
+    """Two paths: (a) direct uvicorn TLS — transport injected into scope by the
+    HttpToolsProtocol patch in dlw.auth.uvicorn_tls_patch; (b) trusted-proxy
+    forwarded header — only honored when DLW_TLS_TRUSTED_PROXY=1.
+
+    uvicorn (httptools) does not expose the asyncio transport in the ASGI scope
+    natively. The ``install_transport_scope_patch()`` call in ``main.lifespan``
+    monkey-patches ``HttpToolsProtocol.on_headers_complete`` to inject
+    ``scope["transport"]`` before the request is dispatched.  From the
+    transport we reach ``ssl_object.getpeercert(binary_form=True)`` → DER bytes.
+    """
     transport = request.scope.get("transport")
     if transport is not None and hasattr(transport, "get_extra_info"):
-        peercert = transport.get_extra_info("peercert")
-        if peercert:
+        # Prefer ssl_object.getpeercert(binary_form=True) — returns DER bytes.
+        # transport.get_extra_info("peercert") returns a dict (parsed), not DER.
+        ssl_obj = transport.get_extra_info("ssl_object")
+        if ssl_obj is not None:
             try:
-                cert = x509.load_der_x509_certificate(peercert)
-                return cert.public_bytes(serialization.Encoding.PEM)
+                peercert_der = ssl_obj.getpeercert(binary_form=True)
+                if peercert_der:
+                    cert = x509.load_der_x509_certificate(peercert_der)
+                    return cert.public_bytes(serialization.Encoding.PEM)
             except Exception:
                 pass
     if os.environ.get("DLW_TLS_TRUSTED_PROXY") == "1":

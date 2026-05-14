@@ -32,6 +32,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
 
     # W3a: bootstrap CA + JWT signing key + server cert + nonce store + enrollment token.
+    # Install the uvicorn transport scope patch so _extract_peer_cert can read
+    # the mTLS peer cert from scope["transport"] in direct-TLS deployments.
+    from dlw.auth.uvicorn_tls_patch import install_transport_scope_patch
+    install_transport_scope_patch()
+
     from pathlib import Path
     from dlw.auth.ca import bootstrap_ca, ensure_server_cert
     from dlw.auth.jwt_signing import bootstrap_keypair
