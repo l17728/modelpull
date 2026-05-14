@@ -165,3 +165,33 @@ async def _point_app_at_test_db(test_db_name: str, engine: AsyncEngine):
             os.environ[k] = v
     get_settings.cache_clear()
     await reset_engine()
+
+
+@pytest.fixture(scope="session")
+def ephemeral_ca(tmp_path_factory):
+    """One CA + JWT keypair per test session, in a temp dir."""
+    from dlw.auth.ca import bootstrap_ca
+    from dlw.auth.jwt_signing import bootstrap_keypair
+    ca_dir = tmp_path_factory.mktemp("ca")
+    ca = bootstrap_ca(ca_dir)
+    jwt_kp = bootstrap_keypair(ca_dir)
+    return {"ca": ca, "jwt_keypair": jwt_kp, "ca_dir": ca_dir}
+
+
+@pytest.fixture
+def client_cert_pair(ephemeral_ca):
+    """Per-test client cert ('test-executor-1') signed by the session CA.
+    Returns (cert_pem: bytes, key: Ed25519PrivateKey, executor_id: str)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from dlw.auth.ca import sign_csr
+    executor_id = "test-executor-1"
+    key = ed25519.Ed25519PrivateKey.generate()
+    csr = (x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, executor_id)]))
+        .sign(key, None))
+    csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    cert_pem = sign_csr(ephemeral_ca["ca"], csr_pem, executor_id, ttl_hours=24)
+    return cert_pem, key, executor_id
