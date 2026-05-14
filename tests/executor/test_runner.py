@@ -236,6 +236,7 @@ async def test_runner_passes_assignment_with_repo_and_storage(
     a = captured["assignment"]
     assert a.repo_id == "o/runner-test"
     assert a.revision == "z" * 40
+    assert isinstance(a.assignment_token, uuid.UUID)
     assert a.storage_config.bucket == "b"
     assert a.storage_config.key_prefix == "p/"
     assert captured["report_kw"]["status"] == "succeeded"
