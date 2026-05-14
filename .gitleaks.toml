@@ -1,0 +1,22 @@
+# gitleaks config — extends the default ruleset with project-specific allowlist.
+# CI runs: gitleaks detect over the PR commit range.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "modelpull false positives"
+
+# `key: ed25519.Ed25519PrivateKey` and similar dataclass field annotations in
+# dlw.auth.* trip the default generic-api-key rule (a `key:` token followed by
+# a high-entropy identifier). These are Python type annotations, not secrets —
+# the actual CA / JWT keys are generated at runtime and persisted to
+# chmod-600 files under ${DLW_CA_DIR}, never committed.
+regexes = [
+    '''ed25519\.Ed25519PrivateKey''',
+    '''ed25519\.Ed25519PublicKey''',
+]
+
+# Test fixtures + auth modules legitimately contain the words "key", "token",
+# "secret", "cert" in identifiers and docstrings; scope the regexes above
+# rather than broad path excludes so real leaks are still caught.
