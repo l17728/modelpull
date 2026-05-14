@@ -1,4 +1,4 @@
-"""Tests for executor_service: join + heartbeat upsert."""
+"""Tests for executor_service: upsert_executor_with_cert + heartbeat upsert (W3a)."""
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.base import Base
 from dlw.db.models.executor import Executor
-from dlw.schemas.executor import ExecutorHeartbeat, ExecutorJoin
-from dlw.services.executor_service import join_executor, record_heartbeat
+from dlw.schemas.executor import ExecutorHeartbeat
+from dlw.services.executor_service import record_heartbeat, upsert_executor_with_cert
+
+
+_FP = "SHA256:" + "ab" * 32
+_SEED = b"\x07" * 32
+
+
+def _upsert_kwargs(executor_id: str, host_id: str, *, fp: str = _FP):
+    return dict(
+        executor_id=executor_id, host_id=host_id, capabilities={},
+        cert_fingerprint=fp, hmac_seed=_SEED,
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -23,30 +34,33 @@ async def _create_tables(engine):
 
 
 @pytest.mark.slow
-async def test_join_creates_executor(db_session: AsyncSession) -> None:
-    body = ExecutorJoin(
-        id="host-a-w1", host_id="host-a", capabilities={"nic_speed_gbps": 10},
+async def test_upsert_creates_executor_with_cert_and_seed(db_session: AsyncSession) -> None:
+    ex = await upsert_executor_with_cert(
+        db_session,
+        **_upsert_kwargs("host-a-w1", "host-a"),
     )
-    ex = await join_executor(db_session, body)
     await db_session.commit()
     assert ex.id == "host-a-w1"
     assert ex.status == "joining"
     assert ex.health_score == 100
+    assert ex.cert_fingerprint == _FP
+    assert bytes(ex.hmac_seed_encrypted) == _SEED
 
 
 @pytest.mark.slow
-async def test_join_idempotent(db_session: AsyncSession) -> None:
-    body = ExecutorJoin(id="host-b-w1", host_id="host-b")
-    await join_executor(db_session, body)
+async def test_upsert_idempotent(db_session: AsyncSession) -> None:
+    await upsert_executor_with_cert(db_session, **_upsert_kwargs("host-b-w1", "host-b"))
     await db_session.commit()
-    again = await join_executor(db_session, body)
+    again = await upsert_executor_with_cert(
+        db_session, **_upsert_kwargs("host-b-w1", "host-b"),
+    )
     await db_session.commit()
     assert again.id == "host-b-w1"
 
 
 @pytest.mark.slow
 async def test_heartbeat_updates_health_and_timestamp(db_session: AsyncSession) -> None:
-    await join_executor(db_session, ExecutorJoin(id="host-c-w1", host_id="host-c"))
+    await upsert_executor_with_cert(db_session, **_upsert_kwargs("host-c-w1", "host-c"))
     await db_session.commit()
     before = datetime.now(UTC)
     ex = await record_heartbeat(
@@ -76,41 +90,40 @@ async def env():
 
 
 @pytest.mark.slow
-async def test_join_first_time_returns_epoch_1(db_session: AsyncSession, env) -> None:
-    """First /join for a brand new executor_id assigns epoch=1."""
-    body = ExecutorJoin(id="new-host-worker-1", host_id="new-host")
-    ex = await join_executor(db_session, body)
+async def test_upsert_first_time_returns_epoch_1(db_session: AsyncSession, env) -> None:
+    """First upsert for a brand new executor_id assigns epoch=1."""
+    ex = await upsert_executor_with_cert(
+        db_session, **_upsert_kwargs("new-host-worker-1", "new-host"),
+    )
     assert ex.epoch == 1
 
 
 @pytest.mark.slow
-async def test_join_existing_executor_increments_epoch(
+async def test_upsert_existing_executor_increments_epoch(
     db_session: AsyncSession, env,
 ) -> None:
-    """Repeated /join for same id bumps epoch atomically: 1 → 2 → 3."""
-    body = ExecutorJoin(id="bump-host-worker-1", host_id="bump-host")
-    ex1 = await join_executor(db_session, body); await db_session.commit()
+    """Repeated upsert for same id bumps epoch atomically: 1 → 2 → 3."""
+    kw = _upsert_kwargs("bump-host-worker-1", "bump-host")
+    ex1 = await upsert_executor_with_cert(db_session, **kw); await db_session.commit()
     assert ex1.epoch == 1
-    ex2 = await join_executor(db_session, body); await db_session.commit()
+    ex2 = await upsert_executor_with_cert(db_session, **kw); await db_session.commit()
     assert ex2.epoch == 2
-    ex3 = await join_executor(db_session, body); await db_session.commit()
+    ex3 = await upsert_executor_with_cert(db_session, **kw); await db_session.commit()
     assert ex3.epoch == 3
 
 
 @pytest.mark.slow
-async def test_join_concurrent_returns_distinct_epochs(
-    engine, env,
-) -> None:
-    """asyncio.gather × 2 join calls for the same id must yield distinct epochs."""
+async def test_upsert_concurrent_returns_distinct_epochs(engine, env) -> None:
+    """asyncio.gather × 2 upsert calls for the same id must yield distinct epochs."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    body = ExecutorJoin(id="race-host-worker-1", host_id="race-host")
+    kw = _upsert_kwargs("race-host-worker-1", "race-host")
 
-    async def join_in_own_session():
+    async def upsert_in_own_session():
         async with factory() as s:
-            ex = await join_executor(s, body)
+            ex = await upsert_executor_with_cert(s, **kw)
             await s.commit()
             return ex.epoch
 
-    epochs = await asyncio.gather(join_in_own_session(), join_in_own_session())
+    epochs = await asyncio.gather(upsert_in_own_session(), upsert_in_own_session())
     assert sorted(epochs) == [1, 2]  # PG atomic; one wins INSERT, the other UPDATE

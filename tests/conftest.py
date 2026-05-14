@@ -195,3 +195,61 @@ def client_cert_pair(ephemeral_ca):
     csr_pem = csr.public_bytes(serialization.Encoding.PEM)
     cert_pem = sign_csr(ephemeral_ca["ca"], csr_pem, executor_id, ttl_hours=24)
     return cert_pem, key, executor_id
+
+
+# --- W3a: helpers for executor auth in API tests (mTLS+JWT+HMAC via header bypass) ---
+
+async def register_test_executor(
+    client, *, enrollment_token: str,
+    executor_id: str = "test-host-worker-1", host_id: str = "test-host",
+) -> dict:
+    """Build a CSR, POST /api/v1/executors/register, return a dict with
+    executor_id, epoch, cert_pem, jwt, hmac_seed, ca_chain. The caller's app
+    must have app.state.ca / jwt_keypair / nonce_store / enrollment_token set."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    key = ed25519.Ed25519PrivateKey.generate()
+    csr = (x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, executor_id)]))
+        .sign(key, None))
+    csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    r = await client.post("/api/v1/executors/register", json={
+        "host_id": host_id, "executor_id_proposal": executor_id,
+        "capabilities": {}, "client_csr_pem": csr_pem,
+    }, headers={"X-Enrollment-Token": enrollment_token})
+    assert r.status_code in (200, 201), r.text
+    body = r.json()
+    return {
+        "executor_id": body["executor_id"], "epoch": body["epoch"],
+        "cert_pem": body["client_cert_pem"], "jwt": body["executor_jwt"],
+        "hmac_seed": bytes.fromhex(body["hmac_seed_hex"]),
+        "ca_chain": body["ca_chain"],
+    }
+
+
+def executor_request_headers(reg: dict) -> dict[str, str]:
+    """mTLS-bypass + JWT + epoch headers for poll / report (no HMAC)."""
+    return {
+        "X-Client-Cert-PEM": reg["cert_pem"].replace("\n", "\n"),
+        "Authorization": f"Bearer {reg['jwt']}",
+        "X-Executor-Epoch": str(reg["epoch"]),
+    }
+
+
+def signed_heartbeat_headers(reg: dict, body: bytes) -> dict[str, str]:
+    """mTLS-bypass + JWT + epoch + HMAC headers for a heartbeat body."""
+    import secrets as _s
+    import time as _t
+    from dlw.auth.hmac_nonce import compute_hmac
+    ts = int(_t.time())
+    nonce = _s.token_hex(16)
+    sig = compute_hmac(reg["hmac_seed"], ts=ts, nonce=nonce, body=body)
+    return {
+        **executor_request_headers(reg),
+        "X-HMAC-Timestamp": str(ts),
+        "X-HMAC-Nonce": nonce,
+        "X-HMAC-Signature": sig,
+        "Content-Type": "application/json",
+    }

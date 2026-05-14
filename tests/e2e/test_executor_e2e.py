@@ -76,6 +76,10 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+@pytest.mark.skip(
+    reason="W3a-T6: ControllerClient + ExecutorRunner are rewritten for "
+    "mTLS+JWT+HMAC in W3a-T9 (executor side). Un-skipped + migrated there."
+)
 @pytest.mark.slow
 async def test_e2e_hf_to_s3_full_pipeline(
     monkeypatch: pytest.MonkeyPatch,
