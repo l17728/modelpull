@@ -1,8 +1,10 @@
 """E2E: real controller + real ExecutorRunner — full HF→S3 happy path.
 
-W4 rewrite: replaces MockDownloader with HfS3StreamDownloader; HF served by
-httpx MockTransport (returns deterministic bytes per filename); S3 served by
-moto[s3] in-process. No Docker required.
+W4 rewrite: replaces MockDownloader with HfS3StreamDownloader.
+W3b update: the HF MockTransport is installed on the controller's
+`dlw.api.hf_proxy._make_hf_client` seam — the executor fetches through the
+controller reverse-proxy, not directly from HF. S3 served by moto[s3]
+in-process. No Docker required.
 """
 from __future__ import annotations
 
