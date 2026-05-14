@@ -284,16 +284,18 @@ def make_fake_controller_client(hf_handler):
     from contextlib import asynccontextmanager as _acm
 
     class _FakeControllerClient:
+        def __init__(self):
+            self._transport = _httpx.MockTransport(hf_handler)
+
         @_acm
         async def stream_hf(self, *, subtask_id, assignment_token,
                             range_header=None):
-            transport = _httpx.MockTransport(hf_handler)
+            headers = {"X-Assignment-Token": str(assignment_token)}
+            if range_header:
+                headers["Range"] = range_header
             async with _httpx.AsyncClient(
-                transport=transport, base_url="http://fake-controller",
+                transport=self._transport, base_url="http://fake-controller",
             ) as client:
-                headers = {}
-                if range_header:
-                    headers["Range"] = range_header
                 async with client.stream(
                     "GET", f"/api/v1/hf-proxy/subtask/{subtask_id}",
                     headers=headers,
