@@ -273,3 +273,31 @@ def make_fake_auth_state(
         jwt=jwt, jwt_exp=far, cert_exp=far,
         hmac_seed=hmac_seed, cert_dir=_Path(str(cert_dir)),
     )
+
+
+def make_fake_controller_client(hf_handler):
+    """W3b test double for ControllerClient — its stream_hf() routes through an
+    httpx.MockTransport(hf_handler) instead of a real controller proxy. Lets
+    downloader tests simulate HF responses without a running controller.
+    hf_handler is a Callable[[httpx.Request], httpx.Response]."""
+    import httpx as _httpx
+    from contextlib import asynccontextmanager as _acm
+
+    class _FakeControllerClient:
+        @_acm
+        async def stream_hf(self, *, subtask_id, assignment_token,
+                            range_header=None):
+            transport = _httpx.MockTransport(hf_handler)
+            async with _httpx.AsyncClient(
+                transport=transport, base_url="http://fake-controller",
+            ) as client:
+                headers = {}
+                if range_header:
+                    headers["Range"] = range_header
+                async with client.stream(
+                    "GET", f"/api/v1/hf-proxy/subtask/{subtask_id}",
+                    headers=headers,
+                ) as resp:
+                    yield resp
+
+    return _FakeControllerClient()

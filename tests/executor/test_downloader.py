@@ -20,6 +20,7 @@ from dlw.executor.downloader import (
     HfS3StreamDownloader,
     StorageConfig,
 )
+from tests.conftest import make_fake_controller_client
 
 
 def _settings() -> ExecutorSettings:
@@ -35,28 +36,35 @@ def _assignment(*, repo_id="o/r", revision="a" * 40, filename="config.json",
     return Assignment(
         subtask_id=_uuid.uuid4(),
         task_id=_uuid.uuid4(),
+        assignment_token=_uuid.uuid4(),
         repo_id=repo_id, revision=revision, filename=filename,
         file_size=4096, expected_sha256=None,
         storage_config=StorageConfig(bucket=bucket, key_prefix=key_prefix),
     )
 
 
+def _noop_client():
+    return make_fake_controller_client(
+        lambda request: httpx.Response(200, content=b"")
+    )
+
+
 def test_compose_key_includes_prefix_repo_revision_filename() -> None:
-    d = HfS3StreamDownloader(settings=_settings())
+    d = HfS3StreamDownloader(settings=_settings(), client=_noop_client())
     a = _assignment(filename="model.safetensors", key_prefix="phase1/")
     key = d._compose_key(a)
     assert key == "phase1/o/r/" + ("a" * 40) + "/model.safetensors"
 
 
 def test_compose_key_handles_empty_prefix() -> None:
-    d = HfS3StreamDownloader(settings=_settings())
+    d = HfS3StreamDownloader(settings=_settings(), client=_noop_client())
     a = _assignment(key_prefix="")
     key = d._compose_key(a)
     assert key.startswith("o/r/")
 
 
 def test_compose_key_strips_prefix_trailing_slash() -> None:
-    d = HfS3StreamDownloader(settings=_settings())
+    d = HfS3StreamDownloader(settings=_settings(), client=_noop_client())
     a = _assignment(key_prefix="phase1////")
     key = d._compose_key(a)
     # No double slashes, single separator
@@ -78,11 +86,11 @@ def s3_bucket(monkeypatch: pytest.MonkeyPatch):
         yield bucket
 
 
-def _make_hf_transport(body_bytes: bytes) -> httpx.MockTransport:
-    """Returns an httpx transport that streams body_bytes on the resolve URL."""
+def _hf_handler(body_bytes: bytes):
+    """Returns an httpx handler that streams body_bytes for any request."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body_bytes)
-    return httpx.MockTransport(handler)
+    return handler
 
 
 @pytest.mark.slow
@@ -97,13 +105,8 @@ async def test_downloader_streams_hf_to_s3_full_pipeline(
         id="host-w4-worker-1", bearer_token="t",
         s3_endpoint_url=None,             # moto via env
     )
-    d = HfS3StreamDownloader(settings=settings)
-
-    # Inject httpx MockTransport via test-only seam
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=_make_hf_transport(body),
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(_hf_handler(body)))
 
     a = _assignment(
         filename="model.safetensors", key_prefix="phase1/",
@@ -130,11 +133,8 @@ async def test_downloader_small_file_single_part(
     expected_sha = hashlib.sha256(body).hexdigest()
 
     settings = ExecutorSettings(id="host-w4-worker-2", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=_make_hf_transport(body),
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(_hf_handler(body)))
     a = _assignment(filename="config.json", bucket=s3_bucket)
 
     result = await d.download(assignment=a)
@@ -156,11 +156,8 @@ async def test_downloader_exact_5mb_yields_one_part(
     expected_sha = hashlib.sha256(body).hexdigest()
 
     settings = ExecutorSettings(id="host-w4-worker-3", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=_make_hf_transport(body),
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(_hf_handler(body)))
     a = _assignment(filename="exact5.bin", bucket=s3_bucket)
 
     result = await d.download(assignment=a)
@@ -178,14 +175,10 @@ async def test_downloader_404_fails_fast_no_multipart(
     """
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, content=b"not found")
-    transport = httpx.MockTransport(handler)
 
     settings = ExecutorSettings(id="host-w4-worker-x", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=transport,
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(handler))
     a = _assignment(filename="x.bin", bucket=s3_bucket)
 
     with pytest.raises(httpx.HTTPStatusError):
@@ -219,13 +212,9 @@ async def test_downloader_aborts_multipart_on_mid_stream_drop(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=streaming_body())
 
-    transport = httpx.MockTransport(handler)
     settings = ExecutorSettings(id="host-w4-worker-mid", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=transport,
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(handler))
     a = _assignment(filename="dropped.bin", bucket=s3_bucket)
 
     # ProtocolError is transient → tenacity retries × 3 → all fail → reraise.
@@ -253,14 +242,10 @@ async def test_downloader_handles_zero_byte_file(
     """
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"")
-    transport = httpx.MockTransport(handler)
 
     settings = ExecutorSettings(id="host-w4-worker-zero", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=transport,
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(handler))
     a = _assignment(filename="empty.bin", bucket=s3_bucket)
 
     result = await d.download(assignment=a)
@@ -291,11 +276,8 @@ async def test_downloader_retries_transient_5xx(
         return httpx.Response(200, content=body)
 
     settings = ExecutorSettings(id="host-w4-worker-r", bearer_token="t")
-    d = HfS3StreamDownloader(settings=settings)
-    monkeypatch.setattr(d, "_make_http_client",
-        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler),
-                                   timeout=settings.download_timeout_seconds,
-                                   follow_redirects=True))
+    d = HfS3StreamDownloader(settings=settings,
+                             client=make_fake_controller_client(handler))
     a = _assignment(filename="retry.bin", bucket=s3_bucket)
 
     result = await d.download(assignment=a)
