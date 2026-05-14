@@ -5,6 +5,9 @@ First-time INSERT writes epoch=1; ON CONFLICT DO UPDATE bumps epoch+=1.
 Status resets to 'joining' on every rejoin so that 'unhealthy'
 (set by reclaim_stale_executors) flips back to 'joining' → 'healthy'
 on the next heartbeat.
+
+Phase 2 W3a: join_executor renamed to upsert_executor_with_cert; now accepts
+cert_fingerprint + hmac_seed as explicit kwargs rather than from ExecutorJoin schema.
 """
 from __future__ import annotations
 
@@ -13,29 +16,37 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.executor import Executor
-from dlw.schemas.executor import ExecutorHeartbeat, ExecutorJoin
+from dlw.schemas.executor import ExecutorHeartbeat
 
 
-async def join_executor(session: AsyncSession, body: ExecutorJoin) -> Executor:
-    """Atomic INSERT-or-bump. Returns the persisted Executor row with current epoch.
-
-    PG INSERT ... ON CONFLICT (id) DO UPDATE is atomic for the bump — two
-    concurrent join calls for the same id can never get the same epoch.
-    """
+async def upsert_executor_with_cert(
+    session: AsyncSession,
+    *,
+    executor_id: str,
+    host_id: str,
+    capabilities: dict,
+    cert_fingerprint: str,
+    hmac_seed: bytes,
+) -> Executor:
+    """W3a: INSERT-or-bump executor row, writing cert_fingerprint +
+    hmac_seed_encrypted. Same atomic epoch semantics as W1 join_executor:
+    epoch=1 on insert, +1 on conflict; status='joining'. Caller commits."""
     stmt = pg_insert(Executor).values(
-        id=body.id,
-        host_id=body.host_id,
-        cert_fingerprint=body.cert_fingerprint,
-        capabilities=body.capabilities,
+        id=executor_id,
+        host_id=host_id,
+        cert_fingerprint=cert_fingerprint,
+        hmac_seed_encrypted=hmac_seed,
+        capabilities=capabilities,
         status="joining",
         epoch=1,
     ).on_conflict_do_update(
         index_elements=["id"],
         set_=dict(
             status="joining",
-            host_id=body.host_id,
-            cert_fingerprint=body.cert_fingerprint,
-            capabilities=body.capabilities,
+            host_id=host_id,
+            cert_fingerprint=cert_fingerprint,
+            hmac_seed_encrypted=hmac_seed,
+            capabilities=capabilities,
             epoch=Executor.__table__.c.epoch + 1,
         ),
     ).returning(Executor)

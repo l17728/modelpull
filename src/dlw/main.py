@@ -30,6 +30,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from dlw.services.recovery import run_recovery_routine
 
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+
+    # W3a: bootstrap CA + JWT signing key + server cert + nonce store + enrollment token.
+    from pathlib import Path
+    from dlw.auth.ca import bootstrap_ca, ensure_server_cert
+    from dlw.auth.jwt_signing import bootstrap_keypair
+    from dlw.auth.hmac_nonce import NonceStore
+    import secrets as _secrets
+    from dlw.config import get_settings as _gs
+    _settings = _gs()
+    _ca_dir = Path(_settings.ca_dir)
+    _ca_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _ca = bootstrap_ca(_ca_dir)
+    ensure_server_cert(_ca, _ca_dir, hostname=_settings.controller_hostname)
+    _jwt_kp = bootstrap_keypair(_ca_dir)
+    if _settings.enrollment_token:
+        _enroll = _settings.enrollment_token
+    else:
+        _tok_path = _ca_dir / "enrollment.token"
+        if _tok_path.exists():
+            _enroll = _tok_path.read_text().strip()
+        else:
+            _enroll = _secrets.token_hex(32)
+            _tok_path.write_text(_enroll)
+            _tok_path.chmod(0o600)
+            logger.info("generated enrollment token (copy to executors): %s", _enroll)
+    app.state.ca = _ca
+    app.state.jwt_keypair = _jwt_kp
+    app.state.nonce_store = NonceStore(maxsize=10_000, ttl_seconds=300)
+    app.state.enrollment_token = _enroll
+
     # W6-J: spec §7 says recovery failure aborts startup. Permissive dev mode
     # via DLW_STRICT_RECOVERY=false env override (defaults to strict).
     import os
