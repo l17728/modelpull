@@ -105,6 +105,11 @@ class FileSubTask(Base):
     last_heartbeat_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # W2b2 §3.8: written when sub flips to paused_external or paused_disk_full.
+    # Used by sweep_paused_external's quiet-window threshold.
+    last_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     chunks_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunks_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
