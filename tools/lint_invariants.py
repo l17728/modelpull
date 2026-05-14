@@ -86,14 +86,62 @@ def check_executor_status_domain() -> list[str]:
 
 
 VALID_SUBTASK_STATUS = {
-    "pending", "assigned", "succeeded", "failed", "cancelled", "paused_disk_full",
+    "pending", "assigned", "succeeded", "failed", "cancelled",
+    "paused_disk_full", "paused_external",          # W2b2 NEW
 }
+
+
+VALID_TASK_STATUS = {
+    "pending", "scheduling", "downloading",
+    "succeeded", "failed", "cancelled",
+    "cancelling",   # W2b2 NEW
+}
+
+
+_TASK_RECEIVERS = {"task", "parent", "parent_locked", "download_task"}
+
+
+def check_task_status_domain() -> list[str]:
+    """W2b2 §3.9: lint literals assigned to `status` attribute on a task
+    receiver (`task` / `parent` / `parent_locked`). Skips subtask writes via
+    receiver-name filter; only the attribute-assign pattern is scanned (kwarg
+    form like `update(FileSubTask).values(status=...)` is owned by
+    check_subtask_status_domain)."""
+    errors: list[str] = []
+    files = [
+        ROOT / "src" / "dlw" / "api" / "tasks.py",
+        ROOT / "src" / "dlw" / "services" / "task_service.py",
+        ROOT / "src" / "dlw" / "services" / "scheduler.py",
+    ]
+    import ast as _ast
+    for f in files:
+        if not f.exists():
+            continue
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            if (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], _ast.Attribute)
+                    and node.targets[0].attr == "status"
+                    and isinstance(node.value, _ast.Constant)
+                    and isinstance(node.value.value, str)):
+                tgt = node.targets[0]
+                if not (isinstance(tgt.value, _ast.Name) and tgt.value.id in _TASK_RECEIVERS):
+                    continue
+                if node.value.value not in VALID_TASK_STATUS:
+                    errors.append(
+                        f"{f.relative_to(ROOT)}:{node.lineno}: "
+                        f"invalid task status: {node.value.value!r}"
+                    )
+    return errors
+
+
+_SUBTASK_RECEIVERS = {"sub", "s", "file_subtask", "sibling", "_existing"}
 
 
 def check_subtask_status_domain() -> list[str]:
     """Lint string literals assigned to a `status` kwarg/attr in service modules
-    where FileSubTask rows are mutated. Identical AST patterns to W2a's
-    check_executor_status_domain; only the value-domain set + scanned files differ."""
+    where FileSubTask rows are mutated. Filters by receiver name on attribute
+    assigns to avoid cross-talk with DownloadTask.status writes (W2b2)."""
     errors: list[str] = []
     files = [
         ROOT / "src" / "dlw" / "services" / "scheduler.py",
@@ -106,6 +154,10 @@ def check_subtask_status_domain() -> list[str]:
             continue
         tree = _ast.parse(f.read_text(encoding="utf-8"))
         for node in _ast.walk(tree):
+            # Pattern 1: keyword arg `status="<literal>"` (e.g. update(FileSubTask).values(...)).
+            # No reliable way to attribute the kwarg to a specific row type
+            # without context — but in this codebase the kwarg form is only
+            # used for FileSubTask in these three files. Keep scanning.
             if isinstance(node, _ast.keyword) and node.arg == "status":
                 if isinstance(node.value, _ast.Constant) and isinstance(node.value.value, str):
                     if node.value.value not in VALID_SUBTASK_STATUS:
@@ -113,11 +165,17 @@ def check_subtask_status_domain() -> list[str]:
                             f"{f.relative_to(ROOT)}:{node.value.lineno}: "
                             f"invalid subtask status: {node.value.value!r}"
                         )
+            # Pattern 2: attribute assignment `sub.status = "<literal>"`. Filter
+            # by receiver name to skip task-status writes (`task.status = ...`,
+            # `parent.status = ...`).
             elif (isinstance(node, _ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], _ast.Attribute)
                     and node.targets[0].attr == "status"
                     and isinstance(node.value, _ast.Constant)
                     and isinstance(node.value.value, str)):
+                tgt = node.targets[0]
+                if not (isinstance(tgt.value, _ast.Name) and tgt.value.id in _SUBTASK_RECEIVERS):
+                    continue
                 if node.value.value not in VALID_SUBTASK_STATUS:
                     errors.append(
                         f"{f.relative_to(ROOT)}:{node.lineno}: "
@@ -274,6 +332,7 @@ def main() -> int:
 
     failures.extend(check_executor_status_domain())
     failures.extend(check_subtask_status_domain())
+    failures.extend(check_task_status_domain())
     failures.extend(check_d10_host_affinity_test_owner())
 
     # --- Report ---
