@@ -228,13 +228,17 @@ def check_no_bearer_on_executor_routes() -> list[str]:
 def check_no_hf_token_in_executor() -> list[str]:
     """W3b §3.11: INVARIANT 2 — the tenant HF token must never reach an
     executor. Forbid the `hf_token` / `hf_endpoint` identifiers anywhere in
-    src/dlw/executor/ (comment lines are exempt). After W3b, HF access goes
-    exclusively through the controller's reverse proxy."""
+    src/dlw/executor/. After W3b, HF access goes exclusively through the
+    controller's reverse proxy.
+
+    Only whole comment lines (first non-whitespace char is `#`) are exempt —
+    string literals and trailing comments containing the identifiers are
+    flagged too (this is a full-text scan, by design)."""
     errors: list[str] = []
     exec_dir = ROOT / "src" / "dlw" / "executor"
     if not exec_dir.exists():
         return []
-    for py in sorted(exec_dir.rglob("*.py")):
+    for py in sorted(exec_dir.rglob("*.py")):  # sorted for deterministic CI output
         try:
             text = py.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
