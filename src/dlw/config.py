@@ -30,6 +30,12 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    # Phase 2 W3a — mTLS + JWT + HMAC
+    ca_dir: str = Field(default="./.ca")
+    enrollment_token: str = Field(default="")
+    controller_hostname: str = Field(default="dlw-controller")
+    tls_trusted_proxy: bool = Field(default=False)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user

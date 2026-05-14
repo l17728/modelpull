@@ -38,18 +38,30 @@ async def _bootstrap(engine):
         await conn.run_sync(Base.metadata.drop_all)
 
 
+_ENROLL = "e2e-enrollment-token-happy-path"
+
+
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
 @pytest.mark.slow
-async def test_full_task_lifecycle_via_http() -> None:
+async def test_full_task_lifecycle_via_http(ephemeral_ca) -> None:
     from dlw.main import create_app
+    from dlw.auth.hmac_nonce import NonceStore
+    from tests.conftest import (
+        executor_request_headers, register_test_executor, signed_heartbeat_headers,
+    )
     app = create_app()
+    app.state.ca = ephemeral_ca["ca"]
+    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
+    app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
+    app.state.enrollment_token = _ENROLL
     auth = {"Authorization": f"Bearer {_TOKEN}"}
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -64,20 +76,17 @@ async def test_full_task_lifecycle_via_http() -> None:
         task_id = r.json()["id"]
         assert r.json()["status"] == "pending"
 
-        # 2. Register a worker executor — capture epoch (P2-W1 fence)
-        r = await c.post("/api/v1/executors/join", json={
-            "id": "e2e-worker-1", "host_id": "e2e-host",
-            "capabilities": {"nic_speed_gbps": 25},
-        }, headers=auth)
-        assert r.status_code == 201, r.text
-        epoch = r.json()["epoch"]
-        fence = {**auth, "X-Executor-Epoch": str(epoch)}
+        # 2. Register a worker executor via mTLS enrollment (P2-W3a).
+        reg = await register_test_executor(
+            c, enrollment_token=_ENROLL,
+            executor_id="e2e-worker-1", host_id="e2e-host",
+        )
 
-        # 3. Heartbeat (executor reports liveness)
-        # W2b1: include disk_free_gb so disk pre-flight allows claiming.
+        # 3. Heartbeat (executor reports liveness) — mTLS + JWT + HMAC.
+        hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
         r = await c.post("/api/v1/executors/e2e-worker-1/heartbeat",
-                         json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
-                         headers=fence)
+                         content=hb_body,
+                         headers=signed_heartbeat_headers(reg, hb_body))
         assert r.status_code == 200
         assert r.json()["status"] == "healthy"
 
@@ -85,7 +94,8 @@ async def test_full_task_lifecycle_via_http() -> None:
         sub_ids: list[str] = []
         tokens: list[str] = []
         for _ in range(2):
-            r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=fence)
+            r = await c.post("/api/v1/executors/e2e-worker-1/poll",
+                             headers=executor_request_headers(reg))
             assert r.status_code == 200, r.text
             assert r.json()["assigned"] is True
             sub_ids.append(r.json()["subtask"]["id"])
@@ -93,7 +103,8 @@ async def test_full_task_lifecycle_via_http() -> None:
         assert len(set(sub_ids)) == 2
 
         # 5. Third poll → no work
-        r = await c.post("/api/v1/executors/e2e-worker-1/poll", headers=fence)
+        r = await c.post("/api/v1/executors/e2e-worker-1/poll",
+                         headers=executor_request_headers(reg))
         assert r.json()["assigned"] is False
 
         # 6. Report success for both subtasks (with token + epoch verification)
@@ -103,7 +114,7 @@ async def test_full_task_lifecycle_via_http() -> None:
                 "assignment_token": tok,
                 "actual_sha256": "f" * 64,
                 "bytes_downloaded": 100_000_000,
-            }, headers=fence)
+            }, headers=executor_request_headers(reg))
             assert r.status_code == 200, r.text
 
         # 7. Task should now be succeeded

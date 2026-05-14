@@ -1,4 +1,4 @@
-"""Tests for ControllerClient using httpx MockTransport — no real network."""
+"""Tests for ControllerClient (W3a: mTLS + JWT + HMAC) using httpx MockTransport."""
 from __future__ import annotations
 
 import json
@@ -7,21 +7,23 @@ import uuid
 import httpx
 import pytest
 
+from dlw.auth.hmac_nonce import verify_hmac
 from dlw.executor.client import ControllerClient
+from tests.conftest import make_fake_auth_state
+
+
+_HMAC_SEED = b"\x05" * 32
 
 
 def _mock_handler(request: httpx.Request) -> httpx.Response:
     """Routes requests to canned responses based on URL path."""
     path = request.url.path
-    body = json.loads(request.content) if request.content else {}
 
-    if path == "/api/v1/executors/join" and request.method == "POST":
-        return httpx.Response(201, json={
-            "id": body["id"], "status": "joining", "health_score": 100,
-        })
     if path.endswith("/heartbeat") and request.method == "POST":
+        body = json.loads(request.content) if request.content else {}
         return httpx.Response(200, json={
-            "id": "x", "status": "healthy", "health_score": body.get("health_score", 100),
+            "id": "x", "status": "healthy",
+            "health_score": body.get("health_score", 100),
         })
     if path.endswith("/poll") and request.method == "POST":
         return httpx.Response(200, json={
@@ -48,19 +50,18 @@ def transport() -> httpx.MockTransport:
     return httpx.MockTransport(_mock_handler)
 
 
-@pytest.mark.slow
-async def test_join_sends_correct_body(transport) -> None:
-    async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport
-    ) as c:
-        r = await c.join(executor_id="ex-1", host_id="h", capabilities={"nic_speed_gbps": 10})
-    assert r["status"] == "joining"
+@pytest.fixture
+def auth_state(tmp_path):
+    return make_fake_auth_state(
+        tmp_path, executor_id="ex-1", epoch=1,
+        jwt="header.payload.sig", hmac_seed=_HMAC_SEED,
+    )
 
 
 @pytest.mark.slow
-async def test_heartbeat_returns_state(transport) -> None:
+async def test_heartbeat_returns_state(transport, auth_state) -> None:
     async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport
+        base_url="http://test", auth_state=auth_state, _transport=transport,
     ) as c:
         r = await c.heartbeat(executor_id="ex-1", health_score=88, parts_dir_bytes=0)
     assert r["status"] == "healthy"
@@ -68,9 +69,9 @@ async def test_heartbeat_returns_state(transport) -> None:
 
 
 @pytest.mark.slow
-async def test_poll_returns_assignment(transport) -> None:
+async def test_poll_returns_assignment(transport, auth_state) -> None:
     async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport
+        base_url="http://test", auth_state=auth_state, _transport=transport,
     ) as c:
         r = await c.poll(executor_id="ex-1")
     assert r["assigned"] is True
@@ -79,9 +80,9 @@ async def test_poll_returns_assignment(transport) -> None:
 
 
 @pytest.mark.slow
-async def test_report_propagates_token(transport) -> None:
+async def test_report_propagates_token(transport, auth_state) -> None:
     async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport
+        base_url="http://test", auth_state=auth_state, _transport=transport,
     ) as c:
         r = await c.report(
             subtask_id=uuid.uuid4(),
@@ -94,84 +95,81 @@ async def test_report_propagates_token(transport) -> None:
 
 
 @pytest.mark.slow
-async def test_unauthenticated_returns_401(transport) -> None:
-    """ControllerClient should propagate 401 as an exception (caller decides retry)."""
+async def test_unauthenticated_returns_401(auth_state) -> None:
+    """ControllerClient propagates 401 as an exception (caller decides retry)."""
     def unauth(_):
-        return httpx.Response(401, json={"detail": "missing bearer token"})
+        return httpx.Response(401, json={"detail": "missing executor JWT"})
     t = httpx.MockTransport(unauth)
-    async with ControllerClient(base_url="http://test", bearer_token="bad", _transport=t) as c:
+    async with ControllerClient(
+        base_url="http://test", auth_state=auth_state, _transport=t,
+    ) as c:
         with pytest.raises(httpx.HTTPStatusError):
             await c.heartbeat(executor_id="ex-1", health_score=100, parts_dir_bytes=0)
 
 
 @pytest.mark.slow
-async def test_client_persists_epoch_from_join_response() -> None:
-    """After join(), client should store the response epoch internally."""
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(201, json={
-            "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 7,
-        })
+async def test_client_attaches_jwt_and_epoch_headers(tmp_path) -> None:
+    """Every request carries Authorization: Bearer <jwt> + X-Executor-Epoch."""
+    seen: list[dict[str, str]] = []
 
-    transport = httpx.MockTransport(handler)
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({k.lower(): v for k, v in request.headers.items()})
+        return httpx.Response(200, json={"assigned": False})
+
+    state = make_fake_auth_state(
+        tmp_path, executor_id="h-w-1", epoch=7, jwt="jwt-token-7",
+        hmac_seed=_HMAC_SEED,
+    )
     async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport,
+        base_url="http://test", auth_state=state,
+        _transport=httpx.MockTransport(handler),
     ) as c:
-        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
-        assert c.current_epoch() == 7
+        await c.poll(executor_id="h-w-1")
+
+    assert seen[0]["authorization"] == "Bearer jwt-token-7"
+    assert seen[0]["x-executor-epoch"] == "7"
 
 
 @pytest.mark.slow
-async def test_client_attaches_epoch_header_on_heartbeat() -> None:
-    """heartbeat must send X-Executor-Epoch matching the join response."""
-    seen_headers: list[dict[str, str]] = []
+async def test_client_signs_heartbeat_with_hmac(tmp_path) -> None:
+    """heartbeat must carry X-HMAC-* headers and the signature must verify
+    against the executor's hmac_seed over the exact request body."""
+    seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen_headers.append({k.lower(): v for k, v in request.headers.items()})
-        if request.url.path.endswith("/join"):
-            return httpx.Response(201, json={
-                "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 5,
-            })
-        return httpx.Response(200, json={
-            "id": "h-w-1", "status": "healthy", "health_score": 100, "epoch": 5,
-        })
+        seen["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        seen["body"] = bytes(request.content)
+        return httpx.Response(200, json={"id": "h-w-1", "status": "healthy",
+                                         "health_score": 100})
 
-    transport = httpx.MockTransport(handler)
+    state = make_fake_auth_state(
+        tmp_path, executor_id="h-w-1", epoch=3, jwt="jwt-3",
+        hmac_seed=_HMAC_SEED,
+    )
     async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport,
+        base_url="http://test", auth_state=state,
+        _transport=httpx.MockTransport(handler),
     ) as c:
-        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
         await c.heartbeat(executor_id="h-w-1", health_score=100, parts_dir_bytes=0)
 
-    assert "x-executor-epoch" in seen_headers[1]
-    assert seen_headers[1]["x-executor-epoch"] == "5"
+    h = seen["headers"]
+    assert "x-hmac-timestamp" in h
+    assert "x-hmac-nonce" in h
+    assert "x-hmac-signature" in h
+    assert verify_hmac(
+        _HMAC_SEED,
+        ts=int(h["x-hmac-timestamp"]),
+        nonce=h["x-hmac-nonce"],
+        body=seen["body"],
+        signature_hex=h["x-hmac-signature"],
+    )
 
 
 @pytest.mark.slow
-async def test_client_attaches_epoch_header_on_report() -> None:
-    seen_headers: list[dict[str, str]] = []
-    import uuid as _uuid
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_headers.append({k.lower(): v for k, v in request.headers.items()})
-        if request.url.path.endswith("/join"):
-            return httpx.Response(201, json={
-                "id": "h-w-1", "status": "joining", "health_score": 100, "epoch": 11,
-            })
-        return httpx.Response(200, json={
-            "subtask_status": "succeeded", "task_status": "succeeded",
-        })
-
-    transport = httpx.MockTransport(handler)
-    async with ControllerClient(
-        base_url="http://test", bearer_token="t", _transport=transport,
-    ) as c:
-        await c.join(executor_id="h-w-1", host_id="h", capabilities={})
-        await c.report(
-            subtask_id=_uuid.uuid4(),
-            status="succeeded",
-            assignment_token=_uuid.uuid4(),
-            actual_sha256="a" * 64,
-            bytes_downloaded=4096,
-        )
-
-    assert seen_headers[1]["x-executor-epoch"] == "11"
+async def test_current_epoch_reads_auth_state(tmp_path) -> None:
+    state = make_fake_auth_state(tmp_path, epoch=42)
+    c = ControllerClient(base_url="http://test", auth_state=state)
+    assert c.current_epoch() == 42
+    new = make_fake_auth_state(tmp_path, epoch=43)
+    c.update_auth(new)
+    assert c.current_epoch() == 43

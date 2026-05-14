@@ -10,19 +10,33 @@ from dlw.schemas.storage import StorageConfig
 from dlw.schemas.subtask import SubTaskRead
 
 
-class ExecutorJoin(BaseModel):
-    """POST /api/v1/executors/join — first contact from new executor.
+class ExecutorRegister(BaseModel):
+    host_id: str
+    executor_id_proposal: str
+    capabilities: dict[str, Any] = {}
+    client_csr_pem: str
 
-    NOTE (W2-H): Invariant 9 in `docs/v2.0/03-distributed-correctness.md`
-    requires id format `^[a-z0-9-]+-worker-\\d+$`. Week 2 does NOT enforce this
-    at the schema level — tests use shorter ids like 'exec-A' for brevity.
-    Phase 2 will add a `@field_validator("id")` enforcing the regex once mTLS
-    cert binding is in place (the cert CN should match the executor id).
-    """
-    id: str = Field(min_length=1, max_length=64, examples=["host-12.local-worker-1"])
-    host_id: str = Field(min_length=1, max_length=64)
-    cert_fingerprint: str = Field(default="placeholder-week2", max_length=128)
-    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+class RegistrationResponse(BaseModel):
+    executor_id: str
+    epoch: int
+    client_cert_pem: str
+    ca_chain: list[str]
+    executor_jwt: str
+    hmac_seed_hex: str
+    cert_renew_in_seconds: int
+    jwt_renew_in_seconds: int
+
+
+class RenewRequest(BaseModel):
+    client_csr_pem: str | None = None
+
+
+class RenewResponse(BaseModel):
+    executor_jwt: str
+    jwt_renew_in_seconds: int
+    client_cert_pem: str | None = None
+    cert_renew_in_seconds: int | None = None
 
 
 class ExecutorHeartbeat(BaseModel):

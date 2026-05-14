@@ -496,6 +496,21 @@ paths:
           name: X-Heartbeat-HMAC
           required: true
           schema: {type: string}
+        - in: header
+          name: X-HMAC-Timestamp
+          required: true
+          schema: {type: integer}
+          description: Unix epoch seconds; validated within ±5 min of server clock
+        - in: header
+          name: X-HMAC-Nonce
+          required: true
+          schema: {type: string}
+          description: 128-bit random hex nonce; replay window enforced by server
+        - in: header
+          name: X-HMAC-Signature
+          required: true
+          schema: {type: string}
+          description: HMAC-SHA256(hmac_seed_hex, body || X-HMAC-Timestamp || X-HMAC-Nonce)
       requestBody:
         required: true
         content:
@@ -638,18 +653,39 @@ paths:
         schema: {type: string}
     post:
       tags: [executors]
-      summary: Renew JWT (proactive)
+      summary: Renew executor JWT and optionally rotate mTLS cert
       operationId: renewExecutorJwt
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_csr_pem:
+                  type: string
+                  nullable: true
+                  description: X.509 CSR PEM for cert rotation; omit or null to renew JWT only
       responses:
         '200':
-          description: New JWT
+          description: Renewed credentials
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   executor_jwt: {type: string}
-                  expires_at: {type: string, format: date-time}
+                  jwt_renew_in_seconds: {type: integer}
+                  client_cert_pem:
+                    type: string
+                    nullable: true
+                    description: New PEM-encoded client cert; null if no CSR was provided
+                  cert_renew_in_seconds:
+                    type: integer
+                    nullable: true
+                    description: Seconds until next cert renewal; null if cert not rotated
+        '401':
+          description: Invalid or expired executor JWT / mTLS cert
 
   /executors/{executorId}/poll:
     parameters:
@@ -1525,7 +1561,7 @@ components:
     # ===== Executor =====
     ExecutorRegisterRequest:
       type: object
-      required: [host_id, executor_id_proposal, capabilities, client_csr]
+      required: [host_id, executor_id_proposal, capabilities, client_csr_pem]
       properties:
         host_id: {type: string}
         executor_id_proposal: {type: string}
@@ -1565,22 +1601,26 @@ components:
                 properties:
                   alias: {type: string}
                   source_id: {type: string}
-        client_csr:
+        client_csr_pem:
           type: string
-          description: X.509 CSR PEM
+          description: X.509 CSR in PEM format
 
     ExecutorRegisterResponse:
       type: object
       properties:
         executor_id: {type: string}
         epoch: {type: integer, format: int64}
-        client_cert: {type: string, description: PEM-encoded X.509}
+        client_cert_pem: {type: string, description: PEM-encoded X.509 client certificate}
         ca_chain:
           type: array
           items: {type: string}
+          description: CA certificate chain PEM strings
         executor_jwt: {type: string}
+        hmac_seed_hex: {type: string, description: 256-bit hex HMAC seed for heartbeat signatures}
+        cert_renew_in_seconds: {type: integer, description: Seconds until certificate renewal recommended}
+        jwt_renew_in_seconds: {type: integer, description: Seconds until JWT renewal recommended}
         jwt_signing_alg: {type: string, const: EdDSA}
-        next_renew_in_seconds: {type: integer}
+        next_renew_in_seconds: {type: integer, description: "Deprecated: use cert_renew_in_seconds"}
 
     HeartbeatRequest:
       type: object

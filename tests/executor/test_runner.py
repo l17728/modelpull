@@ -1,4 +1,4 @@
-"""Tests for ExecutorRunner main loop."""
+"""Tests for ExecutorRunner main loop (W3a: mTLS+JWT auth bootstrap)."""
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +12,7 @@ from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.downloader import DownloadResult, HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
+from tests.conftest import make_fake_auth_state
 
 
 @pytest.fixture
@@ -24,11 +25,17 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExecutorSetting
     return ExecutorSettings()
 
 
+@pytest.fixture
+def auth_state(tmp_path):
+    """A pre-built AuthState injected into the runner so run() skips
+    load_or_register (no HTTP call to a controller in these unit tests)."""
+    return make_fake_auth_state(tmp_path, executor_id="host-test-w1", epoch=1)
+
+
 @pytest.mark.slow
-async def test_runner_join_then_heartbeat_in_idle(settings) -> None:
+async def test_runner_heartbeats_in_idle(settings, auth_state) -> None:
     """When poll always returns assigned=False, runner heartbeats but does not download."""
     client = MagicMock(spec=ControllerClient)
-    client.join = AsyncMock(return_value={"id": "host-test-w1", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
     downloader = MagicMock(spec=HfS3StreamDownloader)
@@ -36,26 +43,26 @@ async def test_runner_join_then_heartbeat_in_idle(settings) -> None:
     runner = ExecutorRunner(
         settings=settings, client=client,
         stream_downloader=downloader, chunk_downloader=MagicMock(),
+        auth_state=auth_state,
     )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
     runner.request_shutdown()
     await asyncio.wait_for(task, timeout=5)
 
-    client.join.assert_awaited_once()
+    client.update_auth.assert_called_once()
     assert client.heartbeat.await_count >= 1
     assert client.poll.await_count >= 1
     downloader.download.assert_not_called()
 
 
 @pytest.mark.slow
-async def test_runner_executes_assigned_subtask(settings) -> None:
+async def test_runner_executes_assigned_subtask(settings, auth_state) -> None:
     """When poll returns an assignment, runner downloads + reports."""
     sub_id = uuid.uuid4()
     token = uuid.uuid4()
 
     client = MagicMock(spec=ControllerClient)
-    client.join = AsyncMock(return_value={"id": "host-test-w1", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
 
     poll_results = [
@@ -87,12 +94,12 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
     )
     downloader = MagicMock(spec=HfS3StreamDownloader)
     downloader.download = AsyncMock(return_value=download_result)
-
     client.report = AsyncMock(return_value={"subtask_status": "succeeded", "task_status": "pending"})
 
     runner = ExecutorRunner(
         settings=settings, client=client,
         stream_downloader=downloader, chunk_downloader=MagicMock(),
+        auth_state=auth_state,
     )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
@@ -108,13 +115,12 @@ async def test_runner_executes_assigned_subtask(settings) -> None:
 
 
 @pytest.mark.slow
-async def test_runner_reports_failure_on_download_error(settings) -> None:
+async def test_runner_reports_failure_on_download_error(settings, auth_state) -> None:
     """If downloader raises, runner reports status=failed with the error message."""
     sub_id = uuid.uuid4()
     token = uuid.uuid4()
 
     client = MagicMock(spec=ControllerClient)
-    client.join = AsyncMock(return_value={"id": "host-test-w1", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
     client.poll = AsyncMock(side_effect=[
         {
@@ -137,6 +143,7 @@ async def test_runner_reports_failure_on_download_error(settings) -> None:
     runner = ExecutorRunner(
         settings=settings, client=client,
         stream_downloader=downloader, chunk_downloader=MagicMock(),
+        auth_state=auth_state,
     )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(2.5)
@@ -150,10 +157,9 @@ async def test_runner_reports_failure_on_download_error(settings) -> None:
 
 
 @pytest.mark.slow
-async def test_runner_graceful_shutdown(settings) -> None:
+async def test_runner_graceful_shutdown(settings, auth_state) -> None:
     """request_shutdown() during execution should cleanly cancel the loops."""
     client = MagicMock(spec=ControllerClient)
-    client.join = AsyncMock(return_value={"id": "x", "status": "joining", "health_score": 100})
     client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy", "health_score": 100})
     client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
     downloader = MagicMock(spec=HfS3StreamDownloader)
@@ -161,6 +167,7 @@ async def test_runner_graceful_shutdown(settings) -> None:
     runner = ExecutorRunner(
         settings=settings, client=client,
         stream_downloader=downloader, chunk_downloader=MagicMock(),
+        auth_state=auth_state,
     )
     task = asyncio.create_task(runner.run())
     await asyncio.sleep(0.3)
@@ -170,11 +177,10 @@ async def test_runner_graceful_shutdown(settings) -> None:
 
 @pytest.mark.slow
 async def test_runner_passes_assignment_with_repo_and_storage(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """W4: runner forwards repo_id/revision/storage_config from /poll to downloader."""
     from dlw.executor.downloader import Assignment, DownloadResult
-    from dlw.schemas.storage import StorageConfig
 
     captured: dict[str, object] = {}
 
@@ -189,9 +195,9 @@ async def test_runner_passes_assignment_with_repo_and_storage(
             )
 
     class FakeClient:
-        async def join(self, **kw): pass
-        async def heartbeat(self, **kw): pass
         joined_polls = 0
+        def update_auth(self, _state): pass
+        async def heartbeat(self, **kw): pass
         async def poll(self, **kw):
             FakeClient.joined_polls += 1
             if FakeClient.joined_polls > 1:
@@ -220,6 +226,7 @@ async def test_runner_passes_assignment_with_repo_and_storage(
     runner = ExecutorRunner(
         settings=settings, client=FakeClient(),
         stream_downloader=FakeDownloader(), chunk_downloader=MagicMock(),
+        auth_state=make_fake_auth_state(tmp_path, executor_id="host-r-worker-1"),
     )
     run_task = asyncio.create_task(runner.run())
     await asyncio.sleep(2)
@@ -236,67 +243,61 @@ async def test_runner_passes_assignment_with_repo_and_storage(
 
 
 @pytest.mark.slow
-async def test_runner_rejoins_on_epoch_mismatch() -> None:
-    """Runner: on 401 EPOCH_MISMATCH, abort current poll + re-join + continue."""
+async def test_runner_reregisters_on_poll_401(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """W3a: on a 401 from poll, the runner re-registers (load_or_register) and
+    continues. Generalizes the W1 EPOCH_MISMATCH re-join path."""
     import httpx as _httpx
-    import uuid as _u
-    from dlw.executor.runner import ExecutorRunner
-    from dlw.executor.config import ExecutorSettings
+    import dlw.executor.runner as runner_mod
+
+    register_calls: list[int] = []
+
+    async def fake_load_or_register(**kwargs):
+        register_calls.append(1)
+        return make_fake_auth_state(
+            tmp_path, executor_id=kwargs["executor_id"],
+            epoch=len(register_calls),
+        )
+
+    monkeypatch.setattr(runner_mod, "load_or_register", fake_load_or_register)
 
     class FakeClient:
         def __init__(self):
             self.calls: list[str] = []
-            self._poll_returns_401_once = True
-            self._epoch: int | None = None
-
-        def current_epoch(self): return self._epoch
-
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-
-        async def join(self, *, executor_id, host_id, capabilities):
-            self.calls.append("join")
-            self._epoch = 2 if "join" in self.calls[:-1] else 1
-            return {"id": executor_id, "epoch": self._epoch, "status": "joining",
-                    "health_score": 100}
-
+            self._poll_401_once = True
+        def update_auth(self, _state):
+            self.calls.append("update_auth")
         async def heartbeat(self, **kw):
             self.calls.append("heartbeat")
-
         async def poll(self, **kw):
             self.calls.append("poll")
-            if self._poll_returns_401_once:
-                self._poll_returns_401_once = False
+            if self._poll_401_once:
+                self._poll_401_once = False
                 req = _httpx.Request("POST", "http://x/poll")
-                resp = _httpx.Response(
-                    401, json={"detail": {"code": "EPOCH_MISMATCH",
-                                          "expected": 2, "got": 1}}
-                )
-                raise _httpx.HTTPStatusError(
-                    "401", request=req, response=resp,
-                )
+                resp = _httpx.Response(401, json={"detail": "invalid JWT"})
+                raise _httpx.HTTPStatusError("401", request=req, response=resp)
             return {"assigned": False}
-
         async def report(self, **kw): pass
-
-    settings = ExecutorSettings(
-        id="rj-host-worker-1", host_id="rj-host", bearer_token="t",
-        heartbeat_interval_seconds=1, poll_interval_seconds=1,
-    )
 
     class FakeDl:
         async def download(self, **kw):
             raise AssertionError("downloader should NOT be invoked in this test")
 
+    settings = ExecutorSettings(
+        id="rj-host-worker-1", host_id="rj-host", bearer_token="t",
+        heartbeat_interval_seconds=1, poll_interval_seconds=1,
+    )
     runner = ExecutorRunner(
         settings=settings, client=FakeClient(),
         stream_downloader=FakeDl(), chunk_downloader=MagicMock(),
+        # auth_state=None → run() calls (the monkeypatched) load_or_register.
     )
     run_task = asyncio.create_task(runner.run())
-    await asyncio.sleep(2.5)   # let 1-2 poll cycles run
+    await asyncio.sleep(2.5)
     runner.request_shutdown()
     await asyncio.wait_for(run_task, timeout=3)
 
-    # join called at least twice (initial + after EPOCH_MISMATCH)
-    assert runner._client.calls.count("join") >= 2
+    # load_or_register called at least twice: initial bootstrap + after the 401.
+    assert len(register_calls) >= 2
     assert "poll" in runner._client.calls

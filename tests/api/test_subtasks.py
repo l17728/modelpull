@@ -1,4 +1,4 @@
-"""Tests for subtasks API: POST /report including double-report idempotency."""
+"""Tests for subtasks API: POST /report under mTLS + JWT (W3a)."""
 from __future__ import annotations
 
 import uuid
@@ -9,9 +9,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.config import get_settings
 from dlw.db.base import Base
+from tests.conftest import (
+    executor_request_headers,
+    register_test_executor,
+    signed_heartbeat_headers,
+)
 
 
 _TOKEN = "test-bearer-token-12345"
+_ENROLL = "test-enrollment-token-w3a-subtasks"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -47,6 +53,7 @@ async def _cleanup_tasks(engine):
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -54,60 +61,52 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def auth() -> dict[str, str]:
+    """Bearer header for /tasks (UI) endpoints."""
     return {"Authorization": f"Bearer {_TOKEN}"}
 
 
 @pytest.fixture
-async def client():
+async def client(ephemeral_ca):
     from dlw.main import create_app
+    from dlw.auth.hmac_nonce import NonceStore
     app = create_app()
+    app.state.ca = ephemeral_ca["ca"]
+    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
+    app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
+    app.state.enrollment_token = _ENROLL
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
 
-@pytest.fixture
-async def joined_executor(client: AsyncClient, auth: dict[str, str]) -> tuple[str, int]:
-    """POST /join and return (executor_id, epoch). Used by tests that need fence headers."""
-    r = await client.post("/api/v1/executors/join", json={
-        "id": "sub-fence-worker-1", "host_id": "sub-fence-host",
-    }, headers=auth)
-    assert r.status_code == 201
-    body = r.json()
-    return body["id"], body["epoch"]
-
-
-async def _setup_assigned_subtask(client, auth, repo_id="o/sub-test") -> tuple[str, str, int]:
-    """Helper: create task → join executor → heartbeat → poll → return (subtask_id, exec_id, epoch).
-
-    W2a: claim_one_subtask requires status='healthy'|'degraded'. A heartbeat
-    after join transitions the executor from 'joining' to 'healthy'.
-    """
+async def _setup_assigned_subtask(
+    client, auth, repo_id="o/sub-test",
+) -> tuple[str, dict]:
+    """create task → register executor → heartbeat → poll → return (subtask_id, reg)."""
     await client.post("/api/v1/tasks", json={
         "repo_id": repo_id, "revision": "0" * 40, "storage_id": 1,
     }, headers=auth)
     exec_id = f"ex-{repo_id.replace('/', '-')}"
-    rj = await client.post("/api/v1/executors/join", json={
-        "id": exec_id, "host_id": "h"
-    }, headers=auth)
-    epoch = rj.json()["epoch"]
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL, executor_id=exec_id, host_id="h",
+    )
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
     await client.post(f"/api/v1/executors/{exec_id}/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
-                      headers={**auth, "X-Executor-Epoch": str(epoch)})
+                      content=hb_body, headers=signed_heartbeat_headers(reg, hb_body))
     r = await client.post(
         f"/api/v1/executors/{exec_id}/poll",
-        headers={**auth, "X-Executor-Epoch": str(epoch)},
+        headers=executor_request_headers(reg),
     )
-    return r.json()["subtask"]["id"], exec_id, epoch
+    return r.json()["subtask"]["id"], reg
 
 
 @pytest.mark.slow
 async def test_report_succeeded_marks_subtask_done(client, auth) -> None:
-    sub_id, exec_id, epoch = await _setup_assigned_subtask(client, auth, "o/r1")
+    sub_id, reg = await _setup_assigned_subtask(client, auth, "o/r1")
     r = await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
         "status": "succeeded",
         "actual_sha256": "a" * 64,
         "bytes_downloaded": 1234,
-    }, headers={**auth, "X-Executor-Epoch": str(epoch)})
+    }, headers=executor_request_headers(reg))
     assert r.status_code == 200, r.text
 
 
@@ -117,26 +116,23 @@ async def test_report_two_subtasks_succeed_then_task_succeeds(client, auth) -> N
         "repo_id": "o/full", "revision": "0" * 40, "storage_id": 1,
     }, headers=auth)
     task_id = create.json()["id"]
-    rj = await client.post("/api/v1/executors/join", json={
-        "id": "ex-full", "host_id": "h"
-    }, headers=auth)
-    epoch = rj.json()["epoch"]
-    # W2a: heartbeat transitions joining → healthy before poll can claim work.
-    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL, executor_id="ex-full", host_id="h",
+    )
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
     await client.post("/api/v1/executors/ex-full/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
-                      headers={**auth, "X-Executor-Epoch": str(epoch)})
+                      content=hb_body, headers=signed_heartbeat_headers(reg, hb_body))
     sub_ids = []
     for _ in range(2):
         r = await client.post(
             "/api/v1/executors/ex-full/poll",
-            headers={**auth, "X-Executor-Epoch": str(epoch)},
+            headers=executor_request_headers(reg),
         )
         sub_ids.append(r.json()["subtask"]["id"])
     for sid in sub_ids:
         await client.post(f"/api/v1/subtasks/{sid}/report", json={
             "status": "succeeded", "actual_sha256": "b" * 64, "bytes_downloaded": 100,
-        }, headers={**auth, "X-Executor-Epoch": str(epoch)})
+        }, headers=executor_request_headers(reg))
     r = await client.get(f"/api/v1/tasks/{task_id}", headers=auth)
     assert r.json()["status"] == "succeeded"
     assert r.json()["completed_at"] is not None
@@ -148,23 +144,20 @@ async def test_report_one_failure_marks_task_failed(client, auth) -> None:
         "repo_id": "o/fail", "revision": "0" * 40, "storage_id": 1,
     }, headers=auth)
     task_id = create.json()["id"]
-    rj = await client.post("/api/v1/executors/join", json={
-        "id": "ex-fail", "host_id": "h"
-    }, headers=auth)
-    epoch = rj.json()["epoch"]
-    # W2a: heartbeat transitions joining → healthy before poll can claim work.
-    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL, executor_id="ex-fail", host_id="h",
+    )
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
     await client.post("/api/v1/executors/ex-fail/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
-                      headers={**auth, "X-Executor-Epoch": str(epoch)})
+                      content=hb_body, headers=signed_heartbeat_headers(reg, hb_body))
     r = await client.post(
         "/api/v1/executors/ex-fail/poll",
-        headers={**auth, "X-Executor-Epoch": str(epoch)},
+        headers=executor_request_headers(reg),
     )
     sub_id = r.json()["subtask"]["id"]
     await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
         "status": "failed", "error": "disk full",
-    }, headers={**auth, "X-Executor-Epoch": str(epoch)})
+    }, headers=executor_request_headers(reg))
     r = await client.get(f"/api/v1/tasks/{task_id}", headers=auth)
     assert r.json()["status"] == "failed"
     assert "disk full" in r.json()["error_message"]
@@ -172,14 +165,19 @@ async def test_report_one_failure_marks_task_failed(client, auth) -> None:
 
 @pytest.mark.slow
 async def test_report_unknown_subtask_returns_404(client, auth) -> None:
+    """Authenticated request to a random subtask id → 404."""
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL, executor_id="ex-404", host_id="h",
+    )
     r = await client.post(f"/api/v1/subtasks/{uuid.uuid4()}/report", json={
         "status": "succeeded",
-    }, headers={**auth, "X-Executor-Epoch": "1"})
+    }, headers=executor_request_headers(reg))
     assert r.status_code == 404
 
 
 @pytest.mark.slow
 async def test_report_unauthenticated_returns_401(client) -> None:
+    """No mTLS cert → /report rejected before the handler runs."""
     r = await client.post(f"/api/v1/subtasks/{uuid.uuid4()}/report", json={
         "status": "succeeded",
     })
@@ -189,14 +187,14 @@ async def test_report_unauthenticated_returns_401(client) -> None:
 @pytest.mark.slow
 async def test_double_report_returns_409(client, auth) -> None:
     """W2-G: idempotency / illegal-transition guard."""
-    sub_id, exec_id, epoch = await _setup_assigned_subtask(client, auth, "o/dup")
+    sub_id, reg = await _setup_assigned_subtask(client, auth, "o/dup")
     r1 = await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
         "status": "succeeded", "actual_sha256": "c" * 64, "bytes_downloaded": 100,
-    }, headers={**auth, "X-Executor-Epoch": str(epoch)})
+    }, headers=executor_request_headers(reg))
     assert r1.status_code == 200
     r2 = await client.post(f"/api/v1/subtasks/{sub_id}/report", json={
         "status": "succeeded", "actual_sha256": "c" * 64, "bytes_downloaded": 100,
-    }, headers={**auth, "X-Executor-Epoch": str(epoch)})
+    }, headers=executor_request_headers(reg))
     assert r2.status_code == 409, r2.text
 
 
@@ -204,10 +202,16 @@ async def test_double_report_returns_409(client, auth) -> None:
 async def test_report_missing_epoch_header_returns_401(
     client: AsyncClient, auth: dict[str, str],
 ) -> None:
+    """Authenticated but no X-Executor-Epoch → 401."""
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL, executor_id="ex-noepoch", host_id="h",
+    )
+    headers = executor_request_headers(reg)
+    del headers["X-Executor-Epoch"]
     r = await client.post(
         f"/api/v1/subtasks/{uuid.uuid4()}/report",
         json={"status": "succeeded", "bytes_downloaded": 100},
-        headers=auth,
+        headers=headers,
     )
     assert r.status_code == 401
 
@@ -216,29 +220,23 @@ async def test_report_missing_epoch_header_returns_401(
 async def test_report_stale_epoch_returns_EPOCH_MISMATCH(
     client: AsyncClient, auth: dict[str, str],
 ) -> None:
-    """Create task + join executor + claim subtask + report with stale epoch."""
-    # Setup: create a task to generate subtasks
+    """Claim a subtask under epoch=1, re-register to epoch=2, report with the
+    stale epoch=1 (using the fresh cert) → EPOCH_MISMATCH."""
     r = await client.post("/api/v1/tasks", json={
         "repo_id": "o/fence-report", "revision": "0" * 40, "storage_id": 1,
     }, headers=auth)
-    task_id = r.json()["id"]
+    assert r.status_code == 201
 
-    # Join executor — get epoch=1
-    rj = await client.post("/api/v1/executors/join", json={
-        "id": "report-host-worker-1", "host_id": "report-host",
-    }, headers=auth)
-    epoch = rj.json()["epoch"]
-
-    # W2a: heartbeat transitions joining → healthy before poll can claim work.
-    # W2b1: include disk_free_gb so disk pre-flight allows claiming.
+    reg1 = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="report-host-worker-1", host_id="report-host",
+    )
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
     await client.post("/api/v1/executors/report-host-worker-1/heartbeat",
-                      json={"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100},
-                      headers={**auth, "X-Executor-Epoch": str(epoch)})
-
-    # Claim subtask via poll
+                      content=hb_body, headers=signed_heartbeat_headers(reg1, hb_body))
     rp = await client.post(
         "/api/v1/executors/report-host-worker-1/poll",
-        headers={**auth, "X-Executor-Epoch": str(epoch)},
+        headers=executor_request_headers(reg1),
     )
     assert rp.status_code == 200, rp.text
     if not rp.json()["assigned"]:
@@ -246,20 +244,23 @@ async def test_report_stale_epoch_returns_EPOCH_MISMATCH(
     subtask_id = rp.json()["subtask"]["id"]
     token = rp.json()["assignment_token"]
 
-    # Bump epoch (re-join → epoch=2)
-    rj2 = await client.post("/api/v1/executors/join", json={
-        "id": "report-host-worker-1", "host_id": "report-host",
-    }, headers=auth)
-    assert rj2.json()["epoch"] == epoch + 1
+    # Re-register → epoch=2 + fresh cert.
+    reg2 = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="report-host-worker-1", host_id="report-host",
+    )
+    assert reg2["epoch"] == reg1["epoch"] + 1
 
-    # Report with STALE epoch (the one we claimed under)
+    # Report with the fresh cert but the STALE epoch.
+    stale = dict(reg2)
+    stale["epoch"] = reg1["epoch"]
     rr = await client.post(
         f"/api/v1/subtasks/{subtask_id}/report",
         json={
             "status": "succeeded", "bytes_downloaded": 100,
             "actual_sha256": "a" * 64, "assignment_token": token,
         },
-        headers={**auth, "X-Executor-Epoch": str(epoch)},  # stale!
+        headers=executor_request_headers(stale),
     )
     assert rr.status_code == 401
     assert rr.json()["detail"]["code"] == "EPOCH_MISMATCH"

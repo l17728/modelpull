@@ -197,6 +197,34 @@ def check_d10_host_affinity_test_owner() -> list[str]:
     return []
 
 
+def check_no_bearer_on_executor_routes() -> list[str]:
+    """W3a §3.15: forbid Depends(require_bearer) in executor/subtask route files.
+    Those endpoints must use mTLS + JWT (not the UI shared-secret bearer)."""
+    errors: list[str] = []
+    files = [
+        ROOT / "src" / "dlw" / "api" / "executors.py",
+        ROOT / "src" / "dlw" / "api" / "subtasks.py",
+    ]
+    import ast as _ast
+    for f in files:
+        if not f.exists():
+            continue
+        tree = _ast.parse(f.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            if (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Name)
+                    and node.func.id == "Depends"
+                    and node.args
+                    and isinstance(node.args[0], _ast.Name)
+                    and node.args[0].id == "require_bearer"):
+                errors.append(
+                    f"{f.relative_to(ROOT)}:{node.lineno}: "
+                    f"require_bearer forbidden on executor/subtask routes "
+                    f"(use mTLS + JWT)"
+                )
+    return errors
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -334,6 +362,7 @@ def main() -> int:
     failures.extend(check_subtask_status_domain())
     failures.extend(check_task_status_domain())
     failures.extend(check_d10_host_affinity_test_owner())
+    failures.extend(check_no_bearer_on_executor_routes())
 
     # --- Report ---
     if failures:
