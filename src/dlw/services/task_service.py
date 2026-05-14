@@ -66,3 +66,45 @@ async def create_task(
         ))
     await session.flush()
     return task
+
+
+async def cancel_task(session: AsyncSession, task_id: uuid.UUID) -> DownloadTask:
+    """W2b2 §3.1: idempotently flip task to 'cancelling'.
+
+    Three-step transaction:
+      1. Lock task row FOR UPDATE; raise on missing or terminal state.
+      2. Set status='cancelling', cancelled_at=now().
+      3. Force-terminate any paused_* subtasks under this task to 'cancelled'
+         (avoids dead-lock: sweepers can't recover paused subs under a
+         cancelling task; complete_subtask's sibling-terminal check would
+         otherwise never fire).
+
+    Returns the locked-and-updated task. Caller commits.
+
+    Raises:
+      LookupError: task not found
+      ValueError: task already in terminal state (succeeded/failed/cancelled)
+    """
+    from datetime import UTC, datetime
+    from sqlalchemy import update
+
+    task = await session.get(DownloadTask, task_id, with_for_update=True)
+    if task is None:
+        raise LookupError(f"task {task_id} not found")
+    if task.status in ("succeeded", "failed", "cancelled"):
+        raise ValueError(
+            f"task {task_id} already in terminal state '{task.status}'"
+        )
+    if task.status == "cancelling":
+        return task   # idempotent
+
+    task.status = "cancelling"
+    task.cancelled_at = datetime.now(UTC)
+
+    await session.execute(
+        update(FileSubTask)
+        .where(FileSubTask.task_id == task_id)
+        .where(FileSubTask.status.in_(("paused_disk_full", "paused_external")))
+        .values(status="cancelled")
+    )
+    return task

@@ -27,7 +27,7 @@ from dlw.services.hf_metadata import (
     HfPrivateOrAuthRequired,
     RepoNotFound,
 )
-from dlw.services.task_service import EmptyRepo, create_task
+from dlw.services.task_service import EmptyRepo, cancel_task, create_task
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -90,3 +90,24 @@ async def get_task(task_id: uuid.UUID, session: AsyncSession = Depends(_session)
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
     return TaskDetail.model_validate(row)
+
+
+@router.post(
+    "/{task_id}/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_bearer)],
+)
+async def post_cancel_task(
+    task_id: uuid.UUID,
+    session: AsyncSession = Depends(_session),
+) -> TaskRead:
+    """W2b2 §3.2: cancel a task. Idempotent for cancelling state; 409 on terminal."""
+    try:
+        task = await cancel_task(session, task_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    await session.commit()
+    return TaskRead.model_validate(task)

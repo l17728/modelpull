@@ -57,6 +57,14 @@ async def claim_one_subtask(
         .exists()
     )
 
+    # W2b2 §3.3: skip subtasks whose parent task is cancelling/terminal.
+    parent_active = (
+        select(DownloadTask.id)
+        .where(DownloadTask.id == FileSubTask.task_id)
+        .where(DownloadTask.status.in_(("pending", "scheduling", "downloading")))
+        .exists()
+    )
+
     # W2b1: candidate scan with disk pre-flight.
     GiB = 1024 ** 3
     free_bytes = (e_self.disk_free_gb or 0) * GiB - (e_self.parts_dir_bytes or 0)
@@ -65,6 +73,7 @@ async def claim_one_subtask(
         select(FileSubTask)
         .where(FileSubTask.status == "pending")
         .where(~same_host_holds)
+        .where(parent_active)           # W2b2 NEW
         .order_by(FileSubTask.created_at)
         .limit(_K_CANDIDATES)
         .with_for_update(skip_locked=True)
@@ -119,17 +128,46 @@ async def complete_subtask(
             f"(expected={sub.executor_epoch}, got={executor_epoch})"
         )
 
-    # W2b1: paused_disk_full short-circuits — environmental, not a quality signal.
-    if final_status == "paused_disk_full":
-        sub.status = "paused_disk_full"
-        sub.executor_id = None
-        sub.executor_epoch = None
-        sub.assignment_token = None
-        sub.assigned_at = None
-        sub.last_error = error
-        # Don't transition parent task; don't call transition_executor.
-        parent = await session.get(DownloadTask, sub.task_id)
-        return sub, parent
+    # W2b1+W2b2: paused_disk_full / paused_external short-circuit.
+    # Cancel-aware: if parent is cancelling, force-terminate sub to 'cancelled'
+    # and fall through to the sibling-terminal tail (so cancelling → cancelled
+    # can fire). Otherwise apply paused state and return early — paused subs
+    # are NOT terminal, so no completed_at, no task transition, no executor
+    # state-machine call.
+    if final_status in ("paused_disk_full", "paused_external"):
+        parent_locked = await session.get(
+            DownloadTask, sub.task_id, with_for_update=True
+        )
+        if parent_locked is not None and parent_locked.status == "cancelling":
+            # Cancel-aware: force-terminate to cancelled (terminal). Fall through.
+            sub.status = "cancelled"
+            sub.executor_id = None
+            sub.executor_epoch = None
+            sub.assignment_token = None
+            sub.assigned_at = None
+            sub.last_error = error
+            sub.completed_at = datetime.now(UTC)
+            # Re-fetch siblings + run the cancel-aware tail manually here.
+            parent = parent_locked
+            siblings = (await session.execute(
+                select(FileSubTask).where(FileSubTask.task_id == sub.task_id)
+            )).scalars().all()
+            statuses = {s.status for s in siblings}
+            TERMINAL = {"succeeded", "failed", "cancelled"}
+            if statuses <= TERMINAL:
+                parent.status = "cancelled"
+                parent.completed_at = datetime.now(UTC)
+            return sub, parent
+        else:
+            sub.status = final_status
+            sub.last_paused_at = datetime.now(UTC)
+            sub.executor_id = None
+            sub.executor_epoch = None
+            sub.assignment_token = None
+            sub.assigned_at = None
+            sub.last_error = error
+            parent = await session.get(DownloadTask, sub.task_id)
+            return sub, parent
 
     # W4: sha256 verification gate
     if (
@@ -159,13 +197,22 @@ async def complete_subtask(
     )).scalars().all()
 
     statuses = {s.status for s in siblings}
-    if "failed" in statuses:
-        parent.status = "failed"
-        parent.error_message = f"subtask {sub.filename} failed: {error}"
+    TERMINAL = {"succeeded", "failed", "cancelled"}
+
+    if parent.status == "cancelling" and statuses <= TERMINAL:
+        # W2b2 §3.3: all siblings terminal under cancelling → transition to cancelled.
+        parent.status = "cancelled"
         parent.completed_at = datetime.now(UTC)
-    elif statuses == {"succeeded"}:
-        parent.status = "succeeded"
-        parent.completed_at = datetime.now(UTC)
+    elif parent.status != "cancelling":
+        # Normal (non-cancelling) path — unchanged from W1+W2a.
+        if "failed" in statuses:
+            parent.status = "failed"
+            parent.error_message = f"subtask {sub.filename} failed: {error}"
+            parent.completed_at = datetime.now(UTC)
+        elif statuses == {"succeeded"}:
+            parent.status = "succeeded"
+            parent.completed_at = datetime.now(UTC)
+    # else: parent is cancelling but not all siblings terminal — stay cancelling.
 
     # W2a §3.3: route executor health update through the state machine.
     # Unreachable if the W1 epoch-mismatch raised earlier (zombie completion).

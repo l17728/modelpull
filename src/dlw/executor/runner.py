@@ -159,6 +159,7 @@ class ExecutorRunner:
         self, *, subtask: dict, assignment_token: uuid.UUID,
         repo_id: str, revision: str, storage_config: dict,
     ) -> None:
+        import httpx as _httpx
         from dlw.executor.downloader import Assignment
         from dlw.schemas.storage import StorageConfig
 
@@ -188,6 +189,22 @@ class ExecutorRunner:
                     error=str(e),
                 )
                 return
+            except _httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code in (429, 503):
+                    logger.warning(
+                        "subtask %s paused_external: HF returned %d", sub_id, code,
+                    )
+                    await self._client.report(
+                        subtask_id=sub_id,
+                        status="paused_external",
+                        assignment_token=assignment_token,
+                        actual_sha256=None,
+                        bytes_downloaded=0,
+                        error=f"HTTP {code}",
+                    )
+                    return
+                raise   # other 4xx/5xx → generic handler
             await self._client.report(
                 subtask_id=sub_id,
                 status="succeeded",

@@ -2134,7 +2134,7 @@ components:
       properties:
         status:
           type: string
-          enum: [succeeded, failed, paused_disk_full]
+          enum: [succeeded, failed, paused_disk_full, paused_external]
           description: Subtask completion status reported by executor.
         assignment_token:
           type: string
