@@ -168,13 +168,22 @@ async def complete_subtask(
     )).scalars().all()
 
     statuses = {s.status for s in siblings}
-    if "failed" in statuses:
-        parent.status = "failed"
-        parent.error_message = f"subtask {sub.filename} failed: {error}"
+    TERMINAL = {"succeeded", "failed", "cancelled"}
+
+    if parent.status == "cancelling" and statuses <= TERMINAL:
+        # W2b2 §3.3: all siblings terminal under cancelling → transition to cancelled.
+        parent.status = "cancelled"
         parent.completed_at = datetime.now(UTC)
-    elif statuses == {"succeeded"}:
-        parent.status = "succeeded"
-        parent.completed_at = datetime.now(UTC)
+    elif parent.status != "cancelling":
+        # Normal (non-cancelling) path — unchanged from W1+W2a.
+        if "failed" in statuses:
+            parent.status = "failed"
+            parent.error_message = f"subtask {sub.filename} failed: {error}"
+            parent.completed_at = datetime.now(UTC)
+        elif statuses == {"succeeded"}:
+            parent.status = "succeeded"
+            parent.completed_at = datetime.now(UTC)
+    # else: parent is cancelling but not all siblings terminal — stay cancelling.
 
     # W2a §3.3: route executor health update through the state machine.
     # Unreachable if the W1 epoch-mismatch raised earlier (zombie completion).
