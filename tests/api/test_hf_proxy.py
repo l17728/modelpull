@@ -289,7 +289,9 @@ async def test_proxy_rejects_epoch_mismatch(proxy_app, db_session) -> None:
         )
         sub_id, token, _ = await _create_task_and_claim(c, reg)
         # Corrupt the subtask's stamped epoch so it no longer matches the
-        # authenticated executor's current epoch.
+        # authenticated executor's current epoch. commit() (not flush()) is
+        # required: the proxy reads via its own _session dependency on a
+        # separate connection, so the update must be committed to be visible.
         await db_session.execute(
             update(FileSubTask)
             .where(FileSubTask.id == uuid.UUID(sub_id))

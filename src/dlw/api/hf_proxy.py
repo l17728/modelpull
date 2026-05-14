@@ -52,7 +52,7 @@ async def hf_proxy_subtask(
                     "subtask_executor": sub.executor_id,
                     "authenticated": auth_ex.id},
         )
-    if str(sub.assignment_token) != x_assignment_token:
+    if sub.assignment_token is None or str(sub.assignment_token) != x_assignment_token:
         raise HTTPException(
             status_code=409, detail={"code": "STALE_ASSIGNMENT"},
         )
