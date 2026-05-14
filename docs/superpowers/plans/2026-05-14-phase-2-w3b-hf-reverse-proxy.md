@@ -138,7 +138,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from dlw.config import get_settings
 from dlw.db.base import Base
 from dlw.db.models.task import FileSubTask
-from tests.conftest import executor_request_headers, register_test_executor
+from tests.conftest import (
+    executor_request_headers, register_test_executor, signed_heartbeat_headers,
+)
 
 _TOKEN = "hf-proxy-ui-token"
 _ENROLL = "hf-proxy-enrollment-token"
@@ -165,6 +167,16 @@ async def _bootstrap(engine):
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_tasks(engine):
+    """Truncate task rows after each test so a later test's poll cannot claim a
+    prior test's leftover subtask (matches tests/api/test_subtasks.py)."""
+    yield
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        await conn.execute(text("TRUNCATE file_subtasks, download_tasks CASCADE"))
 
 
 @pytest.fixture(autouse=True)
@@ -202,14 +214,21 @@ def _install_hf_mock(monkeypatch, handler):
 
 
 async def _create_task_and_claim(c, reg):
-    """POST a task (2 files via the _patch_hf_global autouse fixture), poll once
-    as `reg`, return (subtask_id, assignment_token, filename)."""
+    """POST a task (2 files via the _patch_hf_global autouse fixture), heartbeat
+    once to flip the executor joining->healthy (the scheduler only assigns work
+    to healthy/degraded executors), poll once as `reg`, and return
+    (subtask_id, assignment_token, filename)."""
     r = await c.post("/api/v1/tasks", json={
         "repo_id": "deepseek-ai/DeepSeek-V3",
         "revision": "a" * 40,
         "storage_id": 1,
     }, headers={"Authorization": f"Bearer {_TOKEN}"})
     assert r.status_code == 201, r.text
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
+    r = await c.post(f"/api/v1/executors/{reg['executor_id']}/heartbeat",
+                     content=hb_body,
+                     headers=signed_heartbeat_headers(reg, hb_body))
+    assert r.status_code == 200, r.text
     r = await c.post(f"/api/v1/executors/{reg['executor_id']}/poll",
                      headers=executor_request_headers(reg))
     assert r.status_code == 200, r.text
@@ -422,7 +441,16 @@ async def hf_proxy_subtask(
 
     hf_client = _make_hf_client(settings.hf_proxy_timeout_seconds)
     hf_req = hf_client.build_request("GET", hf_url, headers=hf_headers)
-    hf_resp = await hf_client.send(hf_req, stream=True)
+    try:
+        hf_resp = await hf_client.send(hf_req, stream=True)
+    except (httpx.TimeoutException, httpx.NetworkError) as e:
+        await hf_client.aclose()
+        raise HTTPException(
+            status_code=503, detail=f"HF upstream unreachable: {e}",
+        ) from e
+    except BaseException:
+        await hf_client.aclose()
+        raise
 
     fwd = {
         k: v for k, v in hf_resp.headers.items()
@@ -441,6 +469,8 @@ async def hf_proxy_subtask(
         _body(), status_code=hf_resp.status_code, headers=fwd,
     )
 ```
+
+> The `try/except` around `hf_client.send()` guarantees the per-request client is closed even when the HF connection fails before the `StreamingResponse` body generator is constructed (otherwise the `AsyncClient` + its transport leak). Transport errors map to a `503` so executors can distinguish "HF unreachable, retry" from a controller bug; any other exception closes the client and re-raises unchanged.
 
 - [ ] **Step 4: Wire the router into the app**
 
@@ -527,7 +557,9 @@ async def test_proxy_rejects_epoch_mismatch(proxy_app, db_session) -> None:
         )
         sub_id, token, _ = await _create_task_and_claim(c, reg)
         # Corrupt the subtask's stamped epoch so it no longer matches the
-        # authenticated executor's current epoch.
+        # authenticated executor's current epoch. commit() (not flush()) is
+        # required: the proxy reads via its own _session dependency on a
+        # separate connection, so the update must be committed to be visible.
         await db_session.execute(
             update(FileSubTask)
             .where(FileSubTask.id == uuid.UUID(sub_id))
@@ -572,7 +604,7 @@ with:
                     "subtask_executor": sub.executor_id,
                     "authenticated": auth_ex.id},
         )
-    if str(sub.assignment_token) != x_assignment_token:
+    if sub.assignment_token is None or str(sub.assignment_token) != x_assignment_token:
         raise HTTPException(
             status_code=409, detail={"code": "STALE_ASSIGNMENT"},
         )
@@ -640,9 +672,9 @@ async def test_stream_hf_attaches_auth_and_token_headers(tmp_path) -> None:
             subtask_id=sub_id, assignment_token=tok,
             range_header="bytes=0-1023",
         ) as resp:
-            got = await resp.aread()
+            chunks = [chunk async for chunk in resp.aiter_bytes(8)]
 
-    assert got == body
+    assert b"".join(chunks) == body
     assert seen["path"] == f"/api/v1/hf-proxy/subtask/{sub_id}"
     assert seen["headers"]["authorization"] == "Bearer jwt-stream"
     assert seen["headers"]["x-executor-epoch"] == "4"
@@ -676,7 +708,7 @@ class Assignment:
 
 - [ ] **Step 4: Add `stream_hf` to `ControllerClient`**
 
-In `src/dlw/executor/client.py`, add `asynccontextmanager` to the imports — change:
+In `src/dlw/executor/client.py`, add `asynccontextmanager` + `AsyncIterator` to the imports — change:
 
 ```python
 import secrets
@@ -691,11 +723,12 @@ to:
 import secrets
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Self
 ```
 
-Then add the `stream_hf` method at the end of the `ControllerClient` class (after `report`):
+Then add the `stream_hf` method at the end of the `ControllerClient` class (after `report`). The `-> AsyncIterator[httpx.Response]` return annotation is required — `pyproject.toml` sets `[tool.mypy] strict = true`, so an unannotated method fails `no-untyped-def`:
 
 ```python
     @asynccontextmanager
@@ -705,10 +738,13 @@ Then add the `stream_hf` method at the end of the `ControllerClient` class (afte
         subtask_id: uuid.UUID,
         assignment_token: uuid.UUID,
         range_header: str | None = None,
-    ):
+    ) -> AsyncIterator[httpx.Response]:
         """W3b: stream a file from HF via the controller reverse-proxy. Yields
         the httpx streaming Response — callers consume resp.aiter_bytes() and
-        check resp.status_code, exactly as they did with a direct HF GET."""
+        check resp.status_code, exactly as they did with a direct HF GET.
+
+        Unlike heartbeat/poll/report, this does NOT call raise_for_status() —
+        callers MUST inspect resp.status_code themselves (the downloaders do)."""
         headers = {
             **self._auth_headers(),
             "X-Assignment-Token": str(assignment_token),
@@ -759,16 +795,18 @@ def make_fake_controller_client(hf_handler):
     from contextlib import asynccontextmanager as _acm
 
     class _FakeControllerClient:
+        def __init__(self):
+            self._transport = _httpx.MockTransport(hf_handler)
+
         @_acm
         async def stream_hf(self, *, subtask_id, assignment_token,
                             range_header=None):
-            transport = _httpx.MockTransport(hf_handler)
+            headers = {"X-Assignment-Token": str(assignment_token)}
+            if range_header:
+                headers["Range"] = range_header
             async with _httpx.AsyncClient(
-                transport=transport, base_url="http://fake-controller",
+                transport=self._transport, base_url="http://fake-controller",
             ) as client:
-                headers = {}
-                if range_header:
-                    headers["Range"] = range_header
                 async with client.stream(
                     "GET", f"/api/v1/hf-proxy/subtask/{subtask_id}",
                     headers=headers,
@@ -1292,6 +1330,30 @@ async def test_resolve_size_falls_back_to_content_length(chunk_settings) -> None
     )
     resolved = await d._resolve_size(a)
     assert resolved.file_size == 777
+
+
+async def test_resolve_size_raises_when_no_headers(chunk_settings) -> None:
+    """If neither Content-Range nor Content-Length is present, raise RuntimeError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Use stream= to prevent httpx from auto-injecting Content-Length.
+        return httpx.Response(200, stream=httpx.ByteStream(b"\x00"))  # no size headers
+
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(handler),
+    )
+    a = Assignment(
+        subtask_id=uuid.uuid4(), task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r", revision="b" * 40, filename="big.bin",
+        file_size=None, expected_sha256=None,
+        storage_config=StorageConfig(
+            bucket="b", region="us-east-1", endpoint_url=None,
+            key_prefix="p",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="unresolvable"):
+        await d._resolve_size(a)
 ```
 
 - [ ] **Step 2: Run `test_chunk_downloader.py` to verify it fails**
@@ -1420,6 +1482,9 @@ with:
             total = content_range.rsplit("/", 1)[1].strip()
             if total.isdigit():
                 return dataclasses.replace(a, file_size=int(total))
+        # Content-Length fallback: only correct when HF answered a full 200
+        # (then it is the total size). A well-behaved 206 always carries
+        # Content-Range, handled above.
         if content_length is None:
             raise RuntimeError(
                 "file_size unresolvable: no Content-Range or Content-Length"
@@ -1538,6 +1603,8 @@ git commit -m "feat(executor): DirectOffsetDownloader fetches via controller pro
 - Modify: `src/dlw/executor/cli.py:38-47`
 - Modify: `src/dlw/executor/config.py:35-37`
 - Modify: `src/dlw/executor/_io.py:54-59`
+- Modify: `tests/executor/test_config.py` — two pre-existing tests (`test_w4_defaults`, `test_w4_env_overrides`) assert on the now-deleted `hf_endpoint`/`hf_token` fields; drop those HF-specific `setenv`/`assert` lines (keep the S3 field coverage).
+- Modify: `tests/executor/test_runner.py` — in `test_runner_passes_assignment_with_repo_and_storage`, add `assert isinstance(a.assignment_token, uuid.UUID)` to directly verify the runner threads `assignment_token` into the `Assignment` it builds.
 
 - [ ] **Step 1: Thread `assignment_token` into the `Assignment` the runner builds**
 
@@ -1657,12 +1724,14 @@ Create `tests/tools/test_lint_no_hf_token.py`:
 """Self-test for tools/lint_invariants.py::check_no_hf_token_in_executor (W3b)."""
 from __future__ import annotations
 
+import functools
 import importlib.util
 from pathlib import Path
 
 _LINT_PATH = Path(__file__).resolve().parents[2] / "tools" / "lint_invariants.py"
 
 
+@functools.lru_cache(maxsize=None)
 def _load_lint():
     spec = importlib.util.spec_from_file_location("lint_invariants", _LINT_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -1691,6 +1760,21 @@ def test_lint_passes_clean_executor(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(lint, "ROOT", tmp_path)
     assert lint.check_no_hf_token_in_executor() == []
+
+
+def test_lint_flags_hf_token_in_string_literal(tmp_path, monkeypatch) -> None:
+    """The scan is full-text by design — a string literal mentioning the
+    forbidden identifier in executor code is flagged too (only whole
+    comment lines are exempt)."""
+    lint = _load_lint()
+    exec_dir = tmp_path / "src" / "dlw" / "executor"
+    exec_dir.mkdir(parents=True)
+    (exec_dir / "guard.py").write_text(
+        'raise ValueError("hf_token must not reach executor")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lint, "ROOT", tmp_path)
+    assert lint.check_no_hf_token_in_executor() != []
 ```
 
 - [ ] **Step 2: Run the self-test to verify it fails**
@@ -1706,13 +1790,17 @@ In `tools/lint_invariants.py`, add this function right after `check_no_bearer_on
 def check_no_hf_token_in_executor() -> list[str]:
     """W3b §3.11: INVARIANT 2 — the tenant HF token must never reach an
     executor. Forbid the `hf_token` / `hf_endpoint` identifiers anywhere in
-    src/dlw/executor/ (comment lines are exempt). After W3b, HF access goes
-    exclusively through the controller's reverse proxy."""
+    src/dlw/executor/. After W3b, HF access goes exclusively through the
+    controller's reverse proxy.
+
+    Only whole comment lines (first non-whitespace char is `#`) are exempt —
+    string literals and trailing comments containing the identifiers are
+    flagged too (this is a full-text scan, by design)."""
     errors: list[str] = []
     exec_dir = ROOT / "src" / "dlw" / "executor"
     if not exec_dir.exists():
         return []
-    for py in sorted(exec_dir.rglob("*.py")):
+    for py in sorted(exec_dir.rglob("*.py")):  # sorted for deterministic CI output
         try:
             text = py.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
@@ -1812,6 +1900,19 @@ with:
 ```
 
 (`executor_client` is the `ControllerClient` already constructed earlier in the test with `_transport=asgi_transport` + the `X-Client-Cert-PEM` bypass header — `stream_hf` rides on it straight to the ASGI controller. `monkeypatch` is already a parameter of `test_e2e_hf_to_s3_full_pipeline`.)
+
+Also update the module docstring at the top of `tests/e2e/test_executor_e2e.py` so it reflects the W3b seam migration (the HF MockTransport now sits on the controller's `dlw.api.hf_proxy._make_hf_client` seam, not the executor downloader):
+
+```python
+"""E2E: real controller + real ExecutorRunner — full HF→S3 happy path.
+
+W4 rewrite: replaces MockDownloader with HfS3StreamDownloader.
+W3b update: the HF MockTransport is installed on the controller's
+`dlw.api.hf_proxy._make_hf_client` seam — the executor fetches through the
+controller reverse-proxy, not directly from HF. S3 served by moto[s3]
+in-process. No Docker required.
+"""
+```
 
 - [ ] **Step 2: Run the e2e to verify it passes**
 
