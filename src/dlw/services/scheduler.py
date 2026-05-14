@@ -57,6 +57,14 @@ async def claim_one_subtask(
         .exists()
     )
 
+    # W2b2 §3.3: skip subtasks whose parent task is cancelling/terminal.
+    parent_active = (
+        select(DownloadTask.id)
+        .where(DownloadTask.id == FileSubTask.task_id)
+        .where(DownloadTask.status.in_(("pending", "scheduling", "downloading")))
+        .exists()
+    )
+
     # W2b1: candidate scan with disk pre-flight.
     GiB = 1024 ** 3
     free_bytes = (e_self.disk_free_gb or 0) * GiB - (e_self.parts_dir_bytes or 0)
@@ -65,6 +73,7 @@ async def claim_one_subtask(
         select(FileSubTask)
         .where(FileSubTask.status == "pending")
         .where(~same_host_holds)
+        .where(parent_active)           # W2b2 NEW
         .order_by(FileSubTask.created_at)
         .limit(_K_CANDIDATES)
         .with_for_update(skip_locked=True)
