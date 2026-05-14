@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, SmallInteger, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, LargeBinary, SmallInteger, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,3 +45,8 @@ class Executor(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # W3a: 256-bit HMAC seed for heartbeat anti-replay. "encrypted" in the
+    # name is forward-compatible — Phase 2 stores raw bytes; Phase 3 wraps KMS.
+    hmac_seed_encrypted: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True
+    )
