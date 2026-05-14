@@ -16,6 +16,7 @@ class Assignment:
     """Slim payload passed from runner to downloader."""
     subtask_id: uuid.UUID
     task_id: uuid.UUID
+    assignment_token: uuid.UUID
     repo_id: str
     revision: str
     filename: str

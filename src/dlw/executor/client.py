@@ -15,6 +15,7 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Self
 
 import httpx
@@ -206,3 +207,28 @@ class ControllerClient:
         return await self._post_json(
             f"/api/v1/subtasks/{subtask_id}/report", body, self._auth_headers(),
         )
+
+    @asynccontextmanager
+    async def stream_hf(
+        self,
+        *,
+        subtask_id: uuid.UUID,
+        assignment_token: uuid.UUID,
+        range_header: str | None = None,
+    ):
+        """W3b: stream a file from HF via the controller reverse-proxy. Yields
+        the httpx streaming Response — callers consume resp.aiter_bytes() and
+        check resp.status_code, exactly as they did with a direct HF GET."""
+        headers = {
+            **self._auth_headers(),
+            "X-Assignment-Token": str(assignment_token),
+        }
+        if range_header:
+            headers["Range"] = range_header
+        async with self._make_client() as client:
+            async with client.stream(
+                "GET",
+                f"/api/v1/hf-proxy/subtask/{subtask_id}",
+                headers=headers,
+            ) as resp:
+                yield resp

@@ -173,3 +173,39 @@ async def test_current_epoch_reads_auth_state(tmp_path) -> None:
     new = make_fake_auth_state(tmp_path, epoch=43)
     c.update_auth(new)
     assert c.current_epoch() == 43
+
+
+@pytest.mark.slow
+async def test_stream_hf_attaches_auth_and_token_headers(tmp_path) -> None:
+    """stream_hf carries Authorization + X-Executor-Epoch + X-Assignment-Token,
+    forwards Range when given, and hits /api/v1/hf-proxy/subtask/{id}."""
+    seen: dict = {}
+    body = b"hf-proxied-bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        seen["path"] = request.url.path
+        return httpx.Response(200, content=body)
+
+    state = make_fake_auth_state(
+        tmp_path, executor_id="ex-stream", epoch=4, jwt="jwt-stream",
+        hmac_seed=_HMAC_SEED,
+    )
+    sub_id = uuid.uuid4()
+    tok = uuid.uuid4()
+    async with ControllerClient(
+        base_url="http://test", auth_state=state,
+        _transport=httpx.MockTransport(handler),
+    ) as c:
+        async with c.stream_hf(
+            subtask_id=sub_id, assignment_token=tok,
+            range_header="bytes=0-1023",
+        ) as resp:
+            got = await resp.aread()
+
+    assert got == body
+    assert seen["path"] == f"/api/v1/hf-proxy/subtask/{sub_id}"
+    assert seen["headers"]["authorization"] == "Bearer jwt-stream"
+    assert seen["headers"]["x-executor-epoch"] == "4"
+    assert seen["headers"]["x-assignment-token"] == str(tok)
+    assert seen["headers"]["range"] == "bytes=0-1023"
