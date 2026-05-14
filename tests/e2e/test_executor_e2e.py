@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import boto3
@@ -65,9 +66,13 @@ async def _bootstrap(engine):
         await conn.run_sync(Base.metadata.drop_all)
 
 
+_ENROLL = "e2e-w4-enrollment-token"
+
+
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
@@ -76,13 +81,9 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
-@pytest.mark.skip(
-    reason="W3a-T6: ControllerClient + ExecutorRunner are rewritten for "
-    "mTLS+JWT+HMAC in W3a-T9 (executor side). Un-skipped + migrated there."
-)
 @pytest.mark.slow
 async def test_e2e_hf_to_s3_full_pipeline(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, ephemeral_ca,
 ) -> None:
     """End-to-end with mocked HF + moto S3, no MockDownloader."""
     # Mock HF metadata (controller side)
@@ -118,7 +119,16 @@ async def test_e2e_hf_to_s3_full_pipeline(
         s3.create_bucket(Bucket=_BUCKET)
 
         from dlw.main import create_app
+        from dlw.auth.hmac_nonce import NonceStore
+        from dlw.executor.auth_lifecycle import AuthState
+        from tests.conftest import register_test_executor
         app = create_app()
+        # W3a: inject the auth substrate onto app.state (skip the lifespan
+        # bootstrap — this test drives the ASGI app directly, no real server).
+        app.state.ca = ephemeral_ca["ca"]
+        app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
+        app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
+        app.state.enrollment_token = _ENROLL
         asgi_transport = httpx.ASGITransport(app=app)
 
         async with httpx.AsyncClient(
@@ -134,10 +144,31 @@ async def test_e2e_hf_to_s3_full_pipeline(
             assert r.status_code == 201, r.text
             task_id = r.json()["id"]
 
+            # W3a: register the executor via mTLS enrollment, then build an
+            # AuthState the ControllerClient + runner drive off.
+            reg = await register_test_executor(
+                ctrl_client, enrollment_token=_ENROLL,
+                executor_id="e2e-w4-host-worker-1", host_id="e2e-w4-host",
+            )
+            import datetime as _dt
+            _far = _dt.datetime.now(_dt.UTC) + _dt.timedelta(hours=24)
+            auth_state = AuthState(
+                executor_id=reg["executor_id"], epoch=reg["epoch"],
+                cert_pem=reg["cert_pem"].encode("utf-8"),
+                key_pem=b"unused-in-asgi-transport-mode",
+                ca_chain_pem="\n".join(reg["ca_chain"]).encode("utf-8"),
+                jwt=reg["jwt"], jwt_exp=_far, cert_exp=_far,
+                hmac_seed=reg["hmac_seed"], cert_dir=Path("."),
+            )
             executor_client = ControllerClient(
                 base_url="http://test",
-                bearer_token=_TOKEN,
+                auth_state=auth_state,
                 _transport=asgi_transport,
+                # ASGI transport has no real TLS — feed the cert via the
+                # trusted-proxy header bypass (DLW_TLS_TRUSTED_PROXY=1).
+                _extra_test_headers={
+                    "X-Client-Cert-PEM": reg["cert_pem"].replace("\n", "\\n"),
+                },
             )
             settings = ExecutorSettings(
                 id="e2e-w4-host-worker-1",
@@ -158,6 +189,7 @@ async def test_e2e_hf_to_s3_full_pipeline(
             runner = ExecutorRunner(
                 settings=settings, client=executor_client,
                 stream_downloader=downloader, chunk_downloader=MagicMock(),
+                auth_state=auth_state,   # skip load_or_register
             )
 
             async with executor_client:

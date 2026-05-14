@@ -63,6 +63,20 @@ class ExecutorSettings(BaseSettings):
         description="Local staging dir for chunk-level downloads. Configure to a writable PV in prod.",
     )
 
+    # Phase 2 W3a — mTLS + JWT auth
+    enrollment_token: str = Field(
+        default="",
+        description="OOB enrollment token from the operator (controller's DLW_ENROLLMENT_TOKEN).",
+    )
+    executor_cert_dir: str = Field(
+        default="./.executor-certs",
+        description="Local dir for client-cert.pem / client-key.pem / ca-chain.pem / hmac-seed.",
+    )
+    executor_ca_bundle: str = Field(
+        default="",
+        description="CA bundle path for httpx verify=; empty → defaults to {cert_dir}/ca-chain.pem at runtime.",
+    )
+
     @model_validator(mode="after")
     def _derive_host_id(self) -> "ExecutorSettings":
         """If host_id not set, derive from id by stripping any -worker-N suffix.

@@ -36,9 +36,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         format="%(asctime)s %(name)s %(levelname)s: %(message)s",
     )
     settings = ExecutorSettings()
-    client = ControllerClient(
-        base_url=settings.controller_url, bearer_token=settings.bearer_token,
-    )
+    # W3a: the client starts without an AuthState; ExecutorRunner.run() does
+    # load_or_register and then calls client.update_auth() before any request.
+    client = ControllerClient(base_url=settings.controller_url)
     stream = HfS3StreamDownloader(settings=settings)
     chunk = DirectOffsetDownloader(settings=settings)
     runner = ExecutorRunner(

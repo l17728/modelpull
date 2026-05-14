@@ -1,14 +1,18 @@
-"""ExecutorRunner — async main loop joining heartbeat + poll-and-execute.
+"""ExecutorRunner — async main loop: register, heartbeat, poll-and-execute, renew.
 
-On startup: register via /join. Then runs two concurrent loops:
-  - Heartbeat every settings.heartbeat_interval_seconds
+On startup: load-or-register via mTLS enrollment (W3a). Then runs three
+concurrent loops:
+  - Heartbeat every settings.heartbeat_interval_seconds (mTLS + JWT + HMAC)
   - Poll every settings.poll_interval_seconds; if assigned, download + report
+  - Auth renew: refresh the JWT ~5min before expiry, the cert ~1h before expiry
 
 W3-A: shutdown does NOT cancel loops mid-iteration. The pacing wait inside
-each loop reacts to _shutdown.set() instantly (asyncio.wait_for completes
-immediately when the event is set). _execute_subtask completes its download
-and report cycle before the loop exits — otherwise mid-flight subtasks would
-be stuck in 'assigned' state forever.
+each loop reacts to _shutdown.set() instantly. _execute_subtask completes its
+download + report cycle before the loop exits — otherwise mid-flight subtasks
+would be stuck in 'assigned' state forever.
+
+W3a: a 401 on poll triggers a re-register (generalizes the W1 EPOCH_MISMATCH
+re-join path) — the executor's identity may have been reset controller-side.
 """
 from __future__ import annotations
 
@@ -16,7 +20,10 @@ import asyncio
 import logging
 import shutil
 import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from dlw.executor.auth_lifecycle import AuthState, load_or_register, renew
 from dlw.executor.chunk_downloader import DirectOffsetDownloader, DiskFullError
 from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
@@ -34,11 +41,14 @@ class ExecutorRunner:
         client: ControllerClient,
         stream_downloader: HfS3StreamDownloader,
         chunk_downloader: DirectOffsetDownloader,
+        auth_state: AuthState | None = None,
     ) -> None:
         self._s = settings
         self._client = client
         self._stream_downloader = stream_downloader
         self._chunk_downloader = chunk_downloader
+        # When auth_state is provided (tests), run() skips load_or_register.
+        self._auth = auth_state
         self._shutdown = asyncio.Event()
 
     def _choose_downloader(self, file_size: int | None):
@@ -50,30 +60,37 @@ class ExecutorRunner:
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
+    def _capabilities(self) -> dict:
+        return {"nic_speed_gbps": self._s.nic_speed_gbps, "region": self._s.region}
+
     async def run(self) -> None:
         # W2b1 §3.2: clean up any stale .parts/ dirs from a previous crash.
-        # active_subtask_ids=set() removes everything — W2b1 has no resume.
         removed = startup_gc(self._s.parts_dir_path, active_subtask_ids=set())
         if removed:
             logger.info("startup_gc removed %d stale parts dirs", removed)
 
-        # 1. Join (one-shot)
-        await self._client.join(
-            executor_id=self._s.id,
-            host_id=self._s.host_id,
-            capabilities={
-                "nic_speed_gbps": self._s.nic_speed_gbps,
-                "region": self._s.region,
-            },
-        )
+        # W3a §3.13: auth bootstrap — load existing cert or register fresh.
+        if self._auth is None:
+            self._auth = await load_or_register(
+                cert_dir=Path(self._s.executor_cert_dir),
+                controller_url=self._s.controller_url,
+                ca_bundle_path=self._s.executor_ca_bundle or None,
+                enrollment_token=self._s.enrollment_token,
+                executor_id=self._s.id,
+                host_id=self._s.host_id,
+                capabilities=self._capabilities(),
+            )
+        self._client.update_auth(self._auth)
 
-        # 2. Concurrent loops — both check self._shutdown.is_set() each iteration
+        # Three concurrent loops — each checks self._shutdown.is_set().
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         poll_task = asyncio.create_task(self._poll_and_execute_loop())
+        renew_task = asyncio.create_task(self._auth_renew_loop())
 
-        # 3. Wait for shutdown signal then let loops exit naturally (W3-A)
         await self._shutdown.wait()
-        await asyncio.gather(heartbeat_task, poll_task, return_exceptions=True)
+        await asyncio.gather(
+            heartbeat_task, poll_task, renew_task, return_exceptions=True,
+        )
 
     async def _heartbeat_loop(self) -> None:
         while not self._shutdown.is_set():
@@ -117,19 +134,14 @@ class ExecutorRunner:
                     )
                     continue  # immediately poll again — there may be more work
             except _httpx.HTTPStatusError as e:
+                # W3a: any 401 on poll → re-register. The executor identity may
+                # have been reset controller-side (epoch bump, cert rotation,
+                # or the row cleared). load_or_register is idempotent.
                 if e.response.status_code == 401:
-                    detail = None
-                    try:
-                        detail = e.response.json().get("detail")
-                    except Exception:
-                        pass
-                    if isinstance(detail, dict) and detail.get("code") == "EPOCH_MISMATCH":
-                        logger.warning(
-                            "EPOCH_MISMATCH (expected=%s got=%s); re-joining",
-                            detail.get("expected"), detail.get("got"),
-                        )
-                        await self._rejoin()
-                        continue
+                    logger.warning("poll 401 (%s); re-registering",
+                                   _safe_detail(e))
+                    await self._reregister()
+                    continue
                 logger.warning("poll failed: %s", e)
             except Exception as e:
                 logger.warning("poll failed: %s", e)
@@ -141,19 +153,42 @@ class ExecutorRunner:
             except asyncio.TimeoutError:
                 pass
 
-    async def _rejoin(self) -> None:
-        """Discard any in-flight state and re-issue /join (gets new epoch)."""
+    async def _auth_renew_loop(self) -> None:
+        """W3a §3.13: refresh the JWT ~5min before expiry, the cert ~1h before."""
+        while not self._shutdown.is_set():
+            assert self._auth is not None
+            now = datetime.now(UTC)
+            jwt_due = self._auth.jwt_exp - timedelta(minutes=5)
+            cert_due = self._auth.cert_exp - timedelta(hours=1)
+            sleep_for = max(60, int((min(jwt_due, cert_due) - now).total_seconds()))
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=sleep_for)
+                return  # shutdown
+            except asyncio.TimeoutError:
+                pass
+            try:
+                self._auth = await renew(
+                    self._auth, controller_url=self._s.controller_url,
+                )
+                self._client.update_auth(self._auth)
+            except Exception as e:
+                logger.warning("auth renew failed: %s; retry next cycle", e)
+
+    async def _reregister(self) -> None:
+        """Discard in-flight auth state and re-register (fresh cert + JWT + epoch)."""
         try:
-            await self._client.join(
+            self._auth = await load_or_register(
+                cert_dir=Path(self._s.executor_cert_dir),
+                controller_url=self._s.controller_url,
+                ca_bundle_path=self._s.executor_ca_bundle or None,
+                enrollment_token=self._s.enrollment_token,
                 executor_id=self._s.id,
                 host_id=self._s.host_id,
-                capabilities={
-                    "nic_speed_gbps": self._s.nic_speed_gbps,
-                    "region": self._s.region,
-                },
+                capabilities=self._capabilities(),
             )
+            self._client.update_auth(self._auth)
         except Exception as e:
-            logger.warning("rejoin failed: %s", e)
+            logger.warning("re-register failed: %s", e)
 
     async def _execute_subtask(
         self, *, subtask: dict, assignment_token: uuid.UUID,
@@ -226,3 +261,10 @@ class ExecutorRunner:
                 )
             except Exception:
                 logger.exception("report failure also failed for %s", sub_id)
+
+
+def _safe_detail(e) -> str:
+    try:
+        return str(e.response.json().get("detail"))
+    except Exception:
+        return "<no detail>"

@@ -1,13 +1,19 @@
 """HTTP client wrapping the controller's executor + subtask endpoints.
 
-Phase 2 W1 additions:
-  - Persists the executor's current epoch from /join response.
-  - Attaches X-Executor-Epoch header on heartbeat / poll / report.
-  - Caller (runner) should observe `current_epoch()` and react to 401
-    EPOCH_MISMATCH by calling join() again.
+Phase 2 W3a: auth is mTLS (client cert) + executor JWT + (heartbeat only) HMAC.
+The client is driven by an AuthState (mutable — the runner's renew loop swaps
+it in place via update_auth). Each request builds an httpx.AsyncClient with
+verify=<ca-chain> + cert=(<client-cert>, <client-key>) and an
+Authorization: Bearer <jwt> header. heartbeat additionally signs the body
+with HMAC-SHA256 over the executor's hmac_seed.
+
+The W1 /join + epoch-persistence logic is gone — registration happens via
+dlw.executor.auth_lifecycle, and the epoch lives on the AuthState.
 """
 from __future__ import annotations
 
+import secrets
+import time
 import uuid
 from typing import Any, Self
 
@@ -18,6 +24,9 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+from dlw.auth.hmac_nonce import compute_hmac
+from dlw.executor.auth_lifecycle import AuthState
 
 
 _retry = retry(
@@ -31,69 +40,108 @@ _retry = retry(
 
 
 class ControllerClient:
-    """Async HTTP client for controller endpoints (executor side)."""
+    """Async HTTP client for controller endpoints (executor side).
+
+    Auth is carried by an AuthState. The runner's renew loop updates it in
+    place via update_auth(); each request reads the current state.
+    """
 
     def __init__(
         self,
         base_url: str,
-        bearer_token: str,
+        auth_state: AuthState | None = None,
         timeout_seconds: float = 30.0,
         _transport: httpx.AsyncBaseTransport | None = None,
+        _extra_test_headers: dict[str, str] | None = None,
     ) -> None:
+        # auth_state may be None at construction (cli.py builds the client
+        # before run() does load_or_register); the runner calls update_auth()
+        # before any request is made. Requests crash if auth is still None.
+        #
+        # _extra_test_headers is a test-only seam: when an ASGI transport is
+        # injected (no real TLS), tests pass {"X-Client-Cert-PEM": ...} so the
+        # controller's trusted-proxy mTLS path can authenticate. Production
+        # leaves it None and relies on real mTLS via cert=(...).
         self._base_url = base_url.rstrip("/")
-        self._headers = {"Authorization": f"Bearer {bearer_token}"}
-        self._client = httpx.AsyncClient(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=timeout_seconds,
-            transport=_transport,
-        )
-        self._epoch: int | None = None        # P2-W1
+        self._auth = auth_state
+        self._timeout = timeout_seconds
+        self._transport = _transport
+        self._extra_test_headers = _extra_test_headers or {}
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
-        await self._client.aclose()
+        # Per-request clients are created + closed inside each call; nothing to
+        # close here. Kept for API compatibility with the W1 context-manager use.
+        return None
 
-    def current_epoch(self) -> int | None:
-        """Returns the most recent epoch from /join, or None if not joined yet."""
-        return self._epoch
+    def update_auth(self, new_state: AuthState) -> None:
+        """Swap the AuthState (called by the runner's renew loop)."""
+        self._auth = new_state
 
-    def _epoch_headers(self) -> dict[str, str]:
-        if self._epoch is None:
-            return {}
-        return {"X-Executor-Epoch": str(self._epoch)}
+    def current_epoch(self) -> int:
+        """Current executor epoch from the AuthState."""
+        return self._auth.epoch
 
-    async def _post(
+    def _make_client(self) -> httpx.AsyncClient:
+        """Build a per-request httpx client. When a test transport is injected,
+        cert/verify are skipped (MockTransport short-circuits the network)."""
+        if self._transport is not None:
+            return httpx.AsyncClient(
+                base_url=self._base_url, timeout=self._timeout,
+                transport=self._transport,
+            )
+        cert_dir = self._auth.cert_dir
+        return httpx.AsyncClient(
+            base_url=self._base_url, timeout=self._timeout,
+            verify=str(cert_dir / "ca-chain.pem"),
+            cert=(str(cert_dir / "client-cert.pem"),
+                  str(cert_dir / "client-key.pem")),
+        )
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._auth.jwt}",
+            "X-Executor-Epoch": str(self._auth.epoch),
+            **self._extra_test_headers,
+        }
+
+    async def _post_json(
         self,
         path: str,
-        json_body: dict[str, Any] | None = None,
-        extra_headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None,
+        extra_headers: dict[str, str],
     ) -> dict[str, Any]:
-        headers = {**(extra_headers or {})}
-
         @_retry
         async def _do() -> httpx.Response:
-            r = await self._client.post(path, json=json_body, headers=headers)
-            if 500 <= r.status_code < 600:
-                r.raise_for_status()
-            return r
+            async with self._make_client() as client:
+                r = await client.post(path, json=json_body, headers=extra_headers)
+                if 500 <= r.status_code < 600:
+                    r.raise_for_status()
+                return r
 
         r = await _do()
         r.raise_for_status()
         return r.json()
 
-    async def join(
-        self, *, executor_id: str, host_id: str, capabilities: dict[str, Any]
+    async def _post_content(
+        self,
+        path: str,
+        content: bytes,
+        extra_headers: dict[str, str],
     ) -> dict[str, Any]:
-        body = await self._post("/api/v1/executors/join", {
-            "id": executor_id, "host_id": host_id, "capabilities": capabilities,
-        })
-        epoch = body.get("epoch")
-        if isinstance(epoch, int):
-            self._epoch = epoch
-        return body
+        @_retry
+        async def _do() -> httpx.Response:
+            async with self._make_client() as client:
+                r = await client.post(path, content=content, headers=extra_headers)
+                if 500 <= r.status_code < 600:
+                    r.raise_for_status()
+                return r
+
+        r = await _do()
+        r.raise_for_status()
+        return r.json()
 
     async def heartbeat(
         self,
@@ -103,22 +151,33 @@ class ControllerClient:
         parts_dir_bytes: int,
         disk_free_gb: int | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
+        """POST /heartbeat with mTLS + JWT + HMAC. The body is sent as raw
+        content (not json=) so the HMAC signature covers the exact bytes."""
+        import json as _json
+        body_dict: dict[str, Any] = {
             "health_score": health_score,
             "parts_dir_bytes": parts_dir_bytes,
         }
         if disk_free_gb is not None:
-            body["disk_free_gb"] = disk_free_gb
-        return await self._post(
-            f"/api/v1/executors/{executor_id}/heartbeat",
-            body,
-            extra_headers=self._epoch_headers(),
+            body_dict["disk_free_gb"] = disk_free_gb
+        body = _json.dumps(body_dict).encode("utf-8")
+        ts = int(time.time())
+        nonce = secrets.token_hex(16)
+        sig = compute_hmac(self._auth.hmac_seed, ts=ts, nonce=nonce, body=body)
+        headers = {
+            **self._auth_headers(),
+            "Content-Type": "application/json",
+            "X-HMAC-Timestamp": str(ts),
+            "X-HMAC-Nonce": nonce,
+            "X-HMAC-Signature": sig,
+        }
+        return await self._post_content(
+            f"/api/v1/executors/{executor_id}/heartbeat", body, headers,
         )
 
     async def poll(self, *, executor_id: str) -> dict[str, Any]:
-        return await self._post(
-            f"/api/v1/executors/{executor_id}/poll",
-            extra_headers=self._epoch_headers(),
+        return await self._post_json(
+            f"/api/v1/executors/{executor_id}/poll", None, self._auth_headers(),
         )
 
     async def report(
@@ -144,8 +203,6 @@ class ControllerClient:
             body["error"] = error
         if s3_key is not None:
             body["s3_key"] = s3_key
-        return await self._post(
-            f"/api/v1/subtasks/{subtask_id}/report",
-            body,
-            extra_headers=self._epoch_headers(),
+        return await self._post_json(
+            f"/api/v1/subtasks/{subtask_id}/report", body, self._auth_headers(),
         )

@@ -253,3 +253,23 @@ def signed_heartbeat_headers(reg: dict, body: bytes) -> dict[str, str]:
         "X-HMAC-Signature": sig,
         "Content-Type": "application/json",
     }
+
+
+def make_fake_auth_state(
+    cert_dir, *, executor_id: str = "test-worker-1", epoch: int = 1,
+    jwt: str = "fake.jwt.token", hmac_seed: bytes = b"\x09" * 32,
+):
+    """Build a minimal AuthState for executor-side tests that inject a
+    MockTransport (cert files are never read in that mode)."""
+    import datetime as _dt
+    from pathlib import Path as _Path
+    from dlw.executor.auth_lifecycle import AuthState
+    far = _dt.datetime.now(_dt.UTC) + _dt.timedelta(hours=24)
+    return AuthState(
+        executor_id=executor_id, epoch=epoch,
+        cert_pem=b"-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+        key_pem=b"-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----",
+        ca_chain_pem=b"-----BEGIN CERTIFICATE-----\nfakeca\n-----END CERTIFICATE-----",
+        jwt=jwt, jwt_exp=far, cert_exp=far,
+        hmac_seed=hmac_seed, cert_dir=_Path(str(cert_dir)),
+    )
