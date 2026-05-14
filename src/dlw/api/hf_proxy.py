@@ -63,7 +63,16 @@ async def hf_proxy_subtask(
 
     hf_client = _make_hf_client(settings.hf_proxy_timeout_seconds)
     hf_req = hf_client.build_request("GET", hf_url, headers=hf_headers)
-    hf_resp = await hf_client.send(hf_req, stream=True)
+    try:
+        hf_resp = await hf_client.send(hf_req, stream=True)
+    except (httpx.TimeoutException, httpx.NetworkError) as e:
+        await hf_client.aclose()
+        raise HTTPException(
+            status_code=503, detail=f"HF upstream unreachable: {e}",
+        ) from e
+    except BaseException:
+        await hf_client.aclose()
+        raise
 
     fwd = {
         k: v for k, v in hf_resp.headers.items()

@@ -44,6 +44,16 @@ async def _bootstrap(engine):
 
 
 @pytest.fixture(autouse=True)
+async def _cleanup_tasks(engine):
+    """Truncate task rows after each test so a later test's poll cannot claim a
+    prior test's leftover subtask (matches tests/api/test_subtasks.py)."""
+    yield
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        await conn.execute(text("TRUNCATE file_subtasks, download_tasks CASCADE"))
+
+
+@pytest.fixture(autouse=True)
 def _set_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
