@@ -15,6 +15,7 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Self
 
@@ -215,10 +216,13 @@ class ControllerClient:
         subtask_id: uuid.UUID,
         assignment_token: uuid.UUID,
         range_header: str | None = None,
-    ):
+    ) -> AsyncIterator[httpx.Response]:
         """W3b: stream a file from HF via the controller reverse-proxy. Yields
         the httpx streaming Response — callers consume resp.aiter_bytes() and
-        check resp.status_code, exactly as they did with a direct HF GET."""
+        check resp.status_code, exactly as they did with a direct HF GET.
+
+        Unlike heartbeat/poll/report, this does NOT call raise_for_status() —
+        callers MUST inspect resp.status_code themselves (the downloaders do)."""
         headers = {
             **self._auth_headers(),
             "X-Assignment-Token": str(assignment_token),

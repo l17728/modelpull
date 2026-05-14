@@ -201,9 +201,9 @@ async def test_stream_hf_attaches_auth_and_token_headers(tmp_path) -> None:
             subtask_id=sub_id, assignment_token=tok,
             range_header="bytes=0-1023",
         ) as resp:
-            got = await resp.aread()
+            chunks = [chunk async for chunk in resp.aiter_bytes(8)]
 
-    assert got == body
+    assert b"".join(chunks) == body
     assert seen["path"] == f"/api/v1/hf-proxy/subtask/{sub_id}"
     assert seen["headers"]["authorization"] == "Bearer jwt-stream"
     assert seen["headers"]["x-executor-epoch"] == "4"
