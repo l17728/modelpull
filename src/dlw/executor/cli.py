@@ -38,9 +38,11 @@ async def _async_main(args: argparse.Namespace) -> int:
     settings = ExecutorSettings()
     # W3a: the client starts without an AuthState; ExecutorRunner.run() does
     # load_or_register and then calls client.update_auth() before any request.
+    # W3b: both downloaders fetch HF bytes through the same client's reverse
+    # proxy (stream_hf) — the executor never holds the HF token.
     client = ControllerClient(base_url=settings.controller_url)
-    stream = HfS3StreamDownloader(settings=settings)
-    chunk = DirectOffsetDownloader(settings=settings)
+    stream = HfS3StreamDownloader(settings=settings, client=client)
+    chunk = DirectOffsetDownloader(settings=settings, client=client)
     runner = ExecutorRunner(
         settings=settings, client=client,
         stream_downloader=stream, chunk_downloader=chunk,

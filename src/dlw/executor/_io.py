@@ -51,14 +51,6 @@ def make_s3_client(settings: ExecutorSettings, cfg: StorageConfig) -> Any:
     )
 
 
-def make_http_client(settings: ExecutorSettings) -> httpx.AsyncClient:
-    """Test seam — overridable via monkeypatch."""
-    return httpx.AsyncClient(
-        timeout=settings.download_timeout_seconds,
-        follow_redirects=True,
-    )
-
-
 def compose_key(a: Assignment) -> str:
     prefix = a.storage_config.key_prefix.strip("/")
     parts = [p for p in (prefix, a.repo_id, a.revision, a.filename) if p]
