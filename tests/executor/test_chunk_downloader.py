@@ -232,3 +232,27 @@ async def test_resolve_size_falls_back_to_content_length(chunk_settings) -> None
     )
     resolved = await d._resolve_size(a)
     assert resolved.file_size == 777
+
+
+async def test_resolve_size_raises_when_no_headers(chunk_settings) -> None:
+    """If neither Content-Range nor Content-Length is present, raise RuntimeError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Use stream= to prevent httpx from auto-injecting Content-Length.
+        return httpx.Response(200, stream=httpx.ByteStream(b"\x00"))  # no size headers
+
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(handler),
+    )
+    a = Assignment(
+        subtask_id=uuid.uuid4(), task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r", revision="b" * 40, filename="big.bin",
+        file_size=None, expected_sha256=None,
+        storage_config=StorageConfig(
+            bucket="b", region="us-east-1", endpoint_url=None,
+            key_prefix="p",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="unresolvable"):
+        await d._resolve_size(a)

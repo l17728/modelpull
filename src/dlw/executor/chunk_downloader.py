@@ -83,6 +83,9 @@ class DirectOffsetDownloader:
             total = content_range.rsplit("/", 1)[1].strip()
             if total.isdigit():
                 return dataclasses.replace(a, file_size=int(total))
+        # Content-Length fallback: only correct when HF answered a full 200
+        # (then it is the total size). A well-behaved 206 always carries
+        # Content-Range, handled above.
         if content_length is None:
             raise RuntimeError(
                 "file_size unresolvable: no Content-Range or Content-Length"
