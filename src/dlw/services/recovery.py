@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -30,6 +31,10 @@ from dlw.schemas.storage import StorageConfig
 from dlw.services.scheduler import reclaim_subtasks
 
 logger = logging.getLogger(__name__)
+
+_PAUSED_EXTERNAL_RETRY_INTERVAL_SECONDS = int(
+    os.environ.get("DLW_PAUSED_EXTERNAL_RETRY_INTERVAL_SECONDS", "300")
+)
 
 
 @dataclass
@@ -355,3 +360,36 @@ async def sweep_executor_timeouts(
         if t.to_status in ("suspect", "faulty"):
             counters["reclaimed"] += await reclaim_subtasks(session, ex.id, ex.epoch)
     return counters
+
+
+async def sweep_paused_external(session: AsyncSession) -> int:
+    """W2b2 §3.4: recover paused_external subtasks after a quiet period.
+
+    Walks paused_external subtasks whose last_paused_at is older than the
+    quiet interval (default 5 min) AND whose parent task is still active
+    (pending/scheduling/downloading). Flips them back to 'pending' for
+    re-claim. Returns count recovered. Caller commits.
+    """
+    quiet_threshold = datetime.now(UTC) - timedelta(
+        seconds=_PAUSED_EXTERNAL_RETRY_INTERVAL_SECONDS
+    )
+
+    rows = (await session.execute(
+        select(FileSubTask, DownloadTask)
+        .join(DownloadTask, DownloadTask.id == FileSubTask.task_id)
+        .where(FileSubTask.status == 'paused_external')
+        .where(FileSubTask.last_paused_at < quiet_threshold)
+        .where(DownloadTask.status.in_(('pending', 'scheduling', 'downloading')))
+        .with_for_update(skip_locked=True, of=FileSubTask)
+    )).all()
+
+    recovered = 0
+    for sub, _parent in rows:
+        sub.status = 'pending'
+        sub.executor_id = None
+        sub.executor_epoch = None
+        sub.assignment_token = None
+        sub.assigned_at = None
+        # leave last_paused_at as-is for observability
+        recovered += 1
+    return recovered
