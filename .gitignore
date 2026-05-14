@@ -69,6 +69,10 @@ playwright-report/
 .parts/
 *.partial
 
+# Phase 2 W3a — runtime CA / cert dirs (controller + executor bootstrap)
+.ca/
+.executor-certs/
+
 # Database (dev)
 *.db
 *.sqlite
