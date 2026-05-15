@@ -89,3 +89,77 @@ class LeaderElector:
             except Exception as exc:
                 logger.debug("conn.close() during cleanup raised (ignored): %s", exc)
             self._conn = None
+
+
+async def run_leader_loop(
+    *,
+    elector: LeaderElector,
+    poll_interval_seconds: float,
+    set_state: Callable[[ControllerState], None],
+    on_promote: Callable[[], Awaitable[None]],
+    on_active: Callable[[], Awaitable[None]],
+    on_step_down: Callable[[], Awaitable[None]],
+    shutdown: asyncio.Event,
+) -> None:
+    """The leader loop. Stays in standby polling for the lock; on acquire
+    transitions through recovering→active; on connection loss steps back to
+    standby. Returns cleanly when `shutdown` is set."""
+    state: ControllerState = "standby"
+    set_state(state)
+    while not shutdown.is_set():
+        try:
+            if state == "standby":
+                if await elector.try_acquire():
+                    state = "recovering"
+                    set_state(state)
+                    logger.info("leader: acquired lock, running recovery")
+                    try:
+                        await on_promote()
+                    except Exception:
+                        logger.exception("leader: recovery failed; will retry next tick")
+                        # Stay in `recovering` — heartbeats keep 503ing.
+                        # Don't release the lock (another instance can't fix it).
+                        await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                        continue
+                    state = "active"
+                    set_state(state)
+                    await on_active()
+                    logger.info("leader: promoted to active")
+            elif state == "recovering":
+                # Lock is held but promotion hasn't completed. Verify lock still
+                # alive, then retry on_promote.
+                if not await elector.verify():
+                    logger.warning("leader: lost lock during recovery, stepping down")
+                    await on_step_down()
+                    state = "standby"
+                    set_state(state)
+                    continue
+                try:
+                    await on_promote()
+                except Exception:
+                    logger.exception("leader: recovery failed; will retry next tick")
+                    await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                    continue
+                state = "active"
+                set_state(state)
+                await on_active()
+                logger.info("leader: promoted to active (after retry)")
+            elif state == "active":
+                if not await elector.verify():
+                    logger.warning("leader: lost lock, stepping down to standby")
+                    await on_step_down()
+                    state = "standby"
+                    set_state(state)
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("leader loop iteration failed")
+        await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+
+
+async def _sleep_or_shutdown(shutdown: asyncio.Event, seconds: float) -> None:
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
