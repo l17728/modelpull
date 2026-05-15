@@ -83,7 +83,6 @@ async def test_register_then_heartbeat_full_flow(tmp_path, engine, test_db_name)
         "DLW_DB_USER": os.environ.get("DLW_TEST_PG_USER", "postgres"),
         "DLW_DB_PASSWORD": os.environ.get("DLW_TEST_PG_PASSWORD", ""),
         "DLW_DB_NAME": test_db_name,
-        "DLW_STRICT_RECOVERY": "false",   # don't abort startup on recovery hiccups
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "dlw.main:app",

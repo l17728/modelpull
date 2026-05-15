@@ -18,22 +18,17 @@ _SWEEP_INTERVAL_SECONDS = 30
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Phase 2 W1: run recovery_routine before serving + spawn reclaim_loop.
-
-    Order:
-      1. Recovery routine (synchronous; must complete before serving traffic)
-      2. Spawn background reclaim_loop task
-      3. yield (app serves traffic)
-      4. Cancel reclaim_loop + dispose engine on shutdown
-    """
+    """W3c: leader-gated lifespan. The W3a auth substrate is bootstrapped
+    unconditionally (both roles need it ready so promotion is instant). The
+    run_recovery_routine + sweep loop are started by the leader loop only
+    after this instance acquires the leader advisory lock."""
     from dlw.db.session import get_engine, reset_engine
+    from dlw.services.leader_election import LeaderElector, run_leader_loop
     from dlw.services.recovery import run_recovery_routine
 
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
 
-    # W3a: bootstrap CA + JWT signing key + server cert + nonce store + enrollment token.
-    # Install the uvicorn transport scope patch so _extract_peer_cert can read
-    # the mTLS peer cert from scope["transport"] in direct-TLS deployments.
+    # W3a auth bootstrap — UNCHANGED. Both active and standby need this ready.
     from dlw.auth.uvicorn_tls_patch import install_transport_scope_patch
     install_transport_scope_patch()
 
@@ -65,34 +60,55 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.nonce_store = NonceStore(maxsize=10_000, ttl_seconds=300)
     app.state.enrollment_token = _enroll
 
-    # W6-J: spec §7 says recovery failure aborts startup. Permissive dev mode
-    # via DLW_STRICT_RECOVERY=false env override (defaults to strict).
-    import os
-    strict_recovery = os.environ.get("DLW_STRICT_RECOVERY", "true").lower() != "false"
-    try:
+    # W3c: controller state + leader loop.
+    app.state.controller_state = "standby"
+    shutdown = asyncio.Event()
+    elector = LeaderElector(
+        db_url=_settings.db_url, lock_id=_settings.active_lock_id,
+    )
+    sweep_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+
+    def _set_state(s: str) -> None:
+        app.state.controller_state = s
+
+    async def _on_promote() -> None:
         async with factory() as session:
             stats = await run_recovery_routine(session)
-            await session.commit()    # W6-E: caller commits (service is no-commit)
-            logger.info("startup recovery: %s", stats.as_dict())
-    except Exception:
-        if strict_recovery:
-            logger.exception("startup recovery_routine failed; aborting startup (strict mode)")
-            raise
-        logger.exception(
-            "startup recovery_routine failed; continuing in permissive mode "
-            "(DLW_STRICT_RECOVERY=false)"
-        )
+            await session.commit()
+            logger.info("recovery on promote: %s", stats.as_dict())
 
-    sweep_task = asyncio.create_task(_sweep_loop_main(factory))
+    async def _on_active() -> None:
+        sweep_task_holder["t"] = asyncio.create_task(_sweep_loop_main(factory))
 
+    async def _on_step_down() -> None:
+        t = sweep_task_holder["t"]
+        if t is not None:
+            t.cancel()
+            try:
+                await asyncio.wait_for(t, timeout=2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            sweep_task_holder["t"] = None
+
+    leader_task = asyncio.create_task(run_leader_loop(
+        elector=elector,
+        poll_interval_seconds=_settings.leader_poll_interval_seconds,
+        set_state=_set_state,
+        on_promote=_on_promote,
+        on_active=_on_active,
+        on_step_down=_on_step_down,
+        shutdown=shutdown,
+    ))
     try:
         yield
     finally:
-        sweep_task.cancel()
+        shutdown.set()
+        await _on_step_down()
         try:
-            await asyncio.wait_for(sweep_task, timeout=2)
+            await asyncio.wait_for(leader_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+            leader_task.cancel()
+        await elector.release()
         await reset_engine()
 
 
