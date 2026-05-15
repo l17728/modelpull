@@ -40,7 +40,11 @@ class Settings(BaseSettings):
     hf_proxy_timeout_seconds: int = Field(default=300, ge=10, le=3600)
 
     # Phase 2 W3c — controller leader election
-    active_lock_id: int = Field(default=0x444C5743_414B5631, ge=1)  # 'DLWC AKV1'
+    active_lock_id: int = Field(
+        default=0x444C5743_414B5631,
+        ge=1,
+        le=9_223_372_036_854_775_807,   # PG bigint max (2**63 - 1)
+    )  # 'DLWC AKV1'
     leader_poll_interval_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
 
     @property

@@ -46,10 +46,21 @@ def test_settings_active_lock_id_rejects_zero() -> None:
         Settings(active_lock_id=0)
 
 
+def test_settings_active_lock_id_rejects_above_pg_bigint_max() -> None:
+    with pytest.raises(ValidationError):
+        Settings(active_lock_id=9_223_372_036_854_775_808)
+
+
 def test_settings_has_leader_poll_interval_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DLW_LEADER_POLL_INTERVAL_SECONDS", raising=False)
     s = Settings()
     assert s.leader_poll_interval_seconds == 5.0
+
+
+def test_settings_leader_poll_interval_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DLW_LEADER_POLL_INTERVAL_SECONDS", "10.0")
+    s = Settings()
+    assert s.leader_poll_interval_seconds == 10.0
 
 
 def test_settings_leader_poll_interval_rejects_below_min() -> None:
