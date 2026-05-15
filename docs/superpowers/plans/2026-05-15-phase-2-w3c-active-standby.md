@@ -75,10 +75,21 @@ def test_settings_active_lock_id_rejects_zero() -> None:
         Settings(active_lock_id=0)
 
 
+def test_settings_active_lock_id_rejects_above_pg_bigint_max() -> None:
+    with pytest.raises(ValidationError):
+        Settings(active_lock_id=9_223_372_036_854_775_808)
+
+
 def test_settings_has_leader_poll_interval_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DLW_LEADER_POLL_INTERVAL_SECONDS", raising=False)
     s = Settings()
     assert s.leader_poll_interval_seconds == 5.0
+
+
+def test_settings_leader_poll_interval_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DLW_LEADER_POLL_INTERVAL_SECONDS", "10.0")
+    s = Settings()
+    assert s.leader_poll_interval_seconds == 10.0
 
 
 def test_settings_leader_poll_interval_rejects_below_min() -> None:
@@ -102,7 +113,11 @@ In `src/dlw/config.py`, after the W3b block (`hf_proxy_timeout_seconds: int = Fi
 
 ```python
     # Phase 2 W3c — controller leader election
-    active_lock_id: int = Field(default=0x444C5743_414B5631, ge=1)  # 'DLWC AKV1'
+    active_lock_id: int = Field(
+        default=0x444C5743_414B5631,
+        ge=1,
+        le=9_223_372_036_854_775_807,   # PG bigint max (2**63 - 1)
+    )  # 'DLWC AKV1'
     leader_poll_interval_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
 ```
 
@@ -140,7 +155,10 @@ from dlw.services.leader_election import LeaderElector
 
 
 def _db_url() -> str:
-    """Test DB URL — matches the conftest engine fixture."""
+    """URL for the PostgreSQL admin DB used by these tests. Advisory locks
+    are cluster-wide (not per-DB), so the choice of DB doesn't affect lock
+    isolation — only the lock_id does. This file's _LOCK_ID is unique and
+    pytest runs serially within a session, so collisions aren't a concern."""
     import os
     env = {
         "host": os.environ.get("DLW_TEST_PG_HOST", "localhost"),
@@ -224,15 +242,21 @@ async def test_verify_returns_true_when_holding() -> None:
 
 @pytest.mark.slow
 async def test_verify_returns_false_after_connection_drop() -> None:
-    """verify() returns False if the lock connection has died, and cleans up
-    so the next try_acquire() opens a fresh connection."""
+    """verify() must exercise its exception branch — when _conn is still set
+    but the underlying connection is dead, the SELECT 1 ping raises and
+    verify() cleans up + returns False. (Pre-NULLing _conn would short-circuit
+    on the `if self._conn is None: return False` guard and skip the path
+    that matters in production.)"""
     e = LeaderElector(_db_url(), _LOCK_ID)
     try:
         assert await e.try_acquire() is True
         assert e._conn is not None
         await e._conn.close()
-        e._conn = None
+        # _conn intentionally LEFT non-None — verify() must hit the
+        # SELECT-1-raises exception branch, not the early None-guard.
         assert await e.verify() is False
+        # And cleanup happened — _conn is None now:
+        assert e._conn is None
     finally:
         await e.release()
 ```
@@ -335,8 +359,8 @@ class LeaderElector:
         if self._conn is not None:
             try:
                 await self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("conn.close() during cleanup raised (ignored): %s", exc)
             self._conn = None
 ```
 
@@ -594,9 +618,42 @@ async def run_leader_loop(
                         continue
                     state = "active"
                     set_state(state)
-                    await on_active()
+                    try:
+                        await on_active()
+                    except Exception:
+                        logger.exception("leader: on_active failed; reverting to recovering for retry")
+                        state = "recovering"
+                        set_state(state)
+                        await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                        continue
                     logger.info("leader: promoted to active")
-            elif state in ("recovering", "active"):
+            elif state == "recovering":
+                # Lock is held but promotion hasn't completed. Verify lock still
+                # alive, then retry on_promote.
+                if not await elector.verify():
+                    logger.warning("leader: lost lock during recovery, stepping down")
+                    await on_step_down()
+                    state = "standby"
+                    set_state(state)
+                    continue
+                try:
+                    await on_promote()
+                except Exception:
+                    logger.exception("leader: recovery failed; will retry next tick")
+                    await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                    continue
+                state = "active"
+                set_state(state)
+                try:
+                    await on_active()
+                except Exception:
+                    logger.exception("leader: on_active failed; reverting to recovering for retry")
+                    state = "recovering"
+                    set_state(state)
+                    await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                    continue
+                logger.info("leader: promoted to active (after retry)")
+            elif state == "active":
                 if not await elector.verify():
                     logger.warning("leader: lost lock, stepping down to standby")
                     await on_step_down()
