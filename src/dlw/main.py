@@ -108,6 +108,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.wait_for(leader_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             leader_task.cancel()
+            try:
+                await leader_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await elector.release()
         await reset_engine()
 

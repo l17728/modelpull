@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.db.base import Base
 from dlw.services.leader_election import LeaderElector, run_leader_loop
