@@ -10,6 +10,7 @@ import uuid
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dlw.api._recovery_barrier import require_not_recovering
 from dlw.api.tasks import _session
 from dlw.auth.executor_jwt_dep import require_executor_jwt
 from dlw.db.models.executor import Executor
@@ -20,7 +21,8 @@ from dlw.services.scheduler import complete_subtask
 router = APIRouter(prefix="/api/v1/subtasks", tags=["subtasks"])
 
 
-@router.post("/{subtask_id}/report")
+@router.post("/{subtask_id}/report",
+             dependencies=[Depends(require_not_recovering)])
 async def post_report(
     subtask_id: uuid.UUID,
     body: SubTaskReport,
