@@ -209,3 +209,36 @@ async def test_stream_hf_attaches_auth_and_token_headers(tmp_path) -> None:
     assert seen["headers"]["x-executor-epoch"] == "4"
     assert seen["headers"]["x-assignment-token"] == str(tok)
     assert seen["headers"]["range"] == "bytes=0-1023"
+
+
+@pytest.mark.slow
+async def test_controller_recovering_503_is_retried_by_tenacity(tmp_path) -> None:
+    """W3c: a 503 with detail.code=CONTROLLER_RECOVERING from the controller is
+    a transient response. The existing tenacity _retry on ControllerClient
+    retries it; by the second attempt the controller is active and returns 200."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(503, json={
+                "detail": {"code": "CONTROLLER_RECOVERING",
+                           "message": "controller recovering after failover"},
+            })
+        return httpx.Response(200, json={
+            "id": "ex-recov", "status": "healthy", "health_score": 100,
+        })
+
+    state = make_fake_auth_state(
+        tmp_path, executor_id="ex-recov", epoch=1, jwt="jwt-recov",
+        hmac_seed=_HMAC_SEED,
+    )
+    async with ControllerClient(
+        base_url="http://test", auth_state=state,
+        _transport=httpx.MockTransport(handler),
+    ) as c:
+        r = await c.heartbeat(executor_id="ex-recov", health_score=100,
+                              parts_dir_bytes=0)
+    assert r["status"] == "healthy"
+    assert call_count == 2

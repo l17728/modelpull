@@ -52,16 +52,11 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.slow
 async def test_full_task_lifecycle_via_http(ephemeral_ca) -> None:
-    from dlw.main import create_app
-    from dlw.auth.hmac_nonce import NonceStore
     from tests.conftest import (
-        executor_request_headers, register_test_executor, signed_heartbeat_headers,
+        executor_request_headers, make_app_with_state, register_test_executor,
+        signed_heartbeat_headers,
     )
-    app = create_app()
-    app.state.ca = ephemeral_ca["ca"]
-    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
-    app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
-    app.state.enrollment_token = _ENROLL
+    app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
     auth = {"Authorization": f"Bearer {_TOKEN}"}
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:

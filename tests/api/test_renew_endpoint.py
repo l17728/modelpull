@@ -34,14 +34,9 @@ async def _create_tables(engine):
 
 @pytest.fixture
 async def client(ephemeral_ca, monkeypatch):
-    from dlw.main import create_app
-    from dlw.auth.hmac_nonce import NonceStore
+    from tests.conftest import make_app_with_state
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
-    app = create_app()
-    app.state.ca = ephemeral_ca["ca"]
-    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
-    app.state.nonce_store = NonceStore(maxsize=100, ttl_seconds=300)
-    app.state.enrollment_token = _ENROLL
+    app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
     async with AsyncClient(transport=ASGITransport(app=app),
                            base_url="http://test") as c:
         yield c

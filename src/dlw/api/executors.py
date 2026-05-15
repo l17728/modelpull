@@ -15,6 +15,7 @@ import secrets
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dlw.api._recovery_barrier import require_not_recovering
 from dlw.api.tasks import _session
 from dlw.auth.ca import fingerprint_of, sign_csr
 from dlw.auth import jwt_signing
@@ -123,7 +124,8 @@ async def post_renew(
     )
 
 
-@router.post("/{executor_id}/heartbeat")
+@router.post("/{executor_id}/heartbeat",
+             dependencies=[Depends(require_not_recovering)])
 async def post_heartbeat(
     body: ExecutorHeartbeat,
     _hmac: Executor = Depends(require_hmac_heartbeat),
@@ -138,7 +140,8 @@ async def post_heartbeat(
     return ExecutorRead.model_validate(ex)
 
 
-@router.post("/{executor_id}/poll")
+@router.post("/{executor_id}/poll",
+             dependencies=[Depends(require_not_recovering)])
 async def post_poll(
     executor: Executor = Depends(require_executor_epoch),
     session: AsyncSession = Depends(_session),

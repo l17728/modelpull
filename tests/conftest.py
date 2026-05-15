@@ -303,3 +303,23 @@ def make_fake_controller_client(hf_handler):
                     yield resp
 
     return _FakeControllerClient()
+
+
+def make_app_with_state(
+    ephemeral_ca,
+    *,
+    enrollment_token: str,
+    controller_state: str = "active",
+):
+    """Build a controller app for ASGI-transport tests with app.state pre-seeded
+    (skips the lifespan bootstrap). Defaults controller_state to 'active' so
+    the W3c recovery barrier doesn't fire."""
+    from dlw.auth.hmac_nonce import NonceStore
+    from dlw.main import create_app
+    app = create_app()
+    app.state.ca = ephemeral_ca["ca"]
+    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
+    app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
+    app.state.enrollment_token = enrollment_token
+    app.state.controller_state = controller_state
+    return app

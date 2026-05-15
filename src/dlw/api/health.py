@@ -1,7 +1,7 @@
 """Health endpoints: /health/live (process up?) + /health/ready (db reachable?)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -31,3 +31,13 @@ async def ready() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"db unreachable: {exc}") from exc
     return {"status": "ready", "db": "ok"}
+
+
+@router.get("/active")
+async def active(request: Request) -> dict[str, str]:
+    """W3c: LB target — 200 iff this instance holds the leader lock
+    (controller_state in {'recovering', 'active'}). 503 otherwise."""
+    state = getattr(request.app.state, "controller_state", "standby")
+    if state in ("recovering", "active"):
+        return {"status": "active", "controller_state": state}
+    raise HTTPException(status_code=503, detail={"controller_state": state})

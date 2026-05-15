@@ -120,17 +120,10 @@ async def test_e2e_hf_to_s3_full_pipeline(
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket=_BUCKET)
 
-        from dlw.main import create_app
-        from dlw.auth.hmac_nonce import NonceStore
         from dlw.executor.auth_lifecycle import AuthState
-        from tests.conftest import register_test_executor
-        app = create_app()
-        # W3a: inject the auth substrate onto app.state (skip the lifespan
-        # bootstrap — this test drives the ASGI app directly, no real server).
-        app.state.ca = ephemeral_ca["ca"]
-        app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
-        app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
-        app.state.enrollment_token = _ENROLL
+        from tests.conftest import make_app_with_state, register_test_executor
+        # W3a: app.state injected by helper (skip the lifespan bootstrap).
+        app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
         asgi_transport = httpx.ASGITransport(app=app)
 
         async with httpx.AsyncClient(

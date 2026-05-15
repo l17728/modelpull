@@ -35,6 +35,8 @@ servers:
     description: Local dev
 
 tags:
+  - name: health
+    description: Health and leader-election probes
   - name: tasks
     description: Download task management
   - name: subtasks
@@ -434,6 +436,35 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ModelInfo'}
 
+  # ========== Health ==========
+  /health/active:
+    get:
+      tags: [health]
+      summary: LB target — 200 iff this instance holds the leader advisory lock
+      operationId: healthActive
+      security: []
+      responses:
+        '200':
+          description: Active or recovering — LB should route to this instance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [active] }
+                  controller_state: { type: string, enum: [recovering, active] }
+        '503':
+          description: Standby — LB must NOT route to this instance.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      controller_state: { type: string, enum: [standby] }
+
   # ========== Executors ==========
   /executors/register:
     post:
@@ -644,6 +675,18 @@ paths:
           description: Server requesting backoff
           headers:
             Retry-After: {schema: {type: integer}}
+        '503':
+          description: Controller is recovering after a failover (INVARIANT 33). Retry shortly.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      code: { type: string, enum: [CONTROLLER_RECOVERING] }
+                      message: { type: string }
 
   /executors/{executorId}/renew:
     parameters:
@@ -729,6 +772,18 @@ paths:
                             type: integer
                           got:
                             type: integer
+        '503':
+          description: Controller is recovering after a failover (INVARIANT 33). Retry shortly.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      code: { type: string, enum: [CONTROLLER_RECOVERING] }
+                      message: { type: string }
 
   /hf-proxy/subtask/{subtaskId}:
     get:
@@ -899,6 +954,18 @@ paths:
                             type: integer
         '409':
           description: STALE_ASSIGNMENT or epoch fence violation
+        '503':
+          description: Controller is recovering after a failover (INVARIANT 33). Retry shortly.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      code: { type: string, enum: [CONTROLLER_RECOVERING] }
+                      message: { type: string }
 
   # ========== Tenants / Quota / Audit ==========
   /tenants/{tenantId}:

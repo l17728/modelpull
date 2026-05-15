@@ -67,13 +67,8 @@ def auth() -> dict[str, str]:
 
 @pytest.fixture
 async def client(ephemeral_ca):
-    from dlw.main import create_app
-    from dlw.auth.hmac_nonce import NonceStore
-    app = create_app()
-    app.state.ca = ephemeral_ca["ca"]
-    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
-    app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
-    app.state.enrollment_token = _ENROLL
+    from tests.conftest import make_app_with_state
+    app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
