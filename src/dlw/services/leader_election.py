@@ -123,7 +123,14 @@ async def run_leader_loop(
                         continue
                     state = "active"
                     set_state(state)
-                    await on_active()
+                    try:
+                        await on_active()
+                    except Exception:
+                        logger.exception("leader: on_active failed; reverting to recovering for retry")
+                        state = "recovering"
+                        set_state(state)
+                        await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                        continue
                     logger.info("leader: promoted to active")
             elif state == "recovering":
                 # Lock is held but promotion hasn't completed. Verify lock still
@@ -142,7 +149,14 @@ async def run_leader_loop(
                     continue
                 state = "active"
                 set_state(state)
-                await on_active()
+                try:
+                    await on_active()
+                except Exception:
+                    logger.exception("leader: on_active failed; reverting to recovering for retry")
+                    state = "recovering"
+                    set_state(state)
+                    await _sleep_or_shutdown(shutdown, poll_interval_seconds)
+                    continue
                 logger.info("leader: promoted to active (after retry)")
             elif state == "active":
                 if not await elector.verify():

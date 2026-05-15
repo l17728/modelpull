@@ -117,17 +117,21 @@ async def test_recovery_failure_stays_in_recovering_and_retries() -> None:
 @pytest.mark.slow
 async def test_step_down_on_connection_loss() -> None:
     """When verify() returns False (lost connection) the loop calls
-    on_step_down and reverts state to standby."""
+    on_step_down and reverts state to standby. Also verifies on_active ran
+    exactly once before the step-down (regression-guards the unguarded-
+    on_active concern from W3c T3 code review)."""
     from dlw.services.leader_election import run_leader_loop
 
     states: list[str] = []
+    active_calls = 0
     step_down_calls = 0
 
     async def on_promote() -> None:
         pass
 
     async def on_active() -> None:
-        pass
+        nonlocal active_calls
+        active_calls += 1
 
     async def on_step_down() -> None:
         nonlocal step_down_calls
@@ -146,6 +150,7 @@ async def test_step_down_on_connection_loss() -> None:
         )
 
     await _run_for(loop_factory, ticks=0.5)
+    assert active_calls == 1, f"on_active should have run exactly once before step-down: got {active_calls}"
     assert step_down_calls >= 1
     # We must have transitioned: standby → recovering → active → standby
     # (last 'standby' is the step-down). Assert at least one re-entry to
