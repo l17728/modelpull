@@ -86,6 +86,6 @@ class LeaderElector:
         if self._conn is not None:
             try:
                 await self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("conn.close() during cleanup raised (ignored): %s", exc)
             self._conn = None

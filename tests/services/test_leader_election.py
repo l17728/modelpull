@@ -7,7 +7,10 @@ from dlw.services.leader_election import LeaderElector
 
 
 def _db_url() -> str:
-    """Test DB URL — matches the conftest engine fixture."""
+    """URL for the PostgreSQL admin DB used by these tests. Advisory locks
+    are cluster-wide (not per-DB), so the choice of DB doesn't affect lock
+    isolation — only the lock_id does. This file's _LOCK_ID is unique and
+    pytest runs serially within a session, so collisions aren't a concern."""
     import os
     env = {
         "host": os.environ.get("DLW_TEST_PG_HOST", "localhost"),
@@ -91,14 +94,20 @@ async def test_verify_returns_true_when_holding() -> None:
 
 @pytest.mark.slow
 async def test_verify_returns_false_after_connection_drop() -> None:
-    """verify() returns False if the lock connection has died, and cleans up
-    so the next try_acquire() opens a fresh connection."""
+    """verify() must exercise its exception branch — when _conn is still set
+    but the underlying connection is dead, the SELECT 1 ping raises and
+    verify() cleans up + returns False. (Pre-NULLing _conn would short-circuit
+    on the `if self._conn is None: return False` guard and skip the path
+    that matters in production.)"""
     e = LeaderElector(_db_url(), _LOCK_ID)
     try:
         assert await e.try_acquire() is True
         assert e._conn is not None
         await e._conn.close()
-        e._conn = None
+        # _conn intentionally LEFT non-None — verify() must hit the
+        # SELECT-1-raises exception branch, not the early None-guard.
         assert await e.verify() is False
+        # And cleanup happened — _conn is None now:
+        assert e._conn is None
     finally:
         await e.release()
