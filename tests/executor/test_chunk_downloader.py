@@ -54,6 +54,7 @@ from dlw.executor.chunk_downloader import DirectOffsetDownloader
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.types import Assignment
 from dlw.schemas.storage import StorageConfig
+from tests.conftest import make_fake_controller_client
 
 
 _FILE_SIZE = 200 * 1024 * 1024   # 200 MiB → 4 chunks at 64 MiB
@@ -62,8 +63,8 @@ _SYNTHETIC = bytes((i * 13 + 7) % 256 for i in range(_FILE_SIZE))
 _EXPECTED_SHA = hashlib.sha256(_SYNTHETIC).hexdigest()
 
 
-def _mock_transport_for_synthetic() -> httpx.MockTransport:
-    """Respond to GET with HTTP 206 Partial Content reading Range header."""
+def _synthetic_hf_handler():
+    """httpx handler: HTTP 206 Partial Content reading the Range header."""
     def handler(request: httpx.Request) -> httpx.Response:
         rng = request.headers.get("Range", "")
         assert rng.startswith("bytes="), f"unexpected Range header: {rng!r}"
@@ -75,7 +76,7 @@ def _mock_transport_for_synthetic() -> httpx.MockTransport:
             content=body,
             headers={"Content-Length": str(len(body))},
         )
-    return httpx.MockTransport(handler)
+    return handler
 
 
 @pytest.fixture
@@ -83,7 +84,6 @@ def chunk_settings(tmp_path) -> ExecutorSettings:
     return ExecutorSettings(
         id="ex-chunk-test",
         bearer_token="t",
-        hf_endpoint="http://hf.fake",
         chunk_size_bytes=_CHUNK_SIZE,
         chunk_concurrency=2,
         parts_dir_path=str(tmp_path / "parts"),
@@ -92,16 +92,9 @@ def chunk_settings(tmp_path) -> ExecutorSettings:
     )
 
 
-async def test_pass1_pass2_happy_path_with_moto(chunk_settings, monkeypatch) -> None:
-    """Full pipeline: 4 chunks via MockTransport → moto multipart → sha256 matches."""
-    from dlw.executor import _io as _io_mod
-
-    transport = _mock_transport_for_synthetic()
-    monkeypatch.setattr(
-        _io_mod, "make_http_client",
-        lambda settings: httpx.AsyncClient(transport=transport),
-    )
-
+async def test_pass1_pass2_happy_path_with_moto(chunk_settings) -> None:
+    """Full pipeline: 4 chunks via the fake controller proxy -> moto multipart
+    -> sha256 matches."""
     storage_config = StorageConfig(
         bucket="test-bucket", region="us-east-1", endpoint_url=None,
         access_key_id="dummy", secret_access_key="dummy",
@@ -112,6 +105,7 @@ async def test_pass1_pass2_happy_path_with_moto(chunk_settings, monkeypatch) -> 
     a = Assignment(
         subtask_id=sub_id,
         task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
         repo_id="owner/repo",
         revision="b" * 40,
         filename="model.bin",
@@ -124,7 +118,10 @@ async def test_pass1_pass2_happy_path_with_moto(chunk_settings, monkeypatch) -> 
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket="test-bucket")
 
-        d = DirectOffsetDownloader(settings=chunk_settings)
+        d = DirectOffsetDownloader(
+            settings=chunk_settings,
+            client=make_fake_controller_client(_synthetic_hf_handler()),
+        )
         result = await d.download(assignment=a)
 
     assert result.bytes_written == _FILE_SIZE
@@ -138,15 +135,8 @@ async def test_pass1_pass2_happy_path_with_moto(chunk_settings, monkeypatch) -> 
 async def test_pass1_enospc_raises_disk_full_and_leaks_parts(
     chunk_settings, monkeypatch,
 ) -> None:
-    """Inject ENOSPC into pass-1 chunk write → DiskFullError + parts NOT cleaned."""
-    from dlw.executor import _io as _io_mod
+    """Inject ENOSPC into pass-1 chunk write -> DiskFullError + parts NOT cleaned."""
     from dlw.executor import chunk_downloader as cd_mod
-
-    transport = _mock_transport_for_synthetic()
-    monkeypatch.setattr(
-        _io_mod, "make_http_client",
-        lambda settings: httpx.AsyncClient(transport=transport),
-    )
 
     class _NoSpaceWriter:
         def write(self, data):
@@ -169,6 +159,7 @@ async def test_pass1_enospc_raises_disk_full_and_leaks_parts(
     a = Assignment(
         subtask_id=sub_id,
         task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
         repo_id="owner/repo",
         revision="b" * 40,
         filename="model.bin",
@@ -177,10 +168,91 @@ async def test_pass1_enospc_raises_disk_full_and_leaks_parts(
         storage_config=storage_config,
     )
 
-    d = DirectOffsetDownloader(settings=chunk_settings)
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(_synthetic_hf_handler()),
+    )
     from dlw.executor.chunk_downloader import DiskFullError
     with pytest.raises(DiskFullError):
         await d.download(assignment=a)
 
     from dlw.executor.parts_dir import parts_dir_for
     assert parts_dir_for(chunk_settings.parts_dir_path, sub_id).exists()
+
+
+async def test_resolve_size_via_range_probe(chunk_settings) -> None:
+    """When file_size is None, _resolve_size does a bytes=0-0 probe and reads
+    Content-Range to recover the total size."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Range") == "bytes=0-0"
+        return httpx.Response(
+            206, content=b"\x00",
+            headers={"Content-Range": "bytes 0-0/123456", "Content-Length": "1"},
+        )
+
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(handler),
+    )
+    a = Assignment(
+        subtask_id=uuid.uuid4(), task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r", revision="b" * 40, filename="big.bin",
+        file_size=None, expected_sha256=None,
+        storage_config=StorageConfig(
+            bucket="b", region="us-east-1", endpoint_url=None,
+            key_prefix="p",
+        ),
+    )
+    resolved = await d._resolve_size(a)
+    assert resolved.file_size == 123456
+
+
+async def test_resolve_size_falls_back_to_content_length(chunk_settings) -> None:
+    """If HF answers a 200 (no Content-Range), _resolve_size uses Content-Length."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=b"\x00" * 10,
+            headers={"Content-Length": "777"},
+        )
+
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(handler),
+    )
+    a = Assignment(
+        subtask_id=uuid.uuid4(), task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r", revision="b" * 40, filename="big.bin",
+        file_size=None, expected_sha256=None,
+        storage_config=StorageConfig(
+            bucket="b", region="us-east-1", endpoint_url=None,
+            key_prefix="p",
+        ),
+    )
+    resolved = await d._resolve_size(a)
+    assert resolved.file_size == 777
+
+
+async def test_resolve_size_raises_when_no_headers(chunk_settings) -> None:
+    """If neither Content-Range nor Content-Length is present, raise RuntimeError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Use stream= to prevent httpx from auto-injecting Content-Length.
+        return httpx.Response(200, stream=httpx.ByteStream(b"\x00"))  # no size headers
+
+    d = DirectOffsetDownloader(
+        settings=chunk_settings,
+        client=make_fake_controller_client(handler),
+    )
+    a = Assignment(
+        subtask_id=uuid.uuid4(), task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r", revision="b" * 40, filename="big.bin",
+        file_size=None, expected_sha256=None,
+        storage_config=StorageConfig(
+            bucket="b", region="us-east-1", endpoint_url=None,
+            key_prefix="p",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="unresolvable"):
+        await d._resolve_size(a)

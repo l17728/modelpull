@@ -15,9 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from dlw.executor import _io as _io_mod
 from dlw.executor._io import (
     _HTTP_CHUNK_BYTES,
     _TRANSIENT_RETRY,
@@ -25,6 +22,7 @@ from dlw.executor._io import (
     make_s3_client,
     upload_part,
 )
+from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.parts_dir import cleanup_parts_dir, parts_dir_for
 from dlw.executor.types import Assignment, DownloadResult
@@ -57,8 +55,10 @@ def plan_chunks(file_size: int, chunk_size: int) -> list[ChunkPlan]:
 
 
 class DirectOffsetDownloader:
-    def __init__(self, *, settings: ExecutorSettings) -> None:
+    def __init__(self, *, settings: ExecutorSettings,
+                 client: ControllerClient) -> None:
         self._s = settings
+        self._controller = client
         assert settings.chunk_size_bytes >= 5 * 1024 * 1024, \
             f"chunk_size_bytes ({settings.chunk_size_bytes}) < 5 MiB"
 
@@ -68,18 +68,29 @@ class DirectOffsetDownloader:
         return path.open("wb")
 
     async def _resolve_size(self, a: Assignment) -> Assignment:
-        url = (f"{self._s.hf_endpoint.rstrip('/')}/{a.repo_id}"
-               f"/resolve/{a.revision}/{a.filename}")
-        headers: dict[str, str] = {}
-        if self._s.hf_token:
-            headers["Authorization"] = f"Bearer {self._s.hf_token}"
-        async with _io_mod.make_http_client(self._s) as hc:
-            resp = await hc.head(url, headers=headers)
+        """W3b: the proxy is GET-only, so probe size with a bytes=0-0 range
+        request and read Content-Range (`bytes 0-0/<total>`). Fall back to
+        Content-Length if HF answered a full 200 instead of a 206."""
+        async with self._controller.stream_hf(
+            subtask_id=a.subtask_id,
+            assignment_token=a.assignment_token,
+            range_header="bytes=0-0",
+        ) as resp:
             resp.raise_for_status()
-        cl = resp.headers.get("Content-Length")
-        if cl is None:
-            raise RuntimeError("file_size unresolvable: HEAD returned no Content-Length")
-        return dataclasses.replace(a, file_size=int(cl))
+            content_range = resp.headers.get("Content-Range")
+            content_length = resp.headers.get("Content-Length")
+        if content_range and "/" in content_range:
+            total = content_range.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return dataclasses.replace(a, file_size=int(total))
+        # Content-Length fallback: only correct when HF answered a full 200
+        # (then it is the total size). A well-behaved 206 always carries
+        # Content-Range, handled above.
+        if content_length is None:
+            raise RuntimeError(
+                "file_size unresolvable: no Content-Range or Content-Length"
+            )
+        return dataclasses.replace(a, file_size=int(content_length))
 
     async def download(self, *, assignment: Assignment) -> DownloadResult:
         if assignment.file_size is None:
@@ -102,23 +113,23 @@ class DirectOffsetDownloader:
         self, a: Assignment, plans: list[ChunkPlan], dest_dir: Path,
     ) -> None:
         sem = asyncio.Semaphore(self._s.chunk_concurrency)
-        async with _io_mod.make_http_client(self._s) as hc:
-            async def one(plan: ChunkPlan) -> None:
-                async with sem:
-                    await self._download_one_chunk(hc, a, plan, dest_dir)
-            await asyncio.gather(*(one(p) for p in plans))
+
+        async def one(plan: ChunkPlan) -> None:
+            async with sem:
+                await self._download_one_chunk(a, plan, dest_dir)
+
+        await asyncio.gather(*(one(p) for p in plans))
 
     @_TRANSIENT_RETRY
     async def _download_one_chunk(
-        self, hc: httpx.AsyncClient, a: Assignment,
-        plan: ChunkPlan, dest_dir: Path,
+        self, a: Assignment, plan: ChunkPlan, dest_dir: Path,
     ) -> None:
-        url = (f"{self._s.hf_endpoint.rstrip('/')}/{a.repo_id}"
-               f"/resolve/{a.revision}/{a.filename}")
-        headers = {"Range": f"bytes={plan.offset}-{plan.offset + plan.length - 1}"}
-        if self._s.hf_token:
-            headers["Authorization"] = f"Bearer {self._s.hf_token}"
-        async with hc.stream("GET", url, headers=headers) as resp:
+        range_header = f"bytes={plan.offset}-{plan.offset + plan.length - 1}"
+        async with self._controller.stream_hf(
+            subtask_id=a.subtask_id,
+            assignment_token=a.assignment_token,
+            range_header=range_header,
+        ) as resp:
             resp.raise_for_status()
             target = dest_dir / f"{plan.index}.bin"
             try:

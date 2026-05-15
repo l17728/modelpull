@@ -225,6 +225,37 @@ def check_no_bearer_on_executor_routes() -> list[str]:
     return errors
 
 
+def check_no_hf_token_in_executor() -> list[str]:
+    """W3b §3.11: INVARIANT 2 — the tenant HF token must never reach an
+    executor. Forbid the `hf_token` / `hf_endpoint` identifiers anywhere in
+    src/dlw/executor/. After W3b, HF access goes exclusively through the
+    controller's reverse proxy.
+
+    Only whole comment lines (first non-whitespace char is `#`) are exempt —
+    string literals and trailing comments containing the identifiers are
+    flagged too (this is a full-text scan, by design)."""
+    errors: list[str] = []
+    exec_dir = ROOT / "src" / "dlw" / "executor"
+    if not exec_dir.exists():
+        return []
+    for py in sorted(exec_dir.rglob("*.py")):  # sorted for deterministic CI output
+        try:
+            text = py.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            errors.append(f"Cannot read {py.relative_to(ROOT)}: {e}")
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if line.strip().startswith("#"):
+                continue
+            if "hf_token" in line or "hf_endpoint" in line:
+                errors.append(
+                    f"{py.relative_to(ROOT)}:{lineno}: "
+                    f"'hf_token'/'hf_endpoint' forbidden in the executor package "
+                    f"(INVARIANT 2 — HF access goes through the controller proxy)"
+                )
+    return errors
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -363,6 +394,7 @@ def main() -> int:
     failures.extend(check_task_status_domain())
     failures.extend(check_d10_host_affinity_test_owner())
     failures.extend(check_no_bearer_on_executor_routes())
+    failures.extend(check_no_hf_token_in_executor())
 
     # --- Report ---
     if failures:

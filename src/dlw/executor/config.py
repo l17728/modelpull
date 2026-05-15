@@ -32,10 +32,6 @@ class ExecutorSettings(BaseSettings):
     nic_speed_gbps: int = Field(default=1, ge=1, le=400)
     region: str = Field(default="local")
 
-    # Phase 1 W4 — HF Hub
-    hf_endpoint: str = Field(default="https://huggingface.co")
-    hf_token: str | None = Field(default=None)
-
     # Phase 1 W4 — S3 / S3-compatible
     s3_region: str = Field(default="us-east-1")
     s3_endpoint_url: str | None = Field(default=None)

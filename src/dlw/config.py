@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     controller_hostname: str = Field(default="dlw-controller")
     tls_trusted_proxy: bool = Field(default=False)
 
+    # Phase 2 W3b — HF reverse-proxy
+    hf_proxy_timeout_seconds: int = Field(default=300, ge=10, le=3600)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user

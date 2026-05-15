@@ -203,6 +203,7 @@ class ExecutorRunner:
             assignment = Assignment(
                 subtask_id=sub_id,
                 task_id=uuid.UUID(subtask["task_id"]),
+                assignment_token=assignment_token,
                 repo_id=repo_id,
                 revision=revision,
                 filename=subtask["filename"],

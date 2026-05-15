@@ -86,3 +86,29 @@ anyone can forge the header. Default is `0` (direct uvicorn TLS only).
 
 Heartbeats carry an HMAC timestamp validated within ±5 min. Run
 `chrony` / `systemd-timesyncd` on all executor + controller hosts.
+
+## W3b — HF access via the controller reverse proxy
+
+As of Phase 2 W3b, executors no longer talk to huggingface.co directly. All
+HF file downloads flow through the controller's reverse proxy
+(`GET /api/v1/hf-proxy/subtask/{id}`), which injects the tenant HF token
+server-side (INVARIANT 2 — the token never leaves the controller).
+
+**Removed executor environment variables** (delete them from `.env.executor`
+and any deployment manifests — they are now ignored):
+
+- `DLW_EXECUTOR_HF_TOKEN`
+- `DLW_EXECUTOR_HF_ENDPOINT`
+
+**Controller environment variables:**
+
+- `DLW_HF_TOKEN` — the tenant HF token (already used by the controller for
+  repo-metadata enumeration; W3b also uses it for the download proxy).
+- `DLW_HF_ENDPOINT` — defaults to `https://huggingface.co`.
+- `DLW_HF_PROXY_TIMEOUT_SECONDS` — per-request timeout for the proxy's HF
+  fetch (default 300, range 10–3600).
+
+**Operational tradeoff:** download bandwidth now flows through the controller
+rather than executor→HF directly. For the internal beta this is acceptable;
+global rate-limit coordination and an executor-local credential pool are
+Phase 3 items.

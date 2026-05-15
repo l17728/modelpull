@@ -1,8 +1,10 @@
 """E2E: real controller + real ExecutorRunner — full HF→S3 happy path.
 
-W4 rewrite: replaces MockDownloader with HfS3StreamDownloader; HF served by
-httpx MockTransport (returns deterministic bytes per filename); S3 served by
-moto[s3] in-process. No Docker required.
+W4 rewrite: replaces MockDownloader with HfS3StreamDownloader.
+W3b update: the HF MockTransport is installed on the controller's
+`dlw.api.hf_proxy._make_hf_client` seam — the executor fetches through the
+controller reverse-proxy, not directly from HF. S3 served by moto[s3]
+in-process. No Docker required.
 """
 from __future__ import annotations
 
@@ -178,12 +180,18 @@ async def test_e2e_hf_to_s3_full_pipeline(
                 heartbeat_interval_seconds=1,
                 poll_interval_seconds=1,
             )
-            downloader = HfS3StreamDownloader(settings=settings)
-            # Inject the HF transport into the downloader's http client factory
-            downloader._make_http_client = lambda: httpx.AsyncClient(
-                transport=hf_transport,
-                timeout=settings.download_timeout_seconds,
-                follow_redirects=True,
+            downloader = HfS3StreamDownloader(
+                settings=settings, client=executor_client,
+            )
+            # W3b: the executor fetches HF bytes through the controller's
+            # reverse proxy. Install the HF MockTransport on the controller's
+            # HF client factory (not the downloader).
+            import dlw.api.hf_proxy as _hf_proxy_mod
+            monkeypatch.setattr(
+                _hf_proxy_mod, "_make_hf_client",
+                lambda timeout_seconds: httpx.AsyncClient(
+                    transport=hf_transport, follow_redirects=True,
+                ),
             )
 
             runner = ExecutorRunner(
