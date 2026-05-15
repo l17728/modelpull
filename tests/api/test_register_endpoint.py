@@ -37,13 +37,8 @@ async def _create_tables(engine):
 async def client(ephemeral_ca, monkeypatch, tmp_path):
     """App with W3a auth state set directly on app.state (skip the real
     lifespan bootstrap — set ca/jwt_keypair/enrollment_token from ephemeral_ca)."""
-    from dlw.main import create_app
-    from dlw.auth.hmac_nonce import NonceStore
-    app = create_app()
-    app.state.ca = ephemeral_ca["ca"]
-    app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
-    app.state.nonce_store = NonceStore(maxsize=100, ttl_seconds=300)
-    app.state.enrollment_token = _ENROLL
+    from tests.conftest import make_app_with_state
+    app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
     async with AsyncClient(transport=ASGITransport(app=app),
                            base_url="http://test") as c:
         yield c
