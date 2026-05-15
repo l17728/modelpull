@@ -112,3 +112,42 @@ and any deployment manifests — they are now ignored):
 rather than executor→HF directly. For the internal beta this is acceptable;
 global rate-limit coordination and an executor-local credential pool are
 Phase 3 items.
+
+## Controller leadership (W3c)
+
+As of Phase 2 W3c, the controller supports active/standby deployments via an
+app-level leader election. The instance holding a session-level
+PostgreSQL advisory lock (`pg_try_advisory_lock(<DLW_ACTIVE_LOCK_ID>)`) is
+the **active**; all others are **standby**.
+
+**LB routing:** point the load balancer's health check at `GET /health/active`
+(returns 200 only when this instance holds the lock). `/health/live` and
+`/health/ready` remain the k8s liveness/readiness probes — unchanged.
+
+**Failover behaviour:** when the active dies, PG auto-releases the advisory
+lock the instant its holding session ends. A standby's leader-loop poll
+(default 5 s, configurable via `DLW_LEADER_POLL_INTERVAL_SECONDS`) acquires
+the freed lock and promotes through `standby → recovering → active`. During
+the `recovering` phase the executor-loop endpoints (heartbeat, poll, report)
+return **503 `CONTROLLER_RECOVERING`** — executors retry through their
+existing tenacity backoff. Total RTO target: ≤ 10 min.
+
+**Relationship to PG-level failover (`promote-standby.sh`):** the app-level
+lock is orthogonal to PostgreSQL primary failover. The runbook
+`deploy/runbooks/scripts/promote-standby.sh` promotes the PG primary itself
+(CH-Q3); after that script runs, the controller pods reconnect and the
+advisory lock is re-acquired automatically by whichever pod wins the race.
+
+**Required environment variables:**
+
+- `DLW_ACTIVE_LOCK_ID` — bigint advisory-lock key. Default
+  `0x444C5743414B5631`. **All controller instances MUST use the same value**;
+  a mismatch causes both to think they are active.
+- `DLW_LEADER_POLL_INTERVAL_SECONDS` — standby poll interval (default 5.0,
+  range 0.5–60.0).
+
+**Removed environment variables (W3c):**
+
+- `DLW_STRICT_RECOVERY` — deleted. Recovery failures now keep the controller
+  in `recovering` and retry on the next leader-loop tick (heartbeats keep
+  503ing; alertable from log volume).
