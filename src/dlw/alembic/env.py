@@ -13,12 +13,15 @@ from dlw.config import get_settings
 from dlw.db import Base
 from dlw.db.models import (  # noqa: F401  side-effect import
     AuditLog,
+    CasbinRule,
     DownloadTask,
     Executor,
     FileSubTask,
     Project,
+    QuotaSnapshot,
     StorageBackend,
     Tenant,
+    UsageRecord,
     User,
 )
 

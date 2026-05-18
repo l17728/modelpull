@@ -182,10 +182,11 @@ def ephemeral_ca(tmp_path_factory):
 def client_cert_pair(ephemeral_ca):
     """Per-test client cert ('test-executor-1') signed by the session CA.
     Returns (cert_pem: bytes, key: Ed25519PrivateKey, executor_id: str)."""
+    from cryptography import x509
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography import x509
     from cryptography.x509.oid import NameOID
+
     from dlw.auth.ca import sign_csr
     executor_id = "test-executor-1"
     key = ed25519.Ed25519PrivateKey.generate()
@@ -206,9 +207,9 @@ async def register_test_executor(
     """Build a CSR, POST /api/v1/executors/register, return a dict with
     executor_id, epoch, cert_pem, jwt, hmac_seed, ca_chain. The caller's app
     must have app.state.ca / jwt_keypair / nonce_store / enrollment_token set."""
+    from cryptography import x509
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography import x509
     from cryptography.x509.oid import NameOID
     key = ed25519.Ed25519PrivateKey.generate()
     csr = (x509.CertificateSigningRequestBuilder()
@@ -242,6 +243,7 @@ def signed_heartbeat_headers(reg: dict, body: bytes) -> dict[str, str]:
     """mTLS-bypass + JWT + epoch + HMAC headers for a heartbeat body."""
     import secrets as _s
     import time as _t
+
     from dlw.auth.hmac_nonce import compute_hmac
     ts = int(_t.time())
     nonce = _s.token_hex(16)
@@ -263,6 +265,7 @@ def make_fake_auth_state(
     MockTransport (cert files are never read in that mode)."""
     import datetime as _dt
     from pathlib import Path as _Path
+
     from dlw.executor.auth_lifecycle import AuthState
     far = _dt.datetime.now(_dt.UTC) + _dt.timedelta(hours=24)
     return AuthState(
@@ -280,8 +283,9 @@ def make_fake_controller_client(hf_handler):
     httpx.MockTransport(hf_handler) instead of a real controller proxy. Lets
     downloader tests simulate HF responses without a running controller.
     hf_handler is a Callable[[httpx.Request], httpx.Response]."""
-    import httpx as _httpx
     from contextlib import asynccontextmanager as _acm
+
+    import httpx as _httpx
 
     class _FakeControllerClient:
         def __init__(self):
@@ -305,6 +309,23 @@ def make_fake_controller_client(hf_handler):
     return _FakeControllerClient()
 
 
+def principal_headers(*, user_id: int = 1, tenant_id: int = 1,
+                       role: str = "tenant_operator",
+                       project_ids: list[int] | None = None,
+                       secret: str = "unit-secret") -> dict[str, str]:
+    """Authorization header carrying a freshly minted system-JWT (Phase 3 SP1).
+    Caller must have set DLW_SYSTEM_JWT_SECRET=secret + cleared the cache."""
+    from dlw.auth.principal import issue_system_jwt
+    tok = issue_system_jwt(secret=secret, user_id=user_id,
+                           tenant_id=tenant_id, role=role,
+                           project_ids=project_ids or [])
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def service_headers(token: str = "svc-tok") -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def make_app_with_state(
     ephemeral_ca,
     *,
@@ -317,6 +338,10 @@ def make_app_with_state(
     from dlw.auth.hmac_nonce import NonceStore
     from dlw.main import create_app
     app = create_app()
+    from dlw.config import get_settings as _gs
+    app.state.settings = _gs()
+    from dlw.authz.enforcer import build_enforcer
+    app.state.casbin = build_enforcer(grants=[])
     app.state.ca = ephemeral_ca["ca"]
     app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
     app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)

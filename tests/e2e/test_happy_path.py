@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.config import get_settings
 from dlw.db.base import Base
+from tests.conftest import principal_headers
 
-
-_TOKEN = "e2e-token"
+SECRET = "unit-secret"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -43,7 +43,8 @@ _ENROLL = "e2e-enrollment-token-happy-path"
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     get_settings.cache_clear()
     yield
@@ -53,11 +54,13 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.slow
 async def test_full_task_lifecycle_via_http(ephemeral_ca) -> None:
     from tests.conftest import (
-        executor_request_headers, make_app_with_state, register_test_executor,
+        executor_request_headers,
+        make_app_with_state,
+        register_test_executor,
         signed_heartbeat_headers,
     )
     app = make_app_with_state(ephemeral_ca, enrollment_token=_ENROLL)
-    auth = {"Authorization": f"Bearer {_TOKEN}"}
+    auth = principal_headers(secret=SECRET, role="tenant_admin")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         # 1. Create task

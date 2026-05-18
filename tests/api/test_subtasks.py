@@ -11,12 +11,12 @@ from dlw.config import get_settings
 from dlw.db.base import Base
 from tests.conftest import (
     executor_request_headers,
+    principal_headers,
     register_test_executor,
     signed_heartbeat_headers,
 )
 
-
-_TOKEN = "test-bearer-token-12345"
+SECRET = "unit-secret"
 _ENROLL = "test-enrollment-token-w3a-subtasks"
 
 
@@ -52,7 +52,8 @@ async def _cleanup_tasks(engine):
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     get_settings.cache_clear()
     yield
@@ -62,7 +63,7 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def auth() -> dict[str, str]:
     """Bearer header for /tasks (UI) endpoints."""
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return principal_headers(secret=SECRET, role="tenant_admin")
 
 
 @pytest.fixture

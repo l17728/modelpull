@@ -1,13 +1,4 @@
-"""Tasks API: POST / GET list / GET by id.
-
-Phase 1 W4: POST /tasks now calls HF Hub via task_service to enumerate the
-repo's files at the given revision. Errors translated to user-visible HTTP
-status codes:
-  - HF 404 (repo or revision missing)        -> 404
-  - HF 401/403 (private or auth required)    -> 422 (Phase 1 only supports public)
-  - HF 5xx / network                          -> 503
-  - Empty repo                                -> 422
-"""
+"""Tasks API: POST / GET list / GET by id / cancel — principal-scoped (SP1)."""
 from __future__ import annotations
 
 import uuid
@@ -17,97 +8,148 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from dlw.auth.bearer import require_bearer
+from dlw.auth.principal import Principal
+from dlw.authz.deps import require_perm
 from dlw.config import get_settings
 from dlw.db.models.task import DownloadTask
 from dlw.db.session import get_engine
+from dlw.db.tenant_scope import tenant_filtered
 from dlw.schemas.task import TaskCreate, TaskDetail, TaskList, TaskRead
+from dlw.services.audit import write_audit
 from dlw.services.hf_metadata import (
     HfNetworkError,
     HfPrivateOrAuthRequired,
     RepoNotFound,
 )
+from dlw.services.quota import QuotaExceeded, check_quota_for_new_task
 from dlw.services.task_service import EmptyRepo, cancel_task, create_task
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
-_TENANT_ID = 1
-_PROJECT_ID = 1
-_OWNER_USER_ID = 1
-
 
 async def _session():
-    engine = get_engine()
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     async with factory() as session:
         yield session
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_bearer)])
-async def post_task(body: TaskCreate, session: AsyncSession = Depends(_session)) -> TaskRead:
+async def _resolve_project(session: AsyncSession, principal: Principal,
+                           body: TaskCreate) -> int:
+    """Body project_id if the principal's tenant owns it, else the tenant's
+    lowest-id project (its default)."""
+    from dlw.db.models.tenant import Project
+    requested = getattr(body, "project_id", None)
+    if requested is not None:
+        owns = await session.scalar(
+            select(Project.id).where(Project.id == requested,
+                                     Project.tenant_id == principal.tenant_id))
+        if owns is None:
+            raise HTTPException(403, detail={"code": "RBAC_DENIED"})
+        return int(requested)
+    pid = await session.scalar(
+        select(func.min(Project.id)).where(
+            Project.tenant_id == principal.tenant_id))
+    if pid is None:
+        raise HTTPException(409, detail="tenant has no project")
+    return int(pid)
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def post_task(
+    body: TaskCreate,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "POST")),
+    session: AsyncSession = Depends(_session),
+) -> TaskRead:
     settings = get_settings()
+    try:
+        await check_quota_for_new_task(session, principal.tenant_id)
+    except QuotaExceeded as e:
+        # Spec §7 error-matrix + doc 04 §9.2: 429 must be audited.
+        await write_audit(
+            session, action="quota.exceeded", resource_type="tenant",
+            resource_id=str(principal.tenant_id), outcome="denied",
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id or None,
+            payload={"metric": e.metric})
+        await session.commit()
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "QUOTA_EXCEEDED", "metric": e.metric}) from e
+    project_id = await _resolve_project(session, principal, body)
     try:
         task = await create_task(
             session, body,
-            owner_user_id=_OWNER_USER_ID, tenant_id=_TENANT_ID, project_id=_PROJECT_ID,
+            owner_user_id=principal.user_id, tenant_id=principal.tenant_id,
+            project_id=project_id,
             hf_endpoint=settings.hf_endpoint, hf_token=settings.hf_token,
         )
     except RepoNotFound as e:
-        raise HTTPException(status_code=404, detail=f"repo or revision not found: {e}") from e
+        raise HTTPException(status_code=404,
+                            detail=f"repo or revision not found: {e}") from e
     except HfPrivateOrAuthRequired as e:
         raise HTTPException(
             status_code=422,
-            detail=f"repo is private or requires auth — Phase 1 supports public repos only: {e}",
+            detail=f"repo is private or requires auth — public only: {e}",
         ) from e
     except HfNetworkError as e:
-        raise HTTPException(status_code=503, detail=f"huggingface unreachable: {e}") from e
+        raise HTTPException(status_code=503,
+                            detail=f"huggingface unreachable: {e}") from e
     except EmptyRepo as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     await session.commit()
     return TaskRead.model_validate(task)
 
 
-@router.get("", dependencies=[Depends(require_bearer)])
-async def list_tasks(session: AsyncSession = Depends(_session)) -> TaskList:
+@router.get("")
+async def list_tasks(
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> TaskList:
     rows = (await session.execute(
-        select(DownloadTask).where(DownloadTask.tenant_id == _TENANT_ID)
+        tenant_filtered(select(DownloadTask), DownloadTask, principal)
         .order_by(DownloadTask.created_at.desc())
     )).scalars().all()
     total = await session.scalar(
-        select(func.count()).select_from(DownloadTask)
-        .where(DownloadTask.tenant_id == _TENANT_ID)
-    )
-    return TaskList(items=[TaskRead.model_validate(r) for r in rows], total=int(total or 0))
+        tenant_filtered(select(func.count()).select_from(DownloadTask),
+                        DownloadTask, principal))
+    return TaskList(items=[TaskRead.model_validate(r) for r in rows],
+                    total=int(total or 0))
 
 
-@router.get("/{task_id}", dependencies=[Depends(require_bearer)])
-async def get_task(task_id: uuid.UUID, session: AsyncSession = Depends(_session)) -> TaskDetail:
+@router.get("/{task_id}")
+async def get_task(
+    task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> TaskDetail:
     row = (await session.execute(
-        select(DownloadTask)
-          .where(DownloadTask.id == task_id, DownloadTask.tenant_id == _TENANT_ID)
-          .options(selectinload(DownloadTask.subtasks))
+        tenant_filtered(
+            select(DownloadTask).where(DownloadTask.id == task_id),
+            DownloadTask, principal)
+        .options(selectinload(DownloadTask.subtasks))
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
     return TaskDetail.model_validate(row)
 
 
-@router.post(
-    "/{task_id}/cancel",
-    status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_bearer)],
-)
+@router.post("/{task_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
 async def post_cancel_task(
     task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "DELETE")),
     session: AsyncSession = Depends(_session),
 ) -> TaskRead:
-    """W2b2 §3.2: cancel a task. Idempotent for cancelling state; 409 on terminal."""
+    owned = await session.scalar(
+        tenant_filtered(select(DownloadTask.id)
+                        .where(DownloadTask.id == task_id),
+                        DownloadTask, principal))
+    if owned is None:
+        raise HTTPException(status_code=404, detail="task not found")
     try:
         task = await cancel_task(session, task_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-
     await session.commit()
     return TaskRead.model_validate(task)

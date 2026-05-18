@@ -21,9 +21,6 @@ class Settings(BaseSettings):
     db_password: str = Field(default="")
     db_name: str = Field(default="dlw")
 
-    # Single shared secret for Week 2 (multi-user OIDC PKCE in Phase 3)
-    bearer_token: str = Field(default="dev-token-change-me")
-
     # HF Hub metadata client (controller-side enumeration)
     hf_endpoint: str = Field(default="https://huggingface.co")
     hf_token: str | None = Field(default=None)
@@ -46,6 +43,18 @@ class Settings(BaseSettings):
         le=9_223_372_036_854_775_807,   # PG bigint max (2**63 - 1)
     )  # 'DLWC AKV1'
     leader_poll_interval_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
+
+    # Phase 3 SP1 — multi-tenancy
+    auth_dev_mode: bool = Field(default=False)
+    system_jwt_secret: str = Field(default="dev-system-jwt-change-me")
+    system_admin_token: str = Field(default="")
+    oidc_issuer: str = Field(default="")
+    oidc_client_id: str = Field(default="")
+    oidc_client_secret: str = Field(default="")
+    oidc_redirect_url: str = Field(
+        default="http://localhost:8000/api/v1/auth/callback"
+    )
+    auth_tenant_rules_json: str = Field(default="[]")
 
     @property
     def db_url(self) -> str:

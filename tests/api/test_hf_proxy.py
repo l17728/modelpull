@@ -13,10 +13,13 @@ from dlw.config import get_settings
 from dlw.db.base import Base
 from dlw.db.models.task import FileSubTask
 from tests.conftest import (
-    executor_request_headers, register_test_executor, signed_heartbeat_headers,
+    executor_request_headers,
+    principal_headers,
+    register_test_executor,
+    signed_heartbeat_headers,
 )
 
-_TOKEN = "hf-proxy-ui-token"
+SECRET = "unit-secret"
 _ENROLL = "hf-proxy-enrollment-token"
 _HF_TOKEN = "test-hf-token-xyz"
 
@@ -55,7 +58,8 @@ async def _cleanup_tasks(engine):
 
 @pytest.fixture(autouse=True)
 def _set_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     monkeypatch.setenv("DLW_HF_TOKEN", _HF_TOKEN)
     monkeypatch.setenv("DLW_HF_ENDPOINT", "https://huggingface.co")
@@ -90,7 +94,7 @@ async def _create_task_and_claim(c, reg):
         "repo_id": "deepseek-ai/DeepSeek-V3",
         "revision": "a" * 40,
         "storage_id": 1,
-    }, headers={"Authorization": f"Bearer {_TOKEN}"})
+    }, headers=principal_headers(secret=SECRET, role="tenant_admin"))
     assert r.status_code == 201, r.text
     hb_body = b'{"health_score": 100, "parts_dir_bytes": 0, "disk_free_gb": 100}'
     r = await c.post(f"/api/v1/executors/{reg['executor_id']}/heartbeat",

@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.config import get_settings
 from dlw.db.base import Base
+from tests.conftest import make_app_with_state, principal_headers
 
-
-_TOKEN = "test-bearer-token-cancel"
+SECRET = "unit-secret"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -38,7 +38,8 @@ async def _bootstrap(engine):
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -46,13 +47,12 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def auth() -> dict[str, str]:
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return principal_headers(secret=SECRET, role="tenant_admin")
 
 
 @pytest.fixture
-async def client():
-    from dlw.main import create_app
-    app = create_app()
+async def client(ephemeral_ca):
+    app = make_app_with_state(ephemeral_ca, enrollment_token="e")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
@@ -97,6 +97,7 @@ async def test_post_cancel_returns_409_on_terminal_task(
 ) -> None:
     """Create a task, force-mark it succeeded via DB, then cancel → 409."""
     from datetime import UTC, datetime
+
     from dlw.db.models.task import DownloadTask
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:

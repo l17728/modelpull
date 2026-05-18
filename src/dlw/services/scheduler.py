@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
+from dlw.services.quota import record_usage
 
 
 async def claim_one_subtask(
@@ -189,6 +190,12 @@ async def complete_subtask(
     if s3_key is not None:
         sub.s3_key = s3_key
 
+    if final_status == "succeeded":
+        await record_usage(
+            session, tenant_id=sub.tenant_id, project_id=None,
+            user_id=None, task_id=sub.task_id, metric="bytes_month",
+            value=sub.bytes_downloaded or 0)
+
     parent = await session.get(
         DownloadTask, sub.task_id, with_for_update=True
     )
@@ -217,7 +224,7 @@ async def complete_subtask(
     # W2a §3.3: route executor health update through the state machine.
     # Unreachable if the W1 epoch-mismatch raised earlier (zombie completion).
     if sub.executor_id is not None:
-        from dlw.services.state_machine import transition_executor   # local: avoids cycle
+        from dlw.services.state_machine import transition_executor  # local: avoids cycle
         ex = await session.get(Executor, sub.executor_id)
         if ex is not None:
             await transition_executor(

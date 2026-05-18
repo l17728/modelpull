@@ -9,12 +9,12 @@ from dlw.config import get_settings
 from dlw.db.base import Base
 from tests.conftest import (
     executor_request_headers,
+    principal_headers,
     register_test_executor,
     signed_heartbeat_headers,
 )
 
-
-_TOKEN = "test-bearer-token-12345"
+SECRET = "unit-secret"
 _ENROLL = "test-enrollment-token-w3a-executors"
 
 
@@ -42,8 +42,9 @@ async def _bootstrap(engine):
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    """Bearer token for /tasks (UI) endpoints + trusted-proxy bypass for mTLS."""
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    """JWT secret for /tasks (UI) endpoints + trusted-proxy bypass for mTLS."""
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     get_settings.cache_clear()
     yield
@@ -53,7 +54,7 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def auth() -> dict[str, str]:
     """Bearer header for /tasks (UI) endpoints — executor endpoints use mTLS+JWT."""
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return principal_headers(secret=SECRET, role="tenant_admin")
 
 
 @pytest.fixture
@@ -160,9 +161,9 @@ async def test_unauthenticated_returns_401(client) -> None:
 @pytest.mark.slow
 async def test_register_rejects_bad_enrollment_token(client) -> None:
     """A wrong enrollment token on /register is rejected."""
+    from cryptography import x509
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography import x509
     from cryptography.x509.oid import NameOID
     key = ed25519.Ed25519PrivateKey.generate()
     csr = (x509.CertificateSigningRequestBuilder()

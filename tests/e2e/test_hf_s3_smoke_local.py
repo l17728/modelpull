@@ -19,7 +19,6 @@ import shutil
 import socket
 import subprocess
 import time
-import uuid
 from pathlib import Path
 
 import boto3
@@ -33,8 +32,9 @@ from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.downloader import HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
+from tests.conftest import make_app_with_state, principal_headers
 
-
+SECRET = "unit-secret"
 _TOKEN = "smoke-token"
 _BUCKET = "smoke-bucket"
 _REPO = "sentence-transformers/all-MiniLM-L6-v2"
@@ -117,7 +117,8 @@ async def _bootstrap_smoke(engine):
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "minioadmin")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
     get_settings.cache_clear()
@@ -126,16 +127,15 @@ def _set_token(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.manual
-async def test_real_hf_to_minio_succeeds(minio_proc) -> None:
+async def test_real_hf_to_minio_succeeds(minio_proc, ephemeral_ca) -> None:
     """Pull a real ~90MB public model from HF into local minio. ~30-90s."""
-    from dlw.main import create_app
-    app = create_app()
+    app = make_app_with_state(ephemeral_ca, enrollment_token="e")
     asgi_transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(
         transport=asgi_transport, base_url="http://test"
     ) as ctrl_client:
-        auth = {"Authorization": f"Bearer {_TOKEN}"}
+        auth = principal_headers(secret=SECRET, role="tenant_admin")
 
         r = await ctrl_client.post("/api/v1/tasks", json={
             "repo_id": _REPO, "revision": _REVISION, "storage_id": 1,

@@ -11,8 +11,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
-import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -28,10 +26,10 @@ from dlw.executor.client import ControllerClient
 from dlw.executor.config import ExecutorSettings
 from dlw.executor.downloader import HfS3StreamDownloader
 from dlw.executor.runner import ExecutorRunner
-from dlw.schemas.storage import StorageConfig
 from dlw.services.hf_metadata import RepoFile
+from tests.conftest import principal_headers
 
-
+SECRET = "unit-secret"
 _TOKEN = "e2e-w4-token"
 _BUCKET = "e2e-bucket"
 
@@ -73,7 +71,8 @@ _ENROLL = "e2e-w4-enrollment-token"
 
 @pytest.fixture(autouse=True)
 def _set_token(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DLW_BEARER_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", SECRET)
     monkeypatch.setenv("DLW_TLS_TRUSTED_PROXY", "1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -129,7 +128,7 @@ async def test_e2e_hf_to_s3_full_pipeline(
         async with httpx.AsyncClient(
             transport=asgi_transport, base_url="http://test"
         ) as ctrl_client:
-            auth = {"Authorization": f"Bearer {_TOKEN}"}
+            auth = principal_headers(secret=SECRET, role="tenant_admin")
 
             r = await ctrl_client.post("/api/v1/tasks", json={
                 "repo_id": "o/e2e-w4",

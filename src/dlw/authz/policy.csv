@@ -1,0 +1,11 @@
+p, role:system_admin, /api/v1/*, ^(GET|POST|DELETE|PUT)$, any
+p, role:tenant_admin, /api/v1/tasks*, ^(GET|POST|DELETE)$, tenant_match
+p, role:tenant_admin, /api/v1/quota*, ^GET$, tenant_match
+p, role:tenant_operator, /api/v1/tasks*, ^(GET|POST|DELETE)$, tenant_match
+p, role:tenant_operator, /api/v1/quota*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/tasks*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/quota*, ^GET$, tenant_match
+g, role:system_admin, role:system_admin
+g, role:tenant_admin, role:tenant_admin
+g, role:tenant_operator, role:tenant_operator
+g, role:tenant_viewer, role:tenant_viewer

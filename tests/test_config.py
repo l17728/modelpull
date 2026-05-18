@@ -71,3 +71,30 @@ def test_settings_leader_poll_interval_rejects_below_min() -> None:
 def test_settings_leader_poll_interval_rejects_above_max() -> None:
     with pytest.raises(ValidationError):
         Settings(leader_poll_interval_seconds=99.0)
+
+
+def test_sp1_auth_settings_defaults(monkeypatch):
+    from dlw.config import get_settings
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.auth_dev_mode is False
+    assert s.system_jwt_secret == "dev-system-jwt-change-me"
+    assert s.system_admin_token == ""
+    assert s.oidc_issuer == ""
+    assert s.oidc_redirect_url.endswith("/api/v1/auth/callback")
+    assert s.auth_tenant_rules_json == "[]"
+    assert not hasattr(s, "bearer_token")
+    get_settings.cache_clear()
+
+
+def test_sp1_auth_settings_env_override(monkeypatch):
+    from dlw.config import get_settings
+    monkeypatch.setenv("DLW_AUTH_DEV_MODE", "true")
+    monkeypatch.setenv("DLW_SYSTEM_JWT_SECRET", "s3cr3t")
+    monkeypatch.setenv("DLW_SYSTEM_ADMIN_TOKEN", "svc-tok")
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.auth_dev_mode is True
+    assert s.system_jwt_secret == "s3cr3t"
+    assert s.system_admin_token == "svc-tok"
+    get_settings.cache_clear()
