@@ -18,6 +18,7 @@ import time
 import httpx
 import pytest
 
+import dlw.db.models  # noqa: F401  -- register all tables on Base.metadata
 from dlw.auth.ca import bootstrap_ca, ensure_server_cert
 from dlw.auth.hmac_nonce import compute_hmac
 from dlw.db.base import Base
@@ -34,6 +35,9 @@ async def _bootstrap(engine):
     """Create tables at module start; drop all at end (mirrors other e2e modules
     so each e2e module gets a clean schema for its seed data)."""
     async with engine.begin() as conn:
+        # Clean slate: drop first so a Tenant(id=1) left by another module's
+        # bootstrap on the session-scoped DB can't collide with this seed.
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with engine.begin() as conn:
@@ -78,6 +82,9 @@ async def test_register_then_heartbeat_full_flow(tmp_path, engine, test_db_name)
         "DLW_CA_DIR": str(ca_dir),
         "DLW_ENROLLMENT_TOKEN": enrollment_token,
         "DLW_CONTROLLER_HOSTNAME": "localhost",
+        # SP1 fail-closed startup guard: this e2e only exercises executor
+        # mTLS/heartbeat (no user OIDC), so dev mode is the right bypass.
+        "DLW_AUTH_DEV_MODE": "true",
         "DLW_DB_HOST": os.environ.get("DLW_TEST_PG_HOST", "localhost"),
         "DLW_DB_PORT": os.environ.get("DLW_TEST_PG_PORT", "5433"),
         "DLW_DB_USER": os.environ.get("DLW_TEST_PG_USER", "postgres"),
