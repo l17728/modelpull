@@ -213,6 +213,8 @@ def create_app() -> FastAPI:
     app.include_router(hf_proxy_router)
     from dlw.api.quota import router as quota_router
     app.include_router(quota_router)
+    from dlw.api.source_proxy import router as source_proxy_router
+    app.include_router(source_proxy_router)
     return app
 
 
