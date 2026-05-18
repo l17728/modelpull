@@ -323,6 +323,8 @@ def make_app_with_state(
     app = create_app()
     from dlw.config import get_settings as _gs
     app.state.settings = _gs()
+    from dlw.authz.enforcer import build_enforcer
+    app.state.casbin = build_enforcer(grants=[])
     app.state.ca = ephemeral_ca["ca"]
     app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
     app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
