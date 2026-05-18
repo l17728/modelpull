@@ -32,11 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from dlw.auth.uvicorn_tls_patch import install_transport_scope_patch
     install_transport_scope_patch()
 
-    from pathlib import Path
-    from dlw.auth.ca import bootstrap_ca, ensure_server_cert
-    from dlw.auth.jwt_signing import bootstrap_keypair
-    from dlw.auth.hmac_nonce import NonceStore
     import secrets as _secrets
+    from pathlib import Path
+
+    from dlw.auth.ca import bootstrap_ca, ensure_server_cert
+    from dlw.auth.hmac_nonce import NonceStore
+    from dlw.auth.jwt_signing import bootstrap_keypair
     from dlw.config import get_settings as _gs
     _settings = _gs()
     _ca_dir = Path(_settings.ca_dir)
@@ -86,7 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             t.cancel()
             try:
                 await asyncio.wait_for(t, timeout=2)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
             sweep_task_holder["t"] = None
 
@@ -106,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _on_step_down()
         try:
             await asyncio.wait_for(leader_task, timeout=5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+        except (TimeoutError, asyncio.CancelledError):
             leader_task.cancel()
             try:
                 await leader_task
@@ -146,6 +147,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health_router)
+    from dlw.config import get_settings as _gs2
+    app.state.settings = _gs2()
+    from dlw.api.auth import router as auth_router
+    app.include_router(auth_router)
     from dlw.api.tasks import router as tasks_router
     app.include_router(tasks_router)
     from dlw.api.executors import router as executors_router
