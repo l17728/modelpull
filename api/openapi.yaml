@@ -55,6 +55,8 @@ tags:
     description: Audit log access
   - name: admin
     description: System administration
+  - name: auth
+    description: OIDC authentication and session management
   - name: webhooks
     description: Webhook configuration
   - name: ai
@@ -67,6 +69,101 @@ security:
   - bearerAuth: []
 
 paths:
+  # ========== Auth ==========
+  /auth/login:
+    get:
+      tags: [auth]
+      summary: Initiate OIDC login flow
+      operationId: authLogin
+      security: []
+      description: Redirects the browser to the IdP authorization endpoint.
+      responses:
+        '307':
+          description: Redirect to IdP (or dev-mode callback)
+          headers:
+            Location:
+              schema: {type: string, format: uri}
+              description: IdP authorization URL with state and nonce params
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      summary: OIDC authorization code callback
+      operationId: authCallback
+      security: []
+      description: |
+        Handles the IdP redirect. Validates state cookie, exchanges code for
+        tokens, resolves tenant via DLW_AUTH_TENANT_RULES_JSON, and returns a
+        signed system-JWT.
+      parameters:
+        - in: query
+          name: code
+          required: true
+          schema: {type: string}
+          description: Authorization code from IdP
+        - in: query
+          name: state
+          required: true
+          schema: {type: string}
+          description: CSRF state token (must match state cookie)
+      responses:
+        '200':
+          description: Login successful — system-JWT issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [system_jwt, expires_in, tenant_id, role]
+                properties:
+                  system_jwt: {type: string}
+                  expires_in: {type: integer, description: Seconds until JWT expires}
+                  tenant_id: {type: integer, format: int64}
+                  role: {type: string}
+        '400':
+          description: Invalid or missing state token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '401':
+          description: IdP token validation failed
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '403':
+          description: No tenant rule matched for this identity
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TenantUnresolved'}
+        '503':
+          description: IdP upstream error
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Return current identity and tenant context
+      operationId: authMe
+      description: Validates the bearer system-JWT and returns the caller's identity.
+      responses:
+        '200':
+          description: Caller identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, tenant_id, role, project_ids, is_service]
+                properties:
+                  user_id: {type: integer, format: int64}
+                  tenant_id: {type: integer, format: int64}
+                  role: {type: string}
+                  project_ids:
+                    type: array
+                    items: {type: integer, format: int64}
+                  is_service: {type: boolean}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+
   # ========== Tasks ==========
   /tasks:
     get:
@@ -90,6 +187,11 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/TaskListResponse'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: RBAC denied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
         '429': {$ref: '#/components/responses/RateLimited'}
 
     post:
@@ -151,8 +253,9 @@ paths:
                     code: INVALID_REVISION
                     message: revision must be a 40-char git sha; 'main' / branches not allowed
                     trace_id: c0ffee0123456789
+        '401': {$ref: '#/components/responses/Unauthenticated'}
         '403':
-          description: Gated model not approved
+          description: RBAC denied (RbacDenied) or gated model not approved
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorResponse'}
@@ -163,7 +266,7 @@ paths:
                 details:
                   approval_ticket_url: https://dlw.example.com/approvals/123
         '404':
-          description: Repo not found
+          description: Repo not found or cross-tenant task ID (existence not leaked)
         '409':
           description: Duplicate task or idempotency replay
           content:
@@ -176,7 +279,7 @@ paths:
                 details:
                   existing_task_id: 7e57a3f8-1234-4567-8901-abcdef012345
         '429':
-          description: Quota exceeded or rate limited
+          description: Quota exceeded (QuotaExceeded) or rate limited
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorResponse'}
@@ -203,6 +306,14 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DownloadTask'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: RBAC denied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
+        '404':
+          description: Task not found or cross-tenant ID (existence not leaked)
 
     patch:
       tags: [tasks]
@@ -248,6 +359,14 @@ paths:
                 properties:
                   status: {type: string, const: cancelling}
                   in_flight_subtasks: {type: integer}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: RBAC denied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
+        '404':
+          description: Task not found or cross-tenant ID (existence not leaked)
 
   /tasks/{taskId}/retry:
     parameters:
@@ -990,12 +1109,19 @@ paths:
       tags: [quota]
       summary: Current quota status
       operationId: getQuotaCurrent
+      description: Returns the caller's tenant quota counters. Requires bearer system-JWT.
       responses:
         '200':
           description: Quota
           content:
             application/json:
               schema: {$ref: '#/components/schemas/QuotaCurrent'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: Insufficient role (RBAC denied)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
 
   /quota/usage:
     get:
@@ -1325,7 +1451,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: User-side OIDC-issued JWT (UI / CLI / SDK)
+      description: OIDC-issued system-JWT (HS256) or system_admin service token
     mtlsAuth:
       type: mutualTLS
       description: |
@@ -2326,3 +2452,33 @@ components:
           type: integer
           nullable: true
           description: Executor's current epoch (fence). Must match subtask.executor_epoch.
+
+    # ===== SP1 Multi-tenancy error schemas =====
+    RbacDenied:
+      type: object
+      description: Returned when RBAC check denies the operation.
+      properties:
+        code:
+          type: string
+          example: RBAC_DENIED
+
+    QuotaExceeded:
+      type: object
+      description: Returned when a tenant quota limit is reached.
+      properties:
+        code:
+          type: string
+          example: QUOTA_EXCEEDED
+        metric:
+          type: string
+          example: concurrent_tasks
+
+    TenantUnresolved:
+      type: object
+      description: Returned when no tenant rule matches the authenticated identity.
+      properties:
+        code:
+          type: string
+          example: TENANT_UNRESOLVED
+        message:
+          type: string
