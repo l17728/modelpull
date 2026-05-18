@@ -56,6 +56,22 @@ class Settings(BaseSettings):
     )
     auth_tenant_rules_json: str = Field(default="[]")
 
+    # Phase 3 SP2 — multi-source
+    sources_yaml_path: str = Field(default="config/sources.yaml")
+    resolver_rules_path: str = Field(default="config/resolver-rules.yaml")
+    probe_size_mb: int = Field(default=32, ge=1, le=256)
+    probe_timeout_s: float = Field(default=8.0, ge=1.0, le=60.0)
+    probe_history_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    combo_overhead_per_source_pct: float = Field(default=2.0, ge=0.0, le=50.0)
+    chunk_level_min_file_mb: int = Field(default=100, ge=1)
+    speed_ewma_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
+    blacklist_5xx_count: int = Field(default=3, ge=1)
+    blacklist_minutes: int = Field(default=5, ge=1)
+    blacklist_max_minutes: int = Field(default=30, ge=1)
+    sha_mismatch_blacklist_hours: int = Field(default=24, ge=1)
+    rebalance_interval_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
+    degradation_trigger_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user
