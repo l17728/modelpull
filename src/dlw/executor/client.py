@@ -30,7 +30,6 @@ from tenacity import (
 from dlw.auth.hmac_nonce import compute_hmac
 from dlw.executor.auth_lifecycle import AuthState
 
-
 _retry = retry(
     retry=retry_if_exception_type(
         (httpx.HTTPStatusError, httpx.TimeoutException, httpx.NetworkError)
@@ -233,6 +232,31 @@ class ControllerClient:
             async with client.stream(
                 "GET",
                 f"/api/v1/hf-proxy/subtask/{subtask_id}",
+                headers=headers,
+            ) as resp:
+                yield resp
+
+    @asynccontextmanager
+    async def stream_source(
+        self,
+        *,
+        subtask_id: uuid.UUID,
+        assignment_token: uuid.UUID,
+        range_header: str | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """SP2: stream a file/chunk from its assigned source via the
+        controller's generalized reverse-proxy. Same contract as stream_hf
+        (caller inspects resp.status_code; no raise_for_status)."""
+        headers = {
+            **self._auth_headers(),
+            "X-Assignment-Token": str(assignment_token),
+        }
+        if range_header:
+            headers["Range"] = range_header
+        async with self._make_client() as client:
+            async with client.stream(
+                "GET",
+                f"/api/v1/source-proxy/subtask/{subtask_id}",
                 headers=headers,
             ) as resp:
                 yield resp

@@ -71,7 +71,7 @@ class DirectOffsetDownloader:
         """W3b: the proxy is GET-only, so probe size with a bytes=0-0 range
         request and read Content-Range (`bytes 0-0/<total>`). Fall back to
         Content-Length if HF answered a full 200 instead of a 206."""
-        async with self._controller.stream_hf(
+        async with self._controller.stream_source(
             subtask_id=a.subtask_id,
             assignment_token=a.assignment_token,
             range_header="bytes=0-0",
@@ -125,7 +125,7 @@ class DirectOffsetDownloader:
         self, a: Assignment, plan: ChunkPlan, dest_dir: Path,
     ) -> None:
         range_header = f"bytes={plan.offset}-{plan.offset + plan.length - 1}"
-        async with self._controller.stream_hf(
+        async with self._controller.stream_source(
             subtask_id=a.subtask_id,
             assignment_token=a.assignment_token,
             range_header=range_header,

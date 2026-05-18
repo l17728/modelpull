@@ -306,6 +306,21 @@ def make_fake_controller_client(hf_handler):
                 ) as resp:
                     yield resp
 
+        @_acm
+        async def stream_source(self, *, subtask_id, assignment_token,
+                                range_header=None):
+            headers = {"X-Assignment-Token": str(assignment_token)}
+            if range_header:
+                headers["Range"] = range_header
+            async with _httpx.AsyncClient(
+                transport=self._transport, base_url="http://fake-controller",
+            ) as client:
+                async with client.stream(
+                    "GET", f"/api/v1/source-proxy/subtask/{subtask_id}",
+                    headers=headers,
+                ) as resp:
+                    yield resp
+
     return _FakeControllerClient()
 
 
