@@ -78,8 +78,12 @@ async def source_proxy_subtask(
             SubtaskChunk.byte_end >= start))
         if chunk is not None:
             source_id = chunk.source_id
+    # Back-compat: a subtask that never went through SP2 source scheduling
+    # (legacy / single-source / ASGI-e2e paths) has source_id=None — default
+    # to the huggingface driver so /source-proxy is a strict superset of the
+    # old /hf-proxy behaviour (spec §1.1: single-source-HF still works).
     if source_id is None:
-        raise HTTPException(status_code=409, detail={"code": "SOURCE_UNASSIGNED"})
+        source_id = "huggingface"
 
     registry = request.app.state.source_registry
     drv = registry.get(source_id)

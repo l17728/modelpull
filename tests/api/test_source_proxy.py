@@ -73,6 +73,10 @@ async def app_client(ephemeral_ca, engine, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app),
                            base_url="http://test") as c:
         yield app, c, f
+    # Clean up so this fixture's seeded Tenant(id=1) etc. don't leak into a
+    # later module's non-clean-slate _bootstrap (session-scoped DB).
+    async with engine.begin() as c:
+        await c.run_sync(Base.metadata.drop_all)
 
 
 async def test_proxy_streams_from_assigned_source(app_client):

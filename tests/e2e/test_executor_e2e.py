@@ -175,16 +175,18 @@ async def test_e2e_hf_to_s3_full_pipeline(
             downloader = HfS3StreamDownloader(
                 settings=settings, client=executor_client,
             )
-            # W3b: the executor fetches HF bytes through the controller's
-            # reverse proxy. Install the HF MockTransport on the controller's
-            # HF client factory (not the downloader).
+            # SP2: the executor now fetches via the generalized /source-proxy
+            # (a subtask with no SP2-scheduled source_id defaults to the
+            # huggingface driver — same HF URL as the old /hf-proxy). Install
+            # the HF MockTransport on the source-proxy outbound client factory
+            # (and keep the legacy hf-proxy seam patched for any direct use).
             import dlw.api.hf_proxy as _hf_proxy_mod
-            monkeypatch.setattr(
-                _hf_proxy_mod, "_make_hf_client",
-                lambda timeout_seconds: httpx.AsyncClient(
-                    transport=hf_transport, follow_redirects=True,
-                ),
+            import dlw.api.source_proxy as _source_proxy_mod
+            _mk = lambda timeout_seconds: httpx.AsyncClient(  # noqa: E731
+                transport=hf_transport, follow_redirects=True,
             )
+            monkeypatch.setattr(_hf_proxy_mod, "_make_hf_client", _mk)
+            monkeypatch.setattr(_source_proxy_mod, "_make_source_client", _mk)
 
             runner = ExecutorRunner(
                 settings=settings, client=executor_client,
