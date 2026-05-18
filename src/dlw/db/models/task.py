@@ -20,7 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from dlw.db.base import Base
@@ -55,13 +55,18 @@ class DownloadTask(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Phase 3 SP2: multi-source columns
+    source_strategy: Mapped[str] = mapped_column(String(32), default="auto_balance", nullable=False)
+    source_blacklist: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    trust_non_hf_sha256: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # ORM relationship — Phase 1 Week 3 UI scaffold consumes via
     # selectinload(DownloadTask.subtasks) in api/tasks.get_task.
     # Cascade is intentionally narrow: the FK already has ondelete=CASCADE,
     # so DB-level cleanup handles deletion. Adding ORM-level "delete-orphan"
     # would risk scheduling orphan deletes if any code path triggers a lazy
     # load of an empty in-memory subtasks collection on a flushed parent.
-    subtasks: Mapped[list["FileSubTask"]] = relationship(
+    subtasks: Mapped[list[FileSubTask]] = relationship(
         "FileSubTask",
         back_populates="task",
         cascade="save-update, merge",
@@ -121,12 +126,16 @@ class FileSubTask(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Phase 3 SP2: multi-source columns
+    source_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_chunked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped["DownloadTask"] = relationship(
+    task: Mapped[DownloadTask] = relationship(
         "DownloadTask",
         back_populates="subtasks",
         lazy="select",
