@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.services.quota import record_usage
+from dlw.services.source_blacklist import blacklist_file
 
 
 async def claim_one_subtask(
@@ -199,6 +200,13 @@ async def complete_subtask(
     parent = await session.get(
         DownloadTask, sub.task_id, with_for_update=True
     )
+    if (final_status == "failed" and sub.source_id
+            and sub.source_id != "huggingface"
+            and sub.expected_sha256 is not None
+            and actual_sha256 != sub.expected_sha256):
+        await blacklist_file(
+            session, source_id=sub.source_id, repo_id=parent.repo_id,
+            filename=sub.filename, hours=24, reason="sha_mismatch")
     siblings = (await session.execute(
         select(FileSubTask).where(FileSubTask.task_id == sub.task_id)
     )).scalars().all()
