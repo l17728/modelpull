@@ -96,7 +96,7 @@ def test_sp2_source_settings_defaults():
     rebalance_interval_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
     degradation_trigger_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 ```
-Add `"pyyaml>=6,<7"` to `pyproject.toml` `[project] dependencies` (after `pydantic-settings`). Run `uv lock` then `uv sync --all-groups`.
+Add `"pyyaml>=6,<7"` to `pyproject.toml` `[project] dependencies` (after `pydantic-settings`). Run `uv lock` then `uv sync --all-groups`. NOTE: `pyyaml` is already transitively locked (via `huggingface_hub`/`uvicorn[standard]`), so `import yaml` works today and the `uv.lock` diff will be near-empty — this step promotes it to a *direct* dependency for correctness; a tiny/empty `uv.lock` diff is expected, not an error.
 
 - [ ] **Step 4: Run** `uv run pytest tests/test_config.py -v` → all PASS.
 
@@ -1039,12 +1039,22 @@ git commit -m "feat(sp2): SubtaskChunk/SourceSpeedSample/SourceBlacklist models 
 
 **Files:** Create `src/dlw/services/source_speed.py`; Test `tests/services/test_source_speed.py`
 
+Controller-side probe (per spec banner ruling 6d): the controller itself does one small ranged GET per source via the driver's `download_url`, times it, returns bytes/sec. Per-executor probe-through-proxy is deferred to v2.1.
+
 - [ ] **Step 1: Write the failing test** — `tests/services/test_source_speed.py`:
 ```python
-"""Speed EWMA fusion (Phase 3 SP2; doc §1.7/§1.8)."""
+"""Speed EWMA fusion + controller-side probe (Phase 3 SP2; doc §1.7/§1.8)."""
 from __future__ import annotations
 
-from dlw.services.source_speed import fuse_ewma, pick_probe_size_bytes
+import httpx
+import pytest
+
+from dlw.services.source_speed import (
+    fuse_ewma,
+    pick_probe_size_bytes,
+    probe_source_speed,
+)
+from dlw.sources.base import SourceFile
 
 
 def test_fuse_no_history_uses_live():
@@ -1052,20 +1062,52 @@ def test_fuse_no_history_uses_live():
 
 
 def test_fuse_blends():
-    # live 0.7, hist 0.3
     assert fuse_ewma(live=1000.0, hist=500.0, hist_weight=0.3) == 850.0
 
 
 def test_probe_size():
     assert pick_probe_size_bytes(probe_size_mb=32) == 32 * 1024 * 1024
+
+
+class _Drv:
+    def download_url(self, f):
+        return "https://src/x"
+
+    def auth_token(self, t):
+        from dlw.sources.base import SourceToken
+        return SourceToken(scheme="none")
+
+
+async def test_probe_returns_positive_speed():
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(206, content=b"x" * 4096))
+    bps = await probe_source_speed(
+        _Drv(), SourceFile("m", 4096, None, "ref"),
+        probe_bytes=4096, timeout_s=5.0, hf_token=None, transport=transport)
+    assert bps > 0.0
+
+
+async def test_probe_failure_returns_zero():
+    def boom(r):
+        raise httpx.ConnectError("down")
+    bps = await probe_source_speed(
+        _Drv(), SourceFile("m", 4096, None, "ref"),
+        probe_bytes=4096, timeout_s=5.0, hf_token=None,
+        transport=httpx.MockTransport(boom))
+    assert bps == 0.0
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/services/test_source_speed.py -v` → FAIL.
 
 - [ ] **Step 3: Implement** — `src/dlw/services/source_speed.py`:
 ```python
-"""Source speed probing + EWMA fusion (Phase 3 SP2)."""
+"""Source speed: controller-side probe + EWMA fusion (Phase 3 SP2)."""
 from __future__ import annotations
+
+import time
+from typing import Any
+
+import httpx
 
 
 def fuse_ewma(*, live: float, hist: float | None,
@@ -1077,10 +1119,37 @@ def fuse_ewma(*, live: float, hist: float | None,
 
 def pick_probe_size_bytes(*, probe_size_mb: int) -> int:
     return probe_size_mb * 1024 * 1024
-```
-(Live probing over the proxy is exercised end-to-end in M4/M5; this module holds the pure fusion math so the planner is unit-testable without HTTP.)
 
-- [ ] **Step 4: Run** `uv run pytest tests/services/test_source_speed.py -v` → 3 PASS.
+
+async def probe_source_speed(
+    driver: Any, file: Any, *, probe_bytes: int, timeout_s: float,
+    hf_token: str | None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> float:
+    """One ranged GET (controller→source) timing bytes/sec. 0.0 on any
+    failure (effect: that source is treated as unavailable for this task)."""
+    url = driver.download_url(file)
+    tok = driver.auth_token(hf_token)
+    headers = {"Range": f"bytes=0-{max(0, probe_bytes - 1)}"}
+    if tok.scheme == "bearer" and tok.value:
+        headers["Authorization"] = f"Bearer {tok.value}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s, transport=transport,
+                                     follow_redirects=True) as c:
+            start = time.monotonic()
+            recv = 0
+            async with c.stream("GET", url, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    return 0.0
+                async for buf in resp.aiter_bytes(64 * 1024):
+                    recv += len(buf)
+            elapsed = time.monotonic() - start
+        return recv / elapsed if elapsed > 0 and recv > 0 else 0.0
+    except Exception:
+        return 0.0
+```
+
+- [ ] **Step 4: Run** `uv run pytest tests/services/test_source_speed.py -v` → 5 PASS.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1328,12 +1397,8 @@ class _FakeDriver:
 
     async def resolve(self, repo_id, revision):
         return SourceManifest(self.id, repo_id, revision, self._files,
-                              has_lfs_sha256=self.sha if False else any(
+                              has_lfs_sha256=any(
                                   f.sha256 for f in self._files))
-
-    @property
-    def sha(self):
-        return any(f.sha256 for f in self._files)
 
 
 class _FakeReg:
@@ -1430,6 +1495,54 @@ async def test_hf_absent_pauses_when_not_trusted(factory):
         await s.commit()
         assert task.status == "paused_external"
         assert task.error_message == "no_sha256_authority"
+
+
+async def test_no_sha_file_pinned_to_huggingface(factory):
+    """INVARIANT 12 (spec ruling 6a): a file with expected_sha256=None must
+    stay on huggingface even when a faster non-HF source covers it."""
+    async with factory() as s:
+        task = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                            repo_id="o/r", revision="abc", storage_id=1,
+                            path_template="t", status="scheduling")
+        s.add(task)
+        await s.flush()
+        s.add(FileSubTask(task_id=task.id, tenant_id=1,
+                          filename="config.json", file_size=10,
+                          expected_sha256=None, status="pending"))
+        await s.commit()
+        reg = _FakeReg({"huggingface": _FakeDriver("huggingface", _files(),
+                                                   True),
+                        "modelscope": _FakeDriver("modelscope", _files(),
+                                                  False)})
+        await plan_task_sources(s, task, registry=reg, resolver=_IdResolver(),
+                                speeds={"huggingface": 1.0,
+                                        "modelscope": 9000.0},
+                                chunk_min_mb=100)
+        await s.commit()
+        sub = (await s.execute(select(FileSubTask).where(
+            FileSubTask.task_id == task.id))).scalar_one()
+        assert sub.source_id == "huggingface" and sub.is_chunked is False
+
+
+async def test_pin_modelscope_unreachable_pauses(factory):
+    async with factory() as s:
+        task = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                            repo_id="o/r", revision="abc", storage_id=1,
+                            path_template="t", status="scheduling",
+                            source_strategy="pin_modelscope")
+        s.add(task)
+        await s.flush()
+        s.add(FileSubTask(task_id=task.id, tenant_id=1, filename="m",
+                          file_size=10, expected_sha256="a" * 64,
+                          status="pending"))
+        await s.commit()
+        reg = _FakeReg({"huggingface": _FakeDriver("huggingface", _files(),
+                                                   True)})  # no modelscope
+        await plan_task_sources(s, task, registry=reg, resolver=_IdResolver(),
+                                speeds={"huggingface": 50.0}, chunk_min_mb=100)
+        await s.commit()
+        assert task.status == "paused_external"
+        assert task.error_message == "pinned_source_unavailable"
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/services/test_source_scheduler.py -v` → FAIL.
@@ -1452,14 +1565,38 @@ from dlw.services.source_combo import assign_files_lpt, solve_optimal_combo
 _CHUNK_BYTES = 64 * 1024 * 1024   # source-routing chunk granularity
 
 
+def _strategy_filter(enabled: list[str], strategy: str,
+                     blacklist: list[str]) -> tuple[list[str], str | None]:
+    """Apply task.source_strategy + task.source_blacklist (spec ruling 6e).
+    Returns (allowed_ids, pinned_or_None). pinned!=None means an explicit
+    single-source pin that must be honored (pause if unreachable)."""
+    allowed = [s for s in enabled if s not in blacklist]
+    if strategy == "auto_balance" or not strategy:
+        return allowed, None
+    if strategy == "fastest_only":
+        return allowed, None              # combo will pick the single fastest
+    if strategy.startswith("pin_"):
+        pin = strategy.removeprefix("pin_")
+        return ([pin] if pin in allowed else []), pin
+    if strategy.startswith("list:"):
+        wanted = [x.strip() for x in strategy.removeprefix("list:").split(",")]
+        return [s for s in allowed if s in wanted], None
+    return allowed, None
+
+
 async def plan_task_sources(
     session: AsyncSession, task: DownloadTask, *,
     registry: Any, resolver: Any, speeds: dict[str, float],
     chunk_min_mb: int, overhead_pct: float = 2.0,
 ) -> None:
-    # 1. resolve manifests across enabled sources
+    # 1. apply source_strategy / source_blacklist (spec ruling 6e)
+    allowed, pinned = _strategy_filter(
+        registry.enabled_ids(), task.source_strategy or "auto_balance",
+        list(task.source_blacklist or []))
+
+    # 2. resolve manifests across allowed sources
     manifests: dict[str, Any] = {}
-    for sid in registry.enabled_ids():
+    for sid in allowed:
         drv = registry.get(sid)
         src_repo = resolver.resolve(sid, task.repo_id)
         if src_repo is None:
@@ -1468,15 +1605,21 @@ async def plan_task_sources(
         if m is not None:
             manifests[sid] = (drv, m)
 
-    # 2. HF sha256 authority gate (INVARIANT 13)
+    if pinned is not None and pinned not in manifests:
+        task.status = "paused_external"
+        task.error_message = "pinned_source_unavailable"
+        return
+
+    # 3. HF sha256 authority gate (INVARIANT 13)
     hf_ok = "huggingface" in manifests
     if not hf_ok and not task.trust_non_hf_sha256:
         task.status = "paused_external"
         task.error_message = "no_sha256_authority"
         return
 
-    # 3. choose source combo over the candidates that actually cover the repo
-    candidates = {sid: speeds[sid] for sid in manifests if sid in speeds}
+    # 4. candidates = covering sources with positive speed (spec ruling 6c)
+    candidates = {sid: speeds[sid] for sid in manifests
+                  if sid in speeds and speeds[sid] > 0}
     if not candidates:
         task.status = "paused_external"
         task.error_message = "no_source_speed"
@@ -1487,10 +1630,22 @@ async def plan_task_sources(
     combo = solve_optimal_combo(candidates, sizes, overhead_pct=overhead_pct)
     combo_speeds = {s: candidates[s] for s in combo}
 
-    # 4. LPT file→source; chunk-split big files with >=2 covering sources
+    # 5. assign; INVARIANT 12 — files with no HF sha authority stay HF-only
     assign = assign_files_lpt(sizes, combo_speeds)
+    hf_files: set[str] = set()
+    if "huggingface" in manifests:
+        hf_files = {f.filename for f in manifests["huggingface"][1].files}
     chunk_min = chunk_min_mb * 1024 * 1024
     for sub in subs:
+        no_hf_authority = (sub.expected_sha256 is None
+                           or sub.filename not in hf_files)
+        if no_hf_authority and not task.trust_non_hf_sha256:
+            if "huggingface" not in manifests:
+                task.status = "paused_external"
+                task.error_message = "no_sha256_authority"
+                return
+            sub.source_id = "huggingface"      # single-source, no chunk-split
+            continue
         sid = assign[sub.filename]
         sub.source_id = sid
         covering = [s for s in combo
@@ -1526,7 +1681,7 @@ async def _split_chunks(
         idx += 1
 ```
 
-- [ ] **Step 4: Run** `uv run pytest tests/services/test_source_scheduler.py -v` → 2 PASS.
+- [ ] **Step 4: Run** `uv run pytest tests/services/test_source_scheduler.py -v` → 4 PASS.
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1785,7 +1940,7 @@ git commit -m "feat(sp2): generalized /source-proxy with per-source cred (INV 2)
 
 ### Task 13: Executor `stream_source`
 
-**Files:** Modify `src/dlw/executor/client.py`, `src/dlw/executor/chunk_downloader.py`; Test `tests/executor/test_stream_source.py`
+**Files:** Modify `src/dlw/executor/client.py`, `src/dlw/executor/chunk_downloader.py`, `src/dlw/executor/downloader.py`, `tests/conftest.py`; Test `tests/executor/test_stream_source.py`
 
 - [ ] **Step 1: Write the failing test** — `tests/executor/test_stream_source.py`:
 ```python
@@ -1855,14 +2010,18 @@ async def test_stream_source_hits_source_proxy(tmp_path):
             ) as resp:
                 yield resp
 ```
-In `src/dlw/executor/chunk_downloader.py`, replace the three `self._controller.stream_hf(` call sites (in `_resolve_size` and `_download_one_chunk`) with `self._controller.stream_source(`. (Signatures are identical; nothing else changes.)
+In `src/dlw/executor/chunk_downloader.py`, replace the **two** `self._controller.stream_hf(` call sites (verified: lines ~74 in `_resolve_size`, ~128 in `_download_one_chunk`) with `self._controller.stream_source(` (identical signature). In `src/dlw/executor/downloader.py`, replace its single `self._controller.stream_hf(` call site (~line 71, `HfS3StreamDownloader` — the non-chunked single-file path) with `self._controller.stream_source(` too, so EVERY executor download goes through `/source-proxy` and honors the planner's `sub.source_id` (an HF-assigned subtask is just routed to the `huggingface` driver — equivalent to the old `/hf-proxy`). Nothing else in those files changes.
 
-- [ ] **Step 4: Run** `uv run pytest tests/executor/test_stream_source.py tests/executor/test_chunk_downloader.py -v` → PASS (existing chunk-downloader tests still green — they inject a transport and don't care about the path; if any asserts the `/hf-proxy` path, update that assertion to `/source-proxy`).
+**Chunk alignment (spec ruling 6b):** for an `is_chunked` subtask the executor must download one Range per `subtask_chunks` row, not its local `plan_chunks` split. Add to `DirectOffsetDownloader`: when the assignment indicates a chunked subtask, fetch the chunk rows from the controller and use their `byte_start/byte_end` as the chunk plan (each Range then maps to exactly one source in `source_proxy`). MINIMAL implementation for SP2: the controller exposes the chunk boundaries in the poll/assignment payload (a `chunks: [[start,end],...]` list when `is_chunked`); `DirectOffsetDownloader.download` uses those offsets instead of `plan_chunks(...)` when present. (If wiring the assignment payload is non-trivial, the implementer reports DONE_WITH_CONCERNS and the controller decides; the spec ruling 6b is the contract — every executor Range must align to one `subtask_chunks` row.) The existing sequential offset-order SHA256 in `_pass2_upload` is unchanged and remains the whole-file hash the W4 gate verifies.
+
+In `tests/conftest.py`, the shared test double `make_fake_controller_client._FakeControllerClient` currently defines only `stream_hf`. Add a `stream_source` method to it that mirrors `stream_hf` exactly but targets `/api/v1/source-proxy/subtask/{subtask_id}` (same `@asynccontextmanager`/MockTransport body, same params). This keeps `tests/executor/test_chunk_downloader.py` + `tests/executor/test_downloader.py` green after the swap.
+
+- [ ] **Step 4: Run** `uv run pytest tests/executor/test_stream_source.py tests/executor/test_chunk_downloader.py tests/executor/test_downloader.py -v` → PASS (the conftest `stream_source` addition keeps the existing downloader tests green; if any test asserts the literal `/hf-proxy` path, update that assertion to `/source-proxy`).
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src/dlw/executor/client.py src/dlw/executor/chunk_downloader.py tests/executor/test_stream_source.py
-git commit -m "feat(sp2): executor stream_source -> /source-proxy"
+git add src/dlw/executor/client.py src/dlw/executor/chunk_downloader.py src/dlw/executor/downloader.py tests/conftest.py tests/executor/test_stream_source.py
+git commit -m "feat(sp2): executor stream_source -> /source-proxy (all paths) + conftest fake"
 ```
 
 ---
@@ -1928,7 +2087,7 @@ Add two leader-gated loops mirroring SP1's `_quota_loop`/`quota_task_holder` exa
                 async with factory() as session:
                     await run_scheduling_tick(
                         session, app.state.source_registry,
-                        app.state.name_resolver, get_settings())
+                        app.state.name_resolver, _gs())
                     await session.commit()
             except asyncio.CancelledError:
                 raise
@@ -1937,18 +2096,19 @@ Add two leader-gated loops mirroring SP1's `_quota_loop`/`quota_task_holder` exa
 
     async def _rebalance_loop() -> None:
         from dlw.services.source_scheduler import run_rebalance_tick
-        s = get_settings()
         while True:
             try:
-                await asyncio.sleep(s.rebalance_interval_seconds)
+                await asyncio.sleep(_gs().rebalance_interval_seconds)
                 async with factory() as session:
-                    await run_rebalance_tick(session, s)
+                    await run_rebalance_tick(session, _gs())
                     await session.commit()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("rebalance tick failed; retrying")
 ```
+(`_gs` is the lifespan-local alias for `get_settings` — `from dlw.config import get_settings as _gs` at `main.py:57`; do NOT call a bare `get_settings()` here, it is not in scope and would `NameError`.)
+
 In `_on_active` (next to the existing `quota_task_holder["t"] = ...`):
 ```python
         sched_task_holder["t"] = asyncio.create_task(_scheduling_loop())
@@ -1958,20 +2118,48 @@ In `_on_step_down`, after the existing quota-task cancel block, add the symmetri
 Add `run_scheduling_tick`/`run_rebalance_tick` to `src/dlw/services/source_scheduler.py`:
 ```python
 async def run_scheduling_tick(session, registry, resolver, settings) -> None:
-    """Pick `pending` tasks, plan their sources, move to claimable."""
+    """Pick `pending` tasks; controller-side probe each source; plan; move
+    to claimable. Probe = one small ranged GET controller→source (spec
+    ruling 6d); fused with latest SourceSpeedSample EWMA history."""
+    from dlw.db.models.source import SourceSpeedSample
+    from dlw.services.source_speed import (
+        fuse_ewma,
+        pick_probe_size_bytes,
+        probe_source_speed,
+    )
     pend = (await session.execute(select(DownloadTask).where(
         DownloadTask.status == "pending").limit(20))).scalars().all()
+    probe_bytes = pick_probe_size_bytes(probe_size_mb=settings.probe_size_mb)
     for task in pend:
         task.status = "scheduling"
-        # speeds: latest EWMA per source (empty → uniform 1.0 so single
-        # source still works; real probing is the v2.0 baseline knob)
-        from dlw.db.models.source import SourceSpeedSample
         speeds: dict[str, float] = {}
         for sid in registry.enabled_ids():
-            bps = await session.scalar(select(SourceSpeedSample.bytes_per_sec)
+            drv = registry.get(sid)
+            src_repo = resolver.resolve(sid, task.repo_id)
+            live = 0.0
+            if src_repo is not None:
+                try:
+                    m = await drv.resolve(src_repo, task.revision)
+                except Exception:
+                    m = None
+                if m is not None and m.files:
+                    probe_f = min(m.files, key=lambda f: f.size or 1 << 62)
+                    live = await probe_source_speed(
+                        drv, probe_f, probe_bytes=probe_bytes,
+                        timeout_s=settings.probe_timeout_s,
+                        hf_token=settings.hf_token)
+            hist = await session.scalar(
+                select(SourceSpeedSample.bytes_per_sec)
                 .where(SourceSpeedSample.source_id == sid)
                 .order_by(SourceSpeedSample.measured_at.desc()).limit(1))
-            speeds[sid] = float(bps) if bps else 1.0
+            fused = fuse_ewma(live=live, hist=float(hist) if hist else None,
+                              hist_weight=settings.probe_history_weight)
+            if live > 0:
+                session.add(SourceSpeedSample(
+                    executor_id="controller", source_id=sid,
+                    bytes_per_sec=live, sample_size=probe_bytes,
+                    is_active_probe=True))
+            speeds[sid] = fused if fused > 0 else 0.0
         await plan_task_sources(
             session, task, registry=registry, resolver=resolver,
             speeds=speeds, chunk_min_mb=settings.chunk_level_min_file_mb,
@@ -2100,18 +2288,17 @@ async def test_non_hf_sha_mismatch_blacklists(factory):
 
 - [ ] **Step 2: Run** `uv run pytest tests/services/test_sha_authority.py -v` → FAIL (no blacklist row written yet).
 
-- [ ] **Step 3: Implement** — in `src/dlw/services/scheduler.py` `complete_subtask`, the existing W4 sha256 gate already flips `final_status` to `"failed"` on mismatch (lines ~173-182). Immediately AFTER that gate block (before `sub.status = final_status`), add: when the gate fired AND `sub.source_id` is set AND `sub.source_id != "huggingface"`, write a blacklist row + re-pin the subtask to HF for retry. Add a module-top import `from dlw.services.source_blacklist import blacklist_file` (no circular import: source_blacklist imports only models). Insert:
+- [ ] **Step 3: Implement** — in `src/dlw/services/scheduler.py` `complete_subtask`: the existing W4 sha256 gate flips `final_status` to `"failed"` on mismatch (~lines 173-182), then `sub.status = final_status` (~185) and `parent = await session.get(DownloadTask, sub.task_id, with_for_update=True)` (~line 192-194). Insert the blacklist write **immediately AFTER that `parent = await session.get(...)` line** (so it reuses the already-locked `parent` — no duplicate fetch) and **before** the siblings query (~line 195). Add a module-top import `from dlw.services.source_blacklist import blacklist_file` (no circular import: `source_blacklist` imports only models; `scheduler` is not scanned for this). Insert exactly:
 ```python
     if (final_status == "failed" and sub.source_id
             and sub.source_id != "huggingface"
             and sub.expected_sha256 is not None
             and actual_sha256 != sub.expected_sha256):
-        parent = await session.get(DownloadTask, sub.task_id)
         await blacklist_file(
             session, source_id=sub.source_id, repo_id=parent.repo_id,
             filename=sub.filename, hours=24, reason="sha_mismatch")
 ```
-(This sits right after the W4 gate reassigns `final_status`; `sub.status = final_status` then persists `"failed"`. Re-queue/HF-repin of the file is handled by the next scheduling pass — keep this hook minimal: just the 24h blacklist row, exactly what `tests/e2e/test_multi_source.py::test_sha256_mismatch_blacklists_source` asserts.)
+(`parent` here is the locked row already fetched on the preceding line — do NOT add a second `session.get`. `sub.status` is already `"failed"`. Re-queue/HF-repin of the file is handled by the next scheduling pass — this hook is intentionally minimal: just the 24h blacklist row, exactly what `tests/e2e/test_multi_source.py::test_sha256_mismatch_blacklists_source` and Task 15's test assert. Note: the only new string literals added to the scanned `scheduler.py` are `"failed"`/`"huggingface"` inside an `if` condition — NOT a `status=`/`.status =` assignment — so `tools/lint_invariants.py` does not flag them; confirm with `python tools/lint_invariants.py`.)
 
 - [ ] **Step 4: Run** `uv run pytest tests/services/test_sha_authority.py -v` → PASS. Then `python tools/lint_invariants.py` → exit 0 (no new status literals added to scanned files; `"failed"`/`"huggingface"` are not status-kwarg literals flagged by the AST check — confirm).
 
