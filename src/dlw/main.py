@@ -16,6 +16,22 @@ logger = logging.getLogger(__name__)
 _SWEEP_INTERVAL_SECONDS = 30
 
 
+def check_auth_startup_config(settings) -> None:
+    """Fail closed: in non-dev mode, refuse insecure auth config."""
+    if settings.auth_dev_mode:
+        return
+    if settings.system_jwt_secret == "dev-system-jwt-change-me":
+        raise RuntimeError(
+            "insecure system_jwt_secret in non-dev mode; set DLW_SYSTEM_JWT_SECRET")
+    if not settings.oidc_issuer:
+        raise RuntimeError("oidc_issuer required in non-dev mode")
+    from dlw.auth.oidc import parse_tenant_rules
+    for r in parse_tenant_rules(settings.auth_tenant_rules_json):
+        if r.match == "email_domain" and r.value == "*":
+            raise RuntimeError(
+                "wildcard email_domain tenant rule forbidden in non-dev mode")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """W3c: leader-gated lifespan. The W3a auth substrate is bootstrapped
@@ -40,6 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from dlw.auth.jwt_signing import bootstrap_keypair
     from dlw.config import get_settings as _gs
     _settings = _gs()
+    check_auth_startup_config(_settings)
     _ca_dir = Path(_settings.ca_dir)
     _ca_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     _ca = bootstrap_ca(_ca_dir)
