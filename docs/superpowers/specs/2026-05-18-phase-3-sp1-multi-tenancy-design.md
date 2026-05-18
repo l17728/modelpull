@@ -8,6 +8,14 @@
 > **Invariant source:** `docs/v2.0/INVARIANTS.md` row 8 ("业务表必须有 `tenant_id`"; CI information_schema 扫描).
 > **Closes:** G1 (租户与身份模型), G2 (配额与计量) — the user-plane half. License/gated/audit-chain governance (G3 / SEC-09 chain-hash) stays Phase 4.
 
+> **⚠️ Pre-execution-review revisions (2026-05-18, authoritative — supersede contradicting text below):**
+> 1. **Tenant-scoped only.** Project-scoped RBAC (`project_member`/`project_owner`/`project_match`) is **deferred to a later sub-project**: the OIDC callback issues `project_ids=[]` for every SP1 user (no membership source yet) and FastAPI can't plumb a per-row `rproject` through a dependency. `require_perm` uses `enforcer.enforce(...) -> bool` (no `enforce_ex`, no scope post-check). Ignore `project_match` in §3.3/§3.5/§7/§8 below.
+> 2. **Terminal status is `"succeeded"`** everywhere (NOT `"completed"`; verified `scheduler.py`, `tools/lint_invariants.py`). The §3.7 non-terminal predicate is `status NOT IN ('succeeded','failed','cancelled')`.
+> 3. **No information_schema CI scan exists.** The Invariant-8 CI gate is the *source AST* lint `tools/lint_invariants.py` (job `invariant_lint`), not a DB table scan. `casbin_rule` needs no allowlist entry (nothing scans tables). There is also no ruff/mypy/`code-vs-yaml` CI job — OpenAPI CI = `spectral lint --fail-severity=error` + `swagger-cli validate`.
+> 4. **Snapshot-less tenant:** `check_quota_for_new_task` does `INSERT ... ON CONFLICT DO NOTHING` then `SELECT ... FOR UPDATE` so a lockable row always exists (no over-admission race).
+> 5. New ORM models register in `src/dlw/db/models/__init__.py` (not `base.py`); migration/seed must supply `Tenant.quota_*`/`is_active` explicitly (Python-side `default=`, no server_default).
+> The companion plan (`…/plans/2026-05-18-phase-3-sp1-multi-tenancy.md`) already embeds all of these; it is the execution source of truth.
+
 ---
 
 ## 1. Goal & Scope

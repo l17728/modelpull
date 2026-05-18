@@ -16,7 +16,18 @@
 - API tests use `httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")`.
 - `get_settings` is `lru_cache`d — tests env-monkeypatch then `get_settings.cache_clear()`.
 - Settings env prefix is `DLW_`.
-- `ruff` select `E,F,W,I,N,UP,B,C4,SIM,RUF` ignore `E501`; `mypy strict=true` — annotate everything.
+- New ORM models are registered in `src/dlw/db/models/__init__.py` (imports + `__all__`) — that module's import is what registers them with `Base.metadata`. **Never** add model imports to `src/dlw/db/base.py` (circular import; tables won't be created).
+- Terminal-success status across the codebase is **`"succeeded"`** (NOT `"completed"`). Task terminal set = `{"succeeded","failed","cancelled"}`; subtask success = `"succeeded"` (verified: `scheduler.py:156,200,212`; `tools/lint_invariants.py` `VALID_TASK_STATUS`/`VALID_SUBTASK_STATUS`).
+- New test dirs need an empty `__init__.py` (siblings `tests/api/ tests/services/ tests/e2e/` all have one; `tests/__init__.py` exists so `from tests.conftest import ...` works).
+
+**Accurate CI gate (verified against `.github/workflows/ci.yml` — there is NO ruff/mypy/`code-vs-yaml`/`information_schema` CI job):**
+- The aggregate `ci` job needs: `openapi, helm, shellcheck, markdown, yamllint, security, json, invariant_lint, pytest, frontend-lint, frontend-build`.
+- **openapi**: `spectral lint api/openapi.yaml --fail-severity=error` (ruleset `extends: spectral:oas` with `oas3-unused-component: warn`, `operation-tag-defined: warn` — unused components only WARN) + `swagger-cli validate api/openapi.yaml` ($ref check). There is no FastAPI-schema↔yaml diff.
+- **yamllint**: scans `deploy/ api/` with `.yamllint.yml` → **`api/openapi.yaml` edits must pass yamllint**.
+- **markdown**: markdownlint globs only `docs/v2.0/*.md README.md CONTRIBUTING.md` + lychee link check on `docs/v2.0/**/*.md`+README. The SP1 spec/plan and `docs/operator/*` are NOT CI-markdown-linted (don't worry about them for CI, but keep them clean).
+- **invariant_lint**: `python -m pytest tools/test_lint_invariants.py -v` + `python tools/lint_invariants.py` + `python tools/lint_no_direct_status_write.py`. `lint_invariants.py` AST-scans `src/dlw/api/tasks.py`, `services/task_service.py`, `services/scheduler.py` for any task `status` literal not in `VALID_TASK_STATUS` and any `status="..."` kwarg not in `VALID_SUBTASK_STATUS`. **Any code SP1 adds to those 3 files must only use valid status literals** (`"succeeded"` is valid; never introduce `"completed"`).
+- **pytest**: `uv sync --all-groups` (uv pinned `0.11.9`, PG16 service on :5432) then `uv run pytest tests/ --cov=src/dlw`. New runtime deps (`authlib`, `casbin`) MUST be added to `pyproject.toml [project] dependencies` AND `uv lock` re-run and `uv.lock` committed, or `uv sync --all-groups` fails in CI.
+- `ruff check`/`mypy` are LOCAL pre-commit quality gates only (not CI). Run them, but the PR is not gated on them. The casbin mypy-ignore override is optional/local.
 
 ---
 
@@ -211,7 +222,7 @@ async def test_service_token_yields_service_principal():
     assert p.user_id == 0
 ```
 
-Add `tests/auth/__init__.py` (empty) if the test package marker is required by the suite layout (mirror existing `tests/api/` — check whether it has `__init__.py`; create only if siblings have one).
+Also create empty `tests/auth/__init__.py` (siblings `tests/api/`, `tests/services/`, `tests/e2e/` all have one — this is required by the suite's package layout).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -834,7 +845,7 @@ git commit -m "feat(sp1): /auth login+callback+me (dev mode) + audit writer"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/db/test_p3sp1_migration.py`:
+Create empty `tests/db/__init__.py` (package marker, like sibling test dirs), then `tests/db/test_p3sp1_migration.py`:
 
 ```python
 """SP1 migration: 3 new tables + idempotent default-tenant/snapshot seed."""
@@ -939,8 +950,12 @@ class QuotaSnapshot(Base):
 Create `src/dlw/db/models/casbin_rule.py`:
 
 ```python
-"""casbin policy storage (Phase 3 SP1). Infra table — NOT a business table
-(exempt from Invariant-8 tenant_id scan, like alembic_version)."""
+"""casbin policy storage (Phase 3 SP1). Authz infrastructure table — not a
+business/data table, so it intentionally has no tenant_id (like
+alembic_version). NOTE: there is no CI information_schema tenant_id scan in
+this repo (the Invariant-8 CI gate is the source AST lint
+tools/lint_invariants.py, which does not inspect DB tables), so no allowlist
+entry is needed — this comment is documentation only."""
 from __future__ import annotations
 
 from sqlalchemy import BigInteger, String
@@ -962,7 +977,14 @@ class CasbinRule(Base):
     v5: Mapped[str | None] = mapped_column(String(256), nullable=True)
 ```
 
-Register both in `src/dlw/db/base.py`'s model imports (follow the existing pattern there — every model module is imported so `Base.metadata` sees it; add `from dlw.db.models import usage, casbin_rule  # noqa: F401` alongside the others).
+Register both models in `src/dlw/db/models/__init__.py` (verified: that module's docstring is "Importing this module also registers them with Base.metadata"; it has explicit imports + an `__all__`). Add:
+
+```python
+from dlw.db.models.casbin_rule import CasbinRule
+from dlw.db.models.usage import QuotaSnapshot, UsageRecord
+```
+
+and extend `__all__` with `"CasbinRule", "QuotaSnapshot", "UsageRecord"` (keep it sorted as the existing list is). Do NOT touch `src/dlw/db/base.py` (importing models there is a circular import and would not register the tables).
 
 Create `src/dlw/alembic/versions/__init__.py` if absent (so the seed helper is importable), then `src/dlw/alembic/versions/_p3sp1_seed.py`:
 
@@ -979,8 +1001,12 @@ from dlw.db.models.usage import QuotaSnapshot
 
 
 async def seed(session: AsyncSession) -> None:
+    # Tenant.quota_*/is_active use Python-side default= (NOT server_default),
+    # so a Core pg_insert MUST supply them explicitly or the NOT NULL fails.
     await session.execute(pg_insert(Tenant).values(
         id=1, slug="default", display_name="Default Tenant",
+        quota_bytes_month=0, quota_concurrent=10, quota_storage_gb=1024,
+        is_active=True,
     ).on_conflict_do_nothing(index_elements=["id"]))
     tenant_ids = (await session.execute(select(Tenant.id))).scalars().all()
     for tid in tenant_ids:
@@ -1030,9 +1056,13 @@ def upgrade() -> None:
     )
     op.create_index("idx_casbin_ptype", "casbin_rule", ["ptype"])
     conn = op.get_bind()
+    # quota_*/is_active are Python-side default= only (no server_default) —
+    # a raw INSERT MUST supply them or the NOT NULL constraint fails.
     conn.execute(sa.text(
-        "INSERT INTO tenants (id, slug, display_name) "
-        "VALUES (1, 'default', 'Default Tenant') ON CONFLICT (id) DO NOTHING"))
+        "INSERT INTO tenants (id, slug, display_name, quota_bytes_month, "
+        "quota_concurrent, quota_storage_gb, is_active) "
+        "VALUES (1, 'default', 'Default Tenant', 0, 10, 1024, true) "
+        "ON CONFLICT (id) DO NOTHING"))
     conn.execute(sa.text(
         "INSERT INTO quota_snapshots (tenant_id) "
         "SELECT id FROM tenants ON CONFLICT (tenant_id) DO NOTHING"))
@@ -1058,7 +1088,7 @@ Expected: PASS; alembic up/down/up clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/dlw/db/models/usage.py src/dlw/db/models/casbin_rule.py src/dlw/db/base.py src/dlw/alembic/versions/ tests/db/test_p3sp1_migration.py
+git add src/dlw/db/models/usage.py src/dlw/db/models/casbin_rule.py src/dlw/db/models/__init__.py src/dlw/alembic/versions/ tests/db/__init__.py tests/db/test_p3sp1_migration.py
 git commit -m "feat(sp1): UsageRecord/QuotaSnapshot/CasbinRule models + migration"
 ```
 
@@ -1176,8 +1206,10 @@ git commit -m "feat(sp1): fail-closed startup guard for insecure prod auth confi
 
 Create `tests/authz/test_enforcer.py`:
 
+Create empty `tests/authz/__init__.py`, then `tests/authz/test_enforcer.py`:
+
 ```python
-"""casbin enforcer matrix (Phase 3 SP1)."""
+"""casbin enforcer matrix — SP1 is tenant-scoped only (no project_match)."""
 from __future__ import annotations
 
 from dlw.authz.enforcer import build_enforcer
@@ -1188,8 +1220,8 @@ def _e():
 
 
 def _enforce(e, role, tenant, obj, act, rtenant):
-    # request: sub, tenant, obj, act, rtenant, rproject
-    return e.enforce(f"role:{role}", tenant, obj, act, rtenant, 0)
+    # request: sub, tenant, obj, act, rtenant
+    return e.enforce(f"role:{role}", tenant, obj, act, rtenant)
 
 
 def test_tenant_operator_can_post_tasks_same_tenant():
@@ -1202,7 +1234,7 @@ def test_tenant_viewer_cannot_post_tasks():
                     "/api/v1/tasks", "POST", 1) is False
 
 
-def test_tenant_viewer_can_get_tasks():
+def test_tenant_viewer_can_get_task_by_id():
     assert _enforce(_e(), "tenant_viewer", 1,
                     "/api/v1/tasks/abc", "GET", 1) is True
 
@@ -1217,27 +1249,34 @@ def test_system_admin_any():
                     "/api/v1/anything", "DELETE", 99) is True
 
 
-def test_enforce_ex_returns_matched_scope():
-    e = _e()
-    ok, expl = e.enforce_ex("role:project_member", 1,
-                            "/api/v1/tasks", "POST", 1, 0)
-    assert ok is True
-    # explanation rows carry the matched policy; scope is the last column
-    assert any(row and row[-1] == "project_match" for row in expl)
+def test_anchored_act_regex_rejects_superstring():
+    # regexMatch is unanchored (Go semantics); policy acts MUST be ^(...)$
+    # so a bogus method like "POSTX" does NOT match the POST rule.
+    assert _enforce(_e(), "tenant_operator", 1,
+                    "/api/v1/tasks", "POSTX", 1) is False
+
+
+def test_quota_get_allowed_tasks_path_not_confused():
+    # keyMatch (not keyMatch2): trailing * matches to end; /api/v1/quota*
+    # must NOT let a tasks-only viewer hit quota via path confusion.
+    assert _enforce(_e(), "tenant_viewer", 1,
+                    "/api/v1/quota/current", "GET", 1) is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/authz/test_enforcer.py -v`
-Expected: FAIL — `dlw.authz.enforcer` missing. Add `casbin>=1.36,<2.0` to `pyproject.toml` dependencies in this task; `uv sync`.
+Expected: FAIL — `dlw.authz.enforcer` missing. Add `casbin>=1.36,<2.0` to `pyproject.toml [project] dependencies`, run `uv lock` then `uv sync --all-groups`, and `git add pyproject.toml uv.lock` (CI runs `uv sync --all-groups` and fails on a stale lock).
 
 - [ ] **Step 3: Implement**
 
 Create `src/dlw/authz/model.conf`:
 
+SP1 is **tenant-scoped only**. Project-scoped RBAC (`project_member`/`project_owner`/`project_match`) is deferred: the OIDC callback issues `project_ids=[]` for every user in SP1 (no project membership source yet), and FastAPI cannot pass a per-row `rproject` through a dependency without loading the object — so project_match would be dead/broken. The matcher therefore covers only role→obj→act + tenant equality. (Spec §3.3/§1.3 updated to record this deferral.)
+
 ```ini
 [request_definition]
-r = sub, tenant, obj, act, rtenant, rproject
+r = sub, tenant, obj, act, rtenant
 
 [policy_definition]
 p = sub, obj, act, scope
@@ -1249,38 +1288,35 @@ g = _, _
 e = some(where (p.eft == allow))
 
 [matchers]
-m = g(r.sub, p.sub) && keyMatch2(r.obj, p.obj) && regexMatch(r.act, p.act) && (p.scope == "any" || r.tenant == r.rtenant)
+m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && regexMatch(r.act, p.act) && (p.scope == "any" || r.tenant == r.rtenant)
 ```
 
-Create `src/dlw/authz/policy.csv`:
+`keyMatch` (not `keyMatch2`): a trailing `*` matches to end-of-string (so `/api/v1/tasks*` matches `/api/v1/tasks` and `/api/v1/tasks/abc`; `/api/v1/*` matches anything under `/api/v1/`). `keyMatch2` is for `:param` segments and is the wrong matcher here.
+
+Create `src/dlw/authz/policy.csv` — act regexes are **anchored** (`^(...)$`) because casbin `regexMatch` uses unanchored Go `regexp` semantics (an unanchored `(GET)|(POST)` would also match `POSTX`):
 
 ```csv
-p, role:system_admin, /api/v1/*, (GET)|(POST)|(DELETE)|(PUT), any
-p, role:tenant_admin, /api/v1/tasks*, (GET)|(POST)|(DELETE), tenant_match
-p, role:tenant_admin, /api/v1/quota*, GET, tenant_match
-p, role:tenant_operator, /api/v1/tasks*, (GET)|(POST)|(DELETE), tenant_match
-p, role:tenant_operator, /api/v1/quota*, GET, tenant_match
-p, role:tenant_viewer, /api/v1/tasks*, GET, tenant_match
-p, role:tenant_viewer, /api/v1/quota*, GET, tenant_match
-p, role:project_member, /api/v1/tasks*, (GET)|(POST), project_match
-p, role:project_owner, /api/v1/tasks*, (GET)|(POST)|(DELETE), project_match
+p, role:system_admin, /api/v1/*, ^(GET|POST|DELETE|PUT)$, any
+p, role:tenant_admin, /api/v1/tasks*, ^(GET|POST|DELETE)$, tenant_match
+p, role:tenant_admin, /api/v1/quota*, ^GET$, tenant_match
+p, role:tenant_operator, /api/v1/tasks*, ^(GET|POST|DELETE)$, tenant_match
+p, role:tenant_operator, /api/v1/quota*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/tasks*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/quota*, ^GET$, tenant_match
 g, role:system_admin, role:system_admin
 g, role:tenant_admin, role:tenant_admin
 g, role:tenant_operator, role:tenant_operator
 g, role:tenant_viewer, role:tenant_viewer
-g, role:project_owner, role:project_owner
-g, role:project_member, role:project_member
 ```
 
 Create `src/dlw/authz/__init__.py` (empty). Create `src/dlw/authz/enforcer.py`:
 
 ```python
-"""casbin RBAC enforcer (Phase 3 SP1).
+"""casbin RBAC enforcer (Phase 3 SP1, tenant-scoped only).
 
-The matcher handles role->obj->act + tenant equality. The project-scope
-narrowing for project_member/project_owner is enforced by require_perm in
-Python (via enforce_ex's returned matched policy scope), keeping casbin
-free of request-side list membership."""
+The matcher handles role->obj->act + tenant equality. Project-scoped roles
+are deferred (see Task 7 note); require_perm uses enforcer.enforce() -> bool
+(no enforce_ex / no scope post-check in SP1)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -1298,17 +1334,17 @@ def _base_policy_csv() -> str:
 
 def build_enforcer(*, grants: list[tuple[str, str]]) -> casbin.Enforcer:
     """Build an enforcer from model.conf + policy.csv, plus per-subject
-    grants (loaded from the DB casbin_rule table at bootstrap)."""
+    grants (loaded from the DB casbin_rule table at bootstrap; SP1 has
+    none, but the wiring is the extension point for a later sub-project)."""
     lines = _base_policy_csv()
     for sub, role in grants:
         lines += f"\ng, {sub}, {role}"
     adapter = StringAdapter(lines)
-    e = casbin.Enforcer(_MODEL, adapter)
-    return e
+    return casbin.Enforcer(_MODEL, adapter)
 
 
 async def load_grants(session) -> list[tuple[str, str]]:
-    """Load `g` (user/project membership) rows from casbin_rule."""
+    """Load `g` (subject->role) rows from casbin_rule (empty in SP1)."""
     from sqlalchemy import select
 
     from dlw.db.models.casbin_rule import CasbinRule
@@ -1319,12 +1355,14 @@ async def load_grants(session) -> list[tuple[str, str]]:
     return [(r.v0, r.v1) for r in rows if r.v0 and r.v1]
 ```
 
-If `mypy strict` flags casbin as untyped, add `[[tool.mypy.overrides]] module = "casbin.*" \n ignore_missing_imports = true` to `pyproject.toml` (mirrors how other untyped deps are handled — check pyproject for an existing overrides block first).
+`load_grants` is unused by SP1 routes but is exercised by Task 10's `make_app_with_state` extension (`build_enforcer(grants=[])`); keep it for the extension point. (Optional local-only: if `mypy` flags casbin as untyped add a `[[tool.mypy.overrides]]` block for `module = "casbin.*"` with `ignore_missing_imports = true` — mypy is not a CI gate, so this is not required for the PR.)
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Install casbin + run the enforcer tests for real**
 
+casbin behavior (keyMatch/regexMatch/`enforce` arity) must be verified by running, not asserted blind.
+Run: `uv lock && uv sync --all-groups`
 Run: `pytest tests/authz/test_enforcer.py -v`
-Expected: PASS (6 cases).
+Expected: PASS (7 cases). If `keyMatch`/anchoring behaves unexpectedly against the installed casbin version, adjust `model.conf`/`policy.csv` until all 7 pass (do not weaken the cross-tenant or anchored-regex assertions).
 
 - [ ] **Step 5: Commit**
 
@@ -1346,8 +1384,10 @@ git commit -m "feat(sp1): casbin RBAC model + base policy + build_enforcer"
 
 Create `tests/authz/test_require_perm.py`:
 
+Create `tests/authz/test_require_perm.py`:
+
 ```python
-"""require_perm dependency: allow/deny + project_match post-check."""
+"""require_perm dependency: allow / deny (tenant-scoped only, SP1)."""
 from __future__ import annotations
 
 import types
@@ -1364,7 +1404,7 @@ class _FakeSession:
     async def commit(self): ...
 
 
-def _req(principal: Principal):
+def _req():
     from dlw.authz.enforcer import build_enforcer
     app = types.SimpleNamespace(state=types.SimpleNamespace(
         casbin=build_enforcer(grants=[])))
@@ -1375,7 +1415,7 @@ async def test_allows_operator_same_tenant():
     dep = require_perm("/api/v1/tasks*", "POST")
     p = Principal(user_id=1, tenant_id=1, role="tenant_operator",
                   project_ids=())
-    out = await dep(request=_req(p), principal=p, session=_FakeSession())
+    out = await dep(request=_req(), principal=p, session=_FakeSession())
     assert out is p
 
 
@@ -1384,27 +1424,16 @@ async def test_denies_viewer_post():
     p = Principal(user_id=1, tenant_id=1, role="tenant_viewer",
                   project_ids=())
     with pytest.raises(HTTPException) as e:
-        await dep(request=_req(p), principal=p, session=_FakeSession())
+        await dep(request=_req(), principal=p, session=_FakeSession())
     assert e.value.status_code == 403
     assert e.value.detail["code"] == "RBAC_DENIED"
 
 
-async def test_project_member_denied_outside_their_projects():
-    dep = require_perm("/api/v1/tasks*", "POST", rproject_from_principal=False)
-    p = Principal(user_id=1, tenant_id=1, role="project_member",
-                  project_ids=(5,))
-    with pytest.raises(HTTPException) as e:
-        await dep(request=_req(p), principal=p, session=_FakeSession(),
-                  rproject=9)
-    assert e.value.status_code == 403
-
-
-async def test_project_member_allowed_in_their_project():
-    dep = require_perm("/api/v1/tasks*", "POST", rproject_from_principal=False)
-    p = Principal(user_id=1, tenant_id=1, role="project_member",
-                  project_ids=(5,))
-    out = await dep(request=_req(p), principal=p, session=_FakeSession(),
-                    rproject=5)
+async def test_viewer_can_get():
+    dep = require_perm("/api/v1/tasks*", "GET")
+    p = Principal(user_id=1, tenant_id=1, role="tenant_viewer",
+                  project_ids=())
+    out = await dep(request=_req(), principal=p, session=_FakeSession())
     assert out is p
 
 
@@ -1412,7 +1441,7 @@ async def test_service_principal_short_circuits():
     dep = require_perm("/api/v1/tasks*", "DELETE")
     p = Principal(user_id=0, tenant_id=1, role="system_admin",
                   project_ids=(), is_service=True)
-    out = await dep(request=_req(p), principal=p, session=_FakeSession())
+    out = await dep(request=_req(), principal=p, session=_FakeSession())
     assert out is p
 ```
 
@@ -1426,7 +1455,7 @@ Expected: FAIL — `dlw.authz.deps` missing.
 Create `src/dlw/authz/deps.py`:
 
 ```python
-"""require_perm FastAPI dependency factory (Phase 3 SP1)."""
+"""require_perm FastAPI dependency factory (Phase 3 SP1, tenant-scoped)."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -1445,33 +1474,25 @@ async def _session() -> AsyncSession:  # pragma: no cover - trivial
         yield s
 
 
-def require_perm(
-    obj: str, act: str, *, rproject_from_principal: bool = True
-) -> Callable:
-    """Returns a dependency that enforces casbin on (principal, obj, act) and
-    applies the project_match post-check when the matched policy is project-
-    scoped. For collection/create routes rtenant/rproject default to the
-    principal's tenant/first project; object routes pass rproject explicitly."""
+def require_perm(obj: str, act: str) -> Callable:
+    """Dependency: casbin-enforce (role:<principal.role>, tenant, obj, act,
+    rtenant). SP1 is tenant-scoped: rtenant == principal.tenant_id for
+    collection/create routes, and object routes already re-assert ownership
+    via tenant_filtered (cross-tenant id -> 404). system_admin / service
+    principals short-circuit allow. Deny -> 403 RBAC_DENIED + audit."""
 
     async def _dep(
         request: Request,
         principal: Principal = Depends(require_principal),
         session: AsyncSession = Depends(_session),
-        rproject: int = 0,
     ) -> Principal:
         if principal.is_service or principal.role == "system_admin":
             return principal
         enforcer = request.app.state.casbin
-        rtenant = principal.tenant_id  # collection/create: same tenant
-        ok, expl = enforcer.enforce_ex(
-            f"role:{principal.role}", principal.tenant_id, obj, act,
-            rtenant, rproject)
-        scope = None
-        for row in expl:
-            if row:
-                scope = row[-1]
-                break
-        if not ok:
+        rtenant = principal.tenant_id
+        if not enforcer.enforce(
+            f"role:{principal.role}", principal.tenant_id, obj, act, rtenant
+        ):
             await write_audit(
                 session, action="permission_denied", resource_type="route",
                 resource_id=f"{act} {obj}", outcome="denied",
@@ -1479,18 +1500,6 @@ def require_perm(
                 actor_user_id=principal.user_id or None)
             await session.commit()
             raise HTTPException(403, detail={"code": "RBAC_DENIED"})
-        if scope == "project_match":
-            target = (principal.project_ids[0]
-                      if rproject_from_principal and principal.project_ids
-                      else rproject)
-            if target not in principal.project_ids:
-                await write_audit(
-                    session, action="permission_denied",
-                    resource_type="route", resource_id=f"{act} {obj}",
-                    outcome="denied", tenant_id=principal.tenant_id,
-                    actor_user_id=principal.user_id or None)
-                await session.commit()
-                raise HTTPException(403, detail={"code": "RBAC_DENIED"})
         return principal
 
     return _dep
@@ -1499,13 +1508,13 @@ def require_perm(
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/authz/test_require_perm.py -v`
-Expected: PASS (5 cases).
+Expected: PASS (4 cases).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/dlw/authz/deps.py tests/authz/test_require_perm.py
-git commit -m "feat(sp1): require_perm dependency + project_match post-check + deny audit"
+git commit -m "feat(sp1): require_perm dependency (tenant-scoped) + deny audit"
 ```
 
 ---
@@ -1683,6 +1692,7 @@ from dlw.db.models.task import DownloadTask
 from dlw.db.session import get_engine
 from dlw.db.tenant_scope import tenant_filtered
 from dlw.schemas.task import TaskCreate, TaskDetail, TaskList, TaskRead
+from dlw.services.audit import write_audit
 from dlw.services.hf_metadata import (
     HfNetworkError,
     HfPrivateOrAuthRequired,
@@ -1731,6 +1741,14 @@ async def post_task(
     try:
         await check_quota_for_new_task(session, principal.tenant_id)
     except QuotaExceeded as e:
+        # Spec §7 error-matrix + doc 04 §9.2: 429 must be audited.
+        await write_audit(
+            session, action="quota.exceeded", resource_type="tenant",
+            resource_id=str(principal.tenant_id), outcome="denied",
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id or None,
+            payload={"metric": e.metric})
+        await session.commit()
         raise HTTPException(
             status_code=429,
             detail={"code": "QUOTA_EXCEEDED", "metric": e.metric}) from e
@@ -1841,6 +1859,8 @@ git commit -m "feat(sp1): principal-scoped tasks API + tenant_filtered; drop bea
 
 Run: `grep -rn "DLW_BEARER_TOKEN\|require_bearer\|bearer_token\|Bearer {_TOKEN}\|test-bearer-token" tests/ src/`
 List every file. Each task-route test must switch from the bearer token to a system-JWT.
+
+**CRITICAL false-positive guard:** the grep WILL surface `ExecutorSettings(... bearer_token=...)` in `tests/e2e/test_executor_e2e.py` (and `src/dlw/executor/...`). That `bearer_token` belongs to the **executor-side `ExecutorSettings` class** (W2b1) — the executor authenticating its own controller calls — which is a *completely separate* class from `dlw.config.Settings.bearer_token`. **Do NOT remove or rename `ExecutorSettings.bearer_token` or its `DLW_*` env.** SP1 removes ONLY `dlw.config.Settings.bearer_token` and the user-plane `require_bearer`/`DLW_BEARER_TOKEN` usage on the four task routes. Also `docker-compose.dev.yml` and `docs/demo/*` set `DLW_BEARER_TOKEN` for the controller — those are out of test scope; the breaking-change migration (set `DLW_SYSTEM_ADMIN_TOKEN` instead) is documented in Task 14's operator note, not edited here.
 
 - [ ] **Step 2: Add conftest fixtures + extend `make_app_with_state`**
 
@@ -1987,6 +2007,26 @@ async def test_under_limit_passes(seeded):
         await check_quota_for_new_task(s, 1)  # no raise
 
 
+async def test_snapshotless_tenant_is_lockable(seeded):
+    """A tenant with NO pre-seeded quota_snapshots row must still be quota-
+    checkable: insert-then-lock creates the row so concurrent creates can't
+    race past the quota (spec §3.7 / pre-review fix I)."""
+    from sqlalchemy import select
+
+    from dlw.db.models.tenant import Tenant
+    from dlw.db.models.usage import QuotaSnapshot
+    async with seeded() as s:
+        s.add(Tenant(id=2, slug="t2", display_name="T2",
+                      quota_bytes_month=1000, quota_concurrent=2))
+        await s.commit()
+        await check_quota_for_new_task(s, 2)  # no raise, no missing-row error
+        await s.commit()
+        row = (await s.execute(
+            select(QuotaSnapshot).where(QuotaSnapshot.tenant_id == 2))
+        ).scalar_one()
+        assert row.bytes_used_month == 0
+
+
 async def test_concurrent_limit_blocks(seeded):
     from dlw.db.models.task import DownloadTask
     async with seeded() as s:
@@ -2061,13 +2101,16 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.task import DownloadTask
 from dlw.db.models.tenant import Tenant
 from dlw.db.models.usage import QuotaSnapshot, UsageRecord
 
-_TERMINAL = ("completed", "failed", "cancelled")
+# Terminal statuses (codebase uses "succeeded", NOT "completed" —
+# verified scheduler.py:156/200, tools/lint_invariants.py VALID_TASK_STATUS).
+_TERMINAL = ("succeeded", "failed", "cancelled")
 
 
 class QuotaExceeded(Exception):
@@ -2082,12 +2125,19 @@ async def check_quota_for_new_task(
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
         raise QuotaExceeded("tenant_missing")
+    # A tenant provisioned via /auth/callback after migrate-time has no
+    # snapshot row until the minute aggregator runs. Without a row,
+    # with_for_update() locks nothing and concurrent creates race past the
+    # quota. Insert-then-lock guarantees exactly one lockable row (spec §3.7).
+    await session.execute(
+        pg_insert(QuotaSnapshot).values(tenant_id=tenant_id)
+        .on_conflict_do_nothing(index_elements=["tenant_id"]))
     snap = (await session.execute(
         select(QuotaSnapshot)
         .where(QuotaSnapshot.tenant_id == tenant_id)
         .with_for_update()
-    )).scalar_one_or_none()
-    bytes_used = snap.bytes_used_month if snap else 0
+    )).scalar_one()
+    bytes_used = snap.bytes_used_month
     if tenant.quota_bytes_month and bytes_used >= tenant.quota_bytes_month:
         raise QuotaExceeded("bytes_month")
     live_concurrent = await session.scalar(
@@ -2135,7 +2185,7 @@ async def aggregate_snapshots(session: AsyncSession) -> None:
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/services/test_quota.py -v`
-Expected: PASS (5 cases).
+Expected: PASS (6 cases).
 
 - [ ] **Step 5: Commit**
 
@@ -2231,32 +2281,88 @@ async def test_quota_current_unauth_401(client):
 
 Create `tests/services/test_complete_subtask_usage.py`:
 
+This test is **self-contained** (mirrors the proven pattern in
+`tests/services/test_scheduler.py::test_complete_subtask_succeeds_when_expected_sha_is_null`:
+build a pending subtask, flip it to `assigned` with a token, call
+`complete_subtask(final_status="succeeded", ...)`). It spies
+`dlw.services.scheduler.record_usage` (the name the Step-3 hook imports into
+that module's namespace) and asserts it fired with `metric="bytes_month"`.
+
 ```python
 """complete_subtask emits a bytes_month usage record (Phase 3 SP1)."""
 from __future__ import annotations
 
+import uuid
+
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from dlw.db.base import Base
+from dlw.db.models.task import DownloadTask, FileSubTask
+from dlw.services.scheduler import complete_subtask
 
 pytestmark = pytest.mark.slow
 
 
-async def test_complete_subtask_records_usage(db_session, monkeypatch):
-    """Spec assertion: when a subtask completes, record_usage is called with
-    metric=bytes_month and the subtask's bytes_downloaded. Verified by
-    spying on dlw.services.quota.record_usage from the scheduler path."""
+@pytest.fixture
+async def seeded(engine):
+    from dlw.db.models.storage import StorageBackend
+    from dlw.db.models.tenant import Project, Tenant, User
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(Tenant(id=1, slug="t", display_name="T"))
+        await s.flush()
+        s.add_all([
+            Project(id=1, tenant_id=1, name="d"),
+            User(id=1, tenant_id=1, oidc_subject="u", email="u@t",
+                 role="tenant_operator"),
+            StorageBackend(id=1, tenant_id=1, name="s",
+                           backend_type="s3", config_encrypted=b""),
+        ])
+        await s.commit()
+    yield factory
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+async def test_complete_subtask_records_usage(seeded, monkeypatch):
     calls = []
 
     async def spy(session, **kw):
         calls.append(kw)
     monkeypatch.setattr("dlw.services.scheduler.record_usage", spy)
-    # The scheduler test-suite already has a helper to create+claim+complete a
-    # subtask; reuse it (see tests/services/test_scheduler*.py for the existing
-    # _create_task_and_claim helper) to drive one subtask to 'completed', then:
-    # assert any(c["metric"] == "bytes_month" for c in calls)
-    pytest.skip("wire to the existing scheduler completion helper during impl")
+
+    async with seeded() as s:
+        task = DownloadTask(
+            tenant_id=1, project_id=1, owner_user_id=1, repo_id="o/r",
+            revision="a" * 40, storage_id=1, path_template="t/{tenant}",
+            priority=1, status="pending")
+        s.add(task)
+        await s.flush()
+        token = uuid.uuid4()
+        sub = FileSubTask(task_id=task.id, tenant_id=1,
+                          filename="config.json", file_size=4096,
+                          expected_sha256=None, status="assigned",
+                          assignment_token=token)
+        s.add(sub)
+        await s.flush()
+        sub_id = sub.id
+
+        sub_done, _ = await complete_subtask(
+            s, sub_id, final_status="succeeded", actual_sha256=None,
+            bytes_downloaded=4096, error=None, assignment_token=token)
+        await s.commit()
+
+    assert sub_done.status == "succeeded"
+    assert any(c.get("metric") == "bytes_month" and c.get("value") == 4096
+               for c in calls), calls
 ```
 
-(The implementer replaces the `skip` with the project's existing scheduler completion helper — do NOT invent a new one; locate it in `tests/services/test_scheduler*.py` and call it.)
+(If `complete_subtask`'s signature differs from what's shown — verify against
+`src/dlw/services/scheduler.py` lines ~96-107 during impl — match it exactly;
+do NOT invent a shared helper.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2330,25 +2436,64 @@ In `src/dlw/main.py` lifespan, add a leader-gated minute aggregator alongside th
                 logger.exception("quota aggregator tick failed; retrying")
 ```
 
-In `_on_active` add `quota_task_holder["t"] = asyncio.create_task(_quota_loop())`; in `_on_step_down` cancel/await it the same way the sweep task is handled (mirror the existing 3-line cancel+wait_for block).
-
-In `src/dlw/services/scheduler.py`, in `complete_subtask` where a subtask transitions to `completed` (after the fence check, before/at the existing commit-less return), add:
+In `_on_active`, add (alongside the existing `sweep_task_holder["t"] = ...` line):
 
 ```python
-    from dlw.services.quota import record_usage
-    if final_status == "completed":
-        await record_usage(
-            session, tenant_id=sub.tenant_id,
-            project_id=None, user_id=None, task_id=sub.task_id,
-            metric="bytes_month", value=sub.bytes_downloaded or 0)
+        quota_task_holder["t"] = asyncio.create_task(_quota_loop())
 ```
 
-(Place it next to the existing subtask-status mutation; `record_usage` only `session.add`s — the existing caller commit covers it. Confirm the local variable names against the actual `complete_subtask` body when implementing — use `sub`/`final_status` as they exist there.)
+In `_on_step_down`, add the symmetric teardown right after the existing
+sweep-task cancel block (mirror it exactly — same `wait_for(timeout=2)`):
+
+```python
+        qt = quota_task_holder["t"]
+        if qt is not None:
+            qt.cancel()
+            try:
+                await asyncio.wait_for(qt, timeout=2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            quota_task_holder["t"] = None
+```
+
+(The lifespan `finally:` already calls `_on_step_down()` once before
+`elector.release()`, so both tasks are torn down on shutdown — no extra
+edit there. `_quota_loop`/`quota_task_holder` are defined in the same
+lifespan scope as `factory`/`sweep_task_holder`, so the closures resolve.)
+
+**Scheduler hook.** In `src/dlw/services/scheduler.py`, add a **module-top**
+import (NOT a function-local import — the Task-12 test does
+`monkeypatch.setattr("dlw.services.scheduler.record_usage", spy)`, which only
+works if the name lives in the module namespace; no circular import:
+`quota` imports only models, never `scheduler`):
+
+```python
+from dlw.services.quota import record_usage
+```
+
+Then in `complete_subtask`, immediately AFTER the block that sets
+`sub.status = final_status` / `sub.completed_at` / optional `sub.s3_key`
+(currently scheduler.py ~line 190) and BEFORE `parent = await session.get(DownloadTask, sub.task_id, with_for_update=True)`, insert:
+
+```python
+    if final_status == "succeeded":
+        await record_usage(
+            session, tenant_id=sub.tenant_id, project_id=None,
+            user_id=None, task_id=sub.task_id, metric="bytes_month",
+            value=sub.bytes_downloaded or 0)
+```
+
+Rationale for placement: the W4 sha256 gate (scheduler.py ~173-182) may have
+already reassigned `final_status` to `"failed"`; gating on the *resolved*
+`final_status == "succeeded"` here means a sha-mismatch failure correctly
+records NO usage. `record_usage` only `session.add`s — the existing
+caller-commit (POST /report → `await session.commit()`) covers it; do NOT
+add a commit inside `complete_subtask`.
 
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/api/test_quota_api.py tests/services/test_complete_subtask_usage.py tests/services/test_quota.py -v`
-Expected: PASS (quota API 2 cases; the completion-usage test wired to the real scheduler helper).
+Expected: PASS (quota API 2 cases; the self-contained completion-usage test asserts the `record_usage` spy fired with `metric="bytes_month"`, `value=4096`).
 Then: `pytest -q` — full suite green.
 
 - [ ] **Step 5: Commit**
@@ -2462,7 +2607,7 @@ async def test_tenant_b_cannot_see_tenant_a_task(client):
     assert all(i["repo_id"] != "o/a-secret" for i in lst.json()["items"])
 
 
-async def test_tenant_a_quota_exhaustion_does_not_block_b(client):
+async def test_tenant_a_quota_exhaustion_does_not_block_b(client, engine):
     # tenant A quota_concurrent=1 — first task ok, second 429
     r1 = await client.post("/api/v1/tasks", json={
         "repo_id": "o/a1", "revision": "1" * 40, "storage_id": 1,
@@ -2473,6 +2618,15 @@ async def test_tenant_a_quota_exhaustion_does_not_block_b(client):
     }, headers=_a())
     assert r2.status_code == 429
     assert r2.json()["detail"]["code"] == "QUOTA_EXCEEDED"
+    # spec §7 / doc 04 §9.2: the 429 must be audited as quota.exceeded
+    from sqlalchemy import select
+    from dlw.db.models.audit import AuditLog
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    async with f() as s:
+        rows = (await s.execute(
+            select(AuditLog).where(AuditLog.action == "quota.exceeded",
+                                   AuditLog.tenant_id == 1))).scalars().all()
+    assert len(rows) >= 1
     # tenant B (quota 50) unaffected
     rb = await client.post("/api/v1/tasks", json={
         "repo_id": "o/b1", "revision": "3" * 40, "storage_id": 2,
@@ -2510,20 +2664,41 @@ git commit -m "test(sp1): E2E-MT cross-tenant + quota isolation + service token"
 
 Add the 4 operations (`GET /api/v1/auth/login`, `/auth/callback`, `/auth/me`, `GET /api/v1/quota/current`). On the 4 task operations add response variants `401`, `403` (`RbacDenied`), `404`, and `429` (`QuotaExceeded`) on `POST /api/v1/tasks`; add components `RbacDenied {code}`, `QuotaExceeded {code, metric}`, `TenantUnresolved {code, message}`. Remove any `bearerAuth`-as-static-token note tied to the deleted `bearer_token`; describe the system-JWT bearer scheme. Match the existing yaml's style/indentation exactly.
 
-- [ ] **Step 2: Run the OpenAPI lint + code-vs-yaml CI checks locally**
+- [ ] **Step 2: Run the OpenAPI CI checks locally (exact CI commands)**
 
-Run the repo's OpenAPI lint/spectral + the code-vs-yaml assertion exactly as CI invokes them (see `.github/workflows/` for the command; do not guess — copy it). Expected: clean. Fix drift until green.
+There is NO code-vs-yaml diff in CI. The `openapi` job is exactly:
+
+```bash
+npm install -g @stoplight/spectral-cli@6 @apidevtools/swagger-cli
+cat > .spectral.yaml <<'EOF'
+extends: spectral:oas
+rules:
+  oas3-unused-component: warn
+  operation-tag-defined: warn
+EOF
+spectral lint api/openapi.yaml --fail-severity=error
+swagger-cli validate api/openapi.yaml
+```
+
+Run those. `--fail-severity=error` + the two rules downgraded to `warn` means unused components only warn (won't fail), but `swagger-cli validate` WILL fail on any unresolved `$ref`, so every new component must be referenced and well-formed. Also: `api/` is yamllinted (Step 4) — keep indentation/line-length consistent with the existing `api/openapi.yaml` and `.yamllint.yml`. Delete the temp `.spectral.yaml` afterward (do not commit it — it was an accidental artifact in a prior cycle). Fix until both commands are clean.
 
 - [ ] **Step 3: Write `docs/operator/multi-tenancy.md`**
 
 Cover: OIDC env vars (`DLW_OIDC_*`, `DLW_SYSTEM_JWT_SECRET`, `DLW_AUTH_TENANT_RULES_JSON` format with an example), the `DLW_SYSTEM_ADMIN_TOKEN` service-token (non-interactive CLI/test path), `DLW_AUTH_DEV_MODE` (CI/local only — never prod), the **breaking change**: `DLW_BEARER_TOKEN` removed (single-token deployments set `DLW_SYSTEM_ADMIN_TOKEN` instead; real users configure OIDC), the single-tenant default (legacy data = tenant 1, no data migration), and that the SP1 startup guard fails closed on insecure prod config. Cross-ref `docs/v2.0/04-security-and-tenancy.md §1/§7` and `INVARIANTS §8`.
 
-- [ ] **Step 4: Full suite + every CI check locally**
+- [ ] **Step 4: Full suite + the real CI gates locally**
 
-Run: `pytest -q`
-Run: `ruff check src tests && mypy src` (mypy strict)
-Run: the markdown-lint / yaml-lint / invariant-cross-ref-lint commands exactly as `.github/workflows/` defines them.
-Expected: all green. Confirm the Invariant-8 information_schema scan still passes — if it enumerates business tables by name and would flag `casbin_rule`, add `casbin_rule` to its exempt list (same category as `alembic_version`); `usage_records`/`quota_snapshots` carry `tenant_id` so they pass.
+Run the actual CI-gating commands (verified against `.github/workflows/ci.yml`):
+
+```bash
+uv lock && uv sync --all-groups
+uv run pytest tests/ --cov=src/dlw --cov-report=term-missing   # the `pytest` job
+python -m pytest tools/test_lint_invariants.py -v              # invariant_lint job
+python tools/lint_invariants.py                                #   "
+python tools/lint_no_direct_status_write.py                    #   "
+```
+
+Expected: all green. There is **no** information_schema/tenant_id table scan and **no** ruff/mypy CI job — `lint_invariants.py` is a *source AST* check; it scans `src/dlw/api/tasks.py`, `services/task_service.py`, `services/scheduler.py` for any task `status` literal not in `VALID_TASK_STATUS` and any `status="..."` kwarg not in `VALID_SUBTASK_STATUS`. SP1's only edits to those files (Task 9 `tasks.py`, Task 12 `scheduler.py`) use no status literals except the valid `"succeeded"` in the scheduler hook — confirm `python tools/lint_invariants.py` exits 0. (Optionally also run `ruff check src tests` + `mypy src` as LOCAL quality gates — they are not CI gates and do not block the PR; `uv.lock` MUST be committed so CI's `uv sync --all-groups` succeeds.) For markdown/yaml: CI markdownlint only covers `docs/v2.0/*.md README.md CONTRIBUTING.md` and yamllint covers `deploy/ api/` — so `api/openapi.yaml` must pass `yamllint -c .yamllint.yml api/`; the SP1 spec/plan/operator docs are not CI-linted.
 
 - [ ] **Step 5: Commit + push + PR**
 
@@ -2538,17 +2713,17 @@ Then open the PR:
 ```bash
 gh pr create --title "Phase 3 SP1 — Multi-tenancy (OIDC + RBAC + tenant scoping + quota)" --body "$(cat <<'EOF'
 ## Summary
-- OIDC login/callback + system-JWT principal; casbin RBAC (`require_perm`); mandatory `tenant_filtered` scoping (Invariant 8); per-tenant quota (strong-consistent create check + event-sourced usage + leader-gated minute snapshots).
+- OIDC login/callback + system-JWT principal; casbin RBAC (`require_perm`, tenant-scoped); mandatory `tenant_filtered` scoping (Invariant 8); per-tenant quota (strong-consistent create check + event-sourced usage + leader-gated minute snapshots).
 - Removes the single shared `bearer_token`; adds `system_admin` service token + `auth_dev_mode` for the IdP-free path.
 - One alembic migration (usage_records / quota_snapshots / casbin_rule); fail-closed startup guard.
-- Closes G1/G2 (user-plane). Phase 3 sub-project 1 of 4.
+- Project-scoped RBAC deferred (SP1 is tenant-scoped only). Closes G1/G2 (user-plane). Phase 3 sub-project 1 of 4.
 
 ## Test plan
-- [ ] `pytest -q` green (incl. `E2E-MT-*` `tests/e2e/test_tenant_isolation.py`)
-- [ ] ruff + mypy strict clean
-- [ ] OpenAPI lint + code-vs-yaml clean
-- [ ] Invariant-8 scan green (`casbin_rule` exempted)
-- [ ] alembic upgrade/downgrade/upgrade clean
+- [ ] `uv run pytest tests/ --cov=src/dlw` green (incl. `E2E-MT-*` `tests/e2e/test_tenant_isolation.py`)
+- [ ] `python -m pytest tools/test_lint_invariants.py` + `python tools/lint_invariants.py` + `python tools/lint_no_direct_status_write.py` green
+- [ ] `spectral lint api/openapi.yaml --fail-severity=error` + `swagger-cli validate api/openapi.yaml` clean; `yamllint -c .yamllint.yml api/` clean
+- [ ] `uv.lock` updated for `authlib`/`casbin` (CI `uv sync --all-groups`)
+- [ ] `alembic upgrade head && alembic downgrade -1 && alembic upgrade head` clean
 
 Spec: `docs/superpowers/specs/2026-05-18-phase-3-sp1-multi-tenancy-design.md`
 Plan: `docs/superpowers/plans/2026-05-18-phase-3-sp1-multi-tenancy.md`
@@ -2560,13 +2735,13 @@ EOF
 
 ---
 
-## Self-Review (completed during planning)
+## Self-Review (completed during planning + revised after 2-reviewer pre-execution review)
 
-**Spec coverage:** OIDC+system-JWT → T2/T3/T4; Principal/service-token → T2; casbin RBAC + tenant_match/project_match → T7/T8; tenant_id scoping (Inv 8) → T9 + `tenant_scope.py`; quota strong-check/usage/snapshots → T11/T12; `/quota/current` → T12; migration+seed → T5; startup guard → T6; audit on auth/deny/quota → T4 (`audit.py`) + T8; OpenAPI + operator doc → T14; `E2E-MT-*` → T13; existing-test migration → T10; `bearer_token` removal → T1/T9. No spec section is unmapped.
+**Pre-execution review applied (2026-05-18):** Two independent opus reviewers found 4–5 BLOCKER + 5 IMPORTANT plan-level defects, all verified against code and fixed inline before any implementation: (1) `"completed"`→`"succeeded"` real terminal status (T11 `_TERMINAL`, T12 scheduler hook); (2) model registration in `db/models/__init__.py` not `base.py` (T5); (3) the "information_schema tenant_id scan" does not exist — real Invariant-8 CI gate is the source AST `tools/lint_invariants.py` (T5/T14, removed casbin_rule-allowlist no-op); (4) T12 completion test made self-contained (no non-existent shared helper); (5) NOT-NULL quota/is_active values in migration+seed (T5); (6) project_match dropped — SP1 is tenant-scoped only (callback issues `project_ids=[]`; FastAPI can't plumb per-row `rproject`) → T7/T8 simplified to `enforce()` bool; (7) `quota.exceeded` audit added (T9); (8) casbin `keyMatch`+anchored `^(...)$` regex + a real install-and-run step (T7); (9) snapshot-less-tenant insert-then-lock race fix (T11); (10) `ExecutorSettings.bearer_token` false-positive guard (T10); (11) accurate CI command list — no ruff/mypy/code-vs-yaml CI jobs (Conventions + T14).
 
-**Placeholder scan:** No "TBD"/"add error handling" prose — every code step is complete. Two deliberately deferred-to-impl hooks are explicit and bounded, not placeholders: (a) T12's `complete_subtask` insertion point and T12's completion-usage test must bind to the *existing* scheduler completion helper (told not to invent one — the variable names already exist in that function); (b) T14 must copy the exact CI lint commands from `.github/workflows/` rather than guess. T9/T11/T4 call out the temporary stub ordering so each task is independently green.
+**Spec coverage:** OIDC+system-JWT → T2/T3/T4; Principal/service-token → T2; casbin RBAC (tenant-scoped) → T7/T8; tenant_id scoping (Inv 8) → T9 + `tenant_scope.py`; quota strong-check/usage/snapshots → T11/T12; `/quota/current` → T12; migration+seed → T5; startup guard → T6; audit on login/deny/quota.exceeded → T4 (`audit.py`) + T8 + T9; OpenAPI + operator doc → T14; `E2E-MT-*` → T13; existing-test migration → T10; `bearer_token` removal → T1/T9. Project-scoped RBAC + `storage_gb`/`throttle` quota are explicitly deferred (spec §1.3 non-goals; recorded in spec §3.3 update).
 
-**Type consistency:** `Principal(user_id,tenant_id,role,project_ids,is_service)` is identical across T2/T8/T9/T13. `issue_system_jwt` kwargs match T2↔conftest↔tests. `QuotaExceeded(metric)` consistent T9(stub)/T11/T12. `require_perm(obj, act, *, rproject_from_principal=True)` signature consistent T8↔T9↔T12. `build_enforcer(*, grants=[])`, `enforce_ex(...)→(ok, expl)` consistent T7↔T8. `tenant_filtered(stmt, model, principal)` consistent T9↔usage. `write_audit(...)` kwargs consistent T4↔T8.
+**Type consistency (re-verified post-fix):** `Principal(user_id,tenant_id,role,project_ids,is_service)` identical across T2/T8/T9/T13. `issue_system_jwt` kwargs match T2↔conftest↔tests. `QuotaExceeded(metric)` consistent T9(stub)/T11/T12. `require_perm(obj, act)` signature (no `rproject`) consistent T8↔T9↔quota T12. `build_enforcer(*, grants=...)` + `enforce(...)→bool` consistent T7↔T8↔conftest. `tenant_filtered(stmt, model, principal)` consistent T9↔helper. `write_audit(...)` kwargs consistent T4↔T8↔T9. `_TERMINAL=("succeeded","failed","cancelled")` consistent across `check_quota_for_new_task`/`aggregate_snapshots`; scheduler hook gates on resolved `final_status=="succeeded"`.
 
 ---
 
