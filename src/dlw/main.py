@@ -90,6 +90,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _grants = await load_grants(_cas_session)
     app.state.casbin = build_enforcer(grants=_grants)
 
+    from dlw.sources.name_resolver import NameResolver
+    from dlw.sources.registry import load_registry
+    app.state.source_registry = load_registry(
+        _settings.sources_yaml_path, hf_token=_settings.hf_token)
+    app.state.name_resolver = NameResolver.from_file(
+        _settings.resolver_rules_path)
+
     # W3c: controller state + leader loop.
     app.state.controller_state = "standby"
     shutdown = asyncio.Event()
@@ -98,6 +105,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     sweep_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     quota_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    sched_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    rebalance_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _quota_loop() -> None:
         from dlw.services.quota import aggregate_snapshots
@@ -112,6 +121,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception:
                 logger.exception("quota aggregator tick failed; retrying")
 
+    async def _scheduling_loop() -> None:
+        from dlw.services.source_scheduler import run_scheduling_tick
+        while True:
+            try:
+                await asyncio.sleep(5)
+                async with factory() as session:
+                    await run_scheduling_tick(
+                        session, app.state.source_registry,
+                        app.state.name_resolver, _gs())
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("scheduling tick failed; retrying")
+
+    async def _rebalance_loop() -> None:
+        from dlw.services.source_scheduler import run_rebalance_tick
+        while True:
+            try:
+                await asyncio.sleep(_gs().rebalance_interval_seconds)
+                async with factory() as session:
+                    await run_rebalance_tick(session, _gs())
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("rebalance tick failed; retrying")
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -124,6 +161,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _on_active() -> None:
         sweep_task_holder["t"] = asyncio.create_task(_sweep_loop_main(factory))
         quota_task_holder["t"] = asyncio.create_task(_quota_loop())
+        sched_task_holder["t"] = asyncio.create_task(_scheduling_loop())
+        rebalance_task_holder["t"] = asyncio.create_task(_rebalance_loop())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -142,6 +181,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             quota_task_holder["t"] = None
+        t = sched_task_holder["t"]
+        if t is not None:
+            t.cancel()
+            try:
+                await asyncio.wait_for(t, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            sched_task_holder["t"] = None
+        t = rebalance_task_holder["t"]
+        if t is not None:
+            t.cancel()
+            try:
+                await asyncio.wait_for(t, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            rebalance_task_holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,

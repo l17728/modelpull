@@ -357,6 +357,12 @@ def make_app_with_state(
     app.state.settings = _gs()
     from dlw.authz.enforcer import build_enforcer
     app.state.casbin = build_enforcer(grants=[])
+    from dlw.sources.name_resolver import NameResolver
+    from dlw.sources.registry import load_registry
+    _s2 = app.state.settings
+    app.state.source_registry = load_registry(
+        _s2.sources_yaml_path, hf_token=_s2.hf_token)
+    app.state.name_resolver = NameResolver.from_file(_s2.resolver_rules_path)
     app.state.ca = ephemeral_ca["ca"]
     app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
     app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)
