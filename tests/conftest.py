@@ -306,6 +306,21 @@ def make_fake_controller_client(hf_handler):
                 ) as resp:
                     yield resp
 
+        @_acm
+        async def stream_source(self, *, subtask_id, assignment_token,
+                                range_header=None):
+            headers = {"X-Assignment-Token": str(assignment_token)}
+            if range_header:
+                headers["Range"] = range_header
+            async with _httpx.AsyncClient(
+                transport=self._transport, base_url="http://fake-controller",
+            ) as client:
+                async with client.stream(
+                    "GET", f"/api/v1/source-proxy/subtask/{subtask_id}",
+                    headers=headers,
+                ) as resp:
+                    yield resp
+
     return _FakeControllerClient()
 
 
@@ -342,6 +357,12 @@ def make_app_with_state(
     app.state.settings = _gs()
     from dlw.authz.enforcer import build_enforcer
     app.state.casbin = build_enforcer(grants=[])
+    from dlw.sources.name_resolver import NameResolver
+    from dlw.sources.registry import load_registry
+    _s2 = app.state.settings
+    app.state.source_registry = load_registry(
+        _s2.sources_yaml_path, hf_token=_s2.hf_token)
+    app.state.name_resolver = NameResolver.from_file(_s2.resolver_rules_path)
     app.state.ca = ephemeral_ca["ca"]
     app.state.jwt_keypair = ephemeral_ca["jwt_keypair"]
     app.state.nonce_store = NonceStore(maxsize=1000, ttl_seconds=300)

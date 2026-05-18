@@ -19,8 +19,12 @@ from typing import Any
 from dlw.executor._io import (
     _HTTP_CHUNK_BYTES,
     _TRANSIENT_RETRY,
-    compose_key as _compose_key_io,
     make_s3_client,
+)
+from dlw.executor._io import (
+    compose_key as _compose_key_io,
+)
+from dlw.executor._io import (
     upload_part as _upload_part_io,
 )
 from dlw.executor.client import ControllerClient
@@ -68,7 +72,7 @@ class HfS3StreamDownloader:
         part_no = 1
 
         try:
-            async with self._controller.stream_hf(
+            async with self._controller.stream_source(
                 subtask_id=assignment.subtask_id,
                 assignment_token=assignment.assignment_token,
             ) as resp:

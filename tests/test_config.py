@@ -98,3 +98,18 @@ def test_sp1_auth_settings_env_override(monkeypatch):
     assert s.system_jwt_secret == "s3cr3t"
     assert s.system_admin_token == "svc-tok"
     get_settings.cache_clear()
+
+
+def test_sp2_source_settings_defaults():
+    from dlw.config import get_settings
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.sources_yaml_path == "config/sources.yaml"
+    assert s.resolver_rules_path == "config/resolver-rules.yaml"
+    assert s.probe_size_mb == 32
+    assert s.probe_timeout_s == 8.0
+    assert s.chunk_level_min_file_mb == 100
+    assert s.speed_ewma_alpha == 0.3
+    assert s.sha_mismatch_blacklist_hours == 24
+    assert s.rebalance_interval_seconds == 60.0
+    get_settings.cache_clear()

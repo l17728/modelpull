@@ -35,6 +35,7 @@ async def test_real_lifespan_sets_casbin_and_settings(
         # the enforcer must actually enforce (deny a viewer POST)
         assert app.state.casbin.enforce(
             "role:tenant_viewer", 1, "/api/v1/tasks", "POST", 1) is False
+        assert app.state.source_registry is not None
 
     get_settings.cache_clear()
     async with engine.begin() as conn:

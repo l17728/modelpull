@@ -16,6 +16,9 @@ class TaskCreate(BaseModel):
     storage_id: int = Field(gt=0)
     path_template: str = Field(default="{tenant}/{repo_id}/{revision}", max_length=512)
     priority: int = Field(default=1, ge=0, le=10)
+    source_strategy: str = Field(default="auto_balance", max_length=32)
+    source_blacklist: list[str] = Field(default_factory=list)
+    trust_non_hf_sha256: bool = Field(default=False)
 
 
 class TaskRead(BaseModel):
