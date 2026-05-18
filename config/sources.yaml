@@ -1,0 +1,22 @@
+sources:
+  - id: huggingface
+    enabled: true
+    driver: huggingface
+    config: {base_url: "https://huggingface.co", timeout_seconds: 30}
+    cost_per_gb_egress: 0.09
+  - id: hf_mirror
+    enabled: true
+    driver: hf_mirror
+    config: {base_url: "https://hf-mirror.com", timeout_seconds: 30}
+    cost_per_gb_egress: 0.0
+  - id: modelscope
+    enabled: true
+    driver: modelscope
+    config: {base_url: "https://www.modelscope.cn", timeout_seconds: 30}
+    cost_per_gb_egress: 0.0
+balancing:
+  speed_ewma_alpha: 0.3
+  chunk_level_min_file_mb: 100
+regional_defaults:
+  cn-north: ["hf_mirror", "modelscope", "huggingface"]
+  us-east: ["huggingface"]
