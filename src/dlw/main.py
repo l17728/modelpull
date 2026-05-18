@@ -78,6 +78,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.nonce_store = NonceStore(maxsize=10_000, ttl_seconds=300)
     app.state.enrollment_token = _enroll
 
+    # Phase 3 SP1: settings + casbin enforcer on app.state, UNCONDITIONAL
+    # (both active and standby answer authz on user-plane task/quota routes;
+    # require_principal/require_perm read these at request time). casbin
+    # grants come from the casbin_rule table — empty in SP1, the extension
+    # point for a later sub-project. ASGI tests seed these via
+    # make_app_with_state (which bypasses lifespan); this is the prod path.
+    app.state.settings = _settings
+    from dlw.authz.enforcer import build_enforcer, load_grants
+    async with factory() as _cas_session:
+        _grants = await load_grants(_cas_session)
+    app.state.casbin = build_enforcer(grants=_grants)
+
     # W3c: controller state + leader loop.
     app.state.controller_state = "standby"
     shutdown = asyncio.Event()

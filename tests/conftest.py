@@ -309,6 +309,23 @@ def make_fake_controller_client(hf_handler):
     return _FakeControllerClient()
 
 
+def principal_headers(*, user_id: int = 1, tenant_id: int = 1,
+                       role: str = "tenant_operator",
+                       project_ids: list[int] | None = None,
+                       secret: str = "unit-secret") -> dict[str, str]:
+    """Authorization header carrying a freshly minted system-JWT (Phase 3 SP1).
+    Caller must have set DLW_SYSTEM_JWT_SECRET=secret + cleared the cache."""
+    from dlw.auth.principal import issue_system_jwt
+    tok = issue_system_jwt(secret=secret, user_id=user_id,
+                           tenant_id=tenant_id, role=role,
+                           project_ids=project_ids or [])
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def service_headers(token: str = "svc-tok") -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def make_app_with_state(
     ephemeral_ca,
     *,
