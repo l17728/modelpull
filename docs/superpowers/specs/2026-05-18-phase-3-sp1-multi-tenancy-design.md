@@ -14,6 +14,7 @@
 > 3. **No information_schema CI scan exists.** The Invariant-8 CI gate is the *source AST* lint `tools/lint_invariants.py` (job `invariant_lint`), not a DB table scan. `casbin_rule` needs no allowlist entry (nothing scans tables). There is also no ruff/mypy/`code-vs-yaml` CI job — OpenAPI CI = `spectral lint --fail-severity=error` + `swagger-cli validate`.
 > 4. **Snapshot-less tenant:** `check_quota_for_new_task` does `INSERT ... ON CONFLICT DO NOTHING` then `SELECT ... FOR UPDATE` so a lockable row always exists (no over-admission race).
 > 5. New ORM models register in `src/dlw/db/models/__init__.py` (not `base.py`); migration/seed must supply `Tenant.quota_*`/`is_active` explicitly (Python-side `default=`, no server_default).
+> 6. **Tenant-rule gate on every login** (Task 4 impl refinement, supersedes §3.6 step 1): `/auth/callback` runs `resolve_tenant` on every login as an authorization *gate* — no matching rule ⇒ 403 `TENANT_UNRESOLVED` even for an existing user (rule removal ⇒ lockout; more secure). The resolved slug/role is applied only when **creating** a new user; an **existing** user keeps its stored `tenant_id`/`role` (re-sync `email` only) — §3.6's role-stability intent preserved.
 > The companion plan (`…/plans/2026-05-18-phase-3-sp1-multi-tenancy.md`) already embeds all of these; it is the execution source of truth.
 
 ---
