@@ -85,6 +85,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         db_url=_settings.db_url, lock_id=_settings.active_lock_id,
     )
     sweep_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    quota_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+
+    async def _quota_loop() -> None:
+        from dlw.services.quota import aggregate_snapshots
+        while True:
+            try:
+                await asyncio.sleep(60)
+                async with factory() as session:
+                    await aggregate_snapshots(session)
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("quota aggregator tick failed; retrying")
 
     def _set_state(s: str) -> None:
         app.state.controller_state = s
@@ -97,6 +111,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async def _on_active() -> None:
         sweep_task_holder["t"] = asyncio.create_task(_sweep_loop_main(factory))
+        quota_task_holder["t"] = asyncio.create_task(_quota_loop())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -107,6 +122,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             sweep_task_holder["t"] = None
+        qt = quota_task_holder["t"]
+        if qt is not None:
+            qt.cancel()
+            try:
+                await asyncio.wait_for(qt, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            quota_task_holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,
@@ -176,6 +199,8 @@ def create_app() -> FastAPI:
     app.include_router(subtasks_router)
     from dlw.api.hf_proxy import router as hf_proxy_router
     app.include_router(hf_proxy_router)
+    from dlw.api.quota import router as quota_router
+    app.include_router(quota_router)
     return app
 
 
