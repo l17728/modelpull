@@ -1,0 +1,12 @@
+identity_organizations:
+  - deepseek-ai
+  - Qwen
+  - 01-ai
+  - THUDM
+  - baichuan-inc
+  - mistralai
+aliases:
+  - hf_org: meta-llama
+    modelscope_org: LLM-Research
+    transform: "Meta-{name}"
+per_model_overrides: []
