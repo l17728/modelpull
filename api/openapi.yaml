@@ -960,6 +960,63 @@ paths:
         '503':
           description: Forwarded from HF — upstream unavailable.
 
+  /source-proxy/subtask/{subtaskId}:
+    get:
+      tags: [executors]
+      summary: Multi-source reverse proxy — stream a subtask's file from its assigned source
+      description: >-
+        Controller-side reverse proxy. Authenticates the executor (mTLS + JWT),
+        verifies subtask ownership (assignment_token + epoch fence), resolves the
+        planner-assigned source for this subtask (defaults to huggingface when
+        unassigned), injects the appropriate credential, and streams the bytes
+        back. The executor never holds source credentials directly (INVARIANT 2).
+      operationId: sourceProxySubtask
+      parameters:
+        - name: subtaskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: X-Assignment-Token
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Full file stream.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial content (Range request).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Missing or invalid mTLS / executor JWT.
+        '403':
+          description: NOT_YOUR_SUBTASK — authenticated executor does not own this subtask.
+        '404':
+          description: Subtask not found.
+        '409':
+          description: STALE_ASSIGNMENT or EPOCH_MISMATCH (fence-token mismatch).
+        '502':
+          description: SOURCE_UNAVAILABLE — source returned an unrecoverable error.
+        '503':
+          description: Source unreachable or all sources exhausted.
+
   /executors/{executorId}/subtasks/{subtaskId}/complete:
     parameters:
       - in: path
