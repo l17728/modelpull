@@ -4,7 +4,7 @@
 
 **Goal:** A `dlw.sdk` Python SDK (sync `Client` + async `AsyncClient`) and a `dlw` argparse CLI (`submit/list/show/cancel/delete/watch`) wrapping the already-implemented controller REST API.
 
-**Architecture:** Purely additive — new `src/dlw/sdk/` package + `src/dlw/cli/main.py` + one `[project.scripts]` entry. No controller endpoint/model/schema/migration/lint change. CLI is implemented on top of the SDK. Tests drive the real ASGI app in-process via `httpx.ASGITransport` with an injectable `transport=` kwarg.
+**Architecture:** Purely additive — new `src/dlw/sdk/` package + `src/dlw/cli/main.py` + one `[project.scripts]` entry. No controller endpoint/model/schema/migration/lint change. CLI is implemented on top of the SDK. Tests: the **async** `AsyncClient` runs against the real ASGI app via `httpx.ASGITransport` (proven `tests/api/test_tasks.py` pattern); the **sync** `Client` + CLI use `httpx.MockTransport` (httpx 0.27.2 `ASGITransport` is async-only). Both clients take an injectable `transport=` kwarg (test-only).
 
 **Tech Stack:** stdlib `argparse`, `httpx` (sync+async, already a dep), `pyyaml` (already a dep), `pydantic` (already a dep). **No new runtime or dev dependency.** Python 3.12.
 
@@ -24,7 +24,8 @@
 | `src/dlw/cli/main.py` | argparse parser, subcommand handlers, render, exit codes, `main()->int` |
 | `pyproject.toml` | add `dlw = "dlw.cli.main:main"` to `[project.scripts]` |
 | `tests/sdk/__init__.py`, `tests/cli/__init__.py` | package markers |
-| `tests/sdk/_fixtures.py` | shared bootstrap/token/hf/app fixtures (mirrors `tests/api/test_tasks.py`) |
+| `tests/sdk/_fixtures.py` | async-e2e fixtures (`__all__`-exported): seeded DB + system-JWT + async `aclient` over `ASGITransport` (mirrors `tests/api/test_tasks.py`) |
+| `tests/sdk/_mock.py` | `make_mock_transport()` — sync-compatible `httpx.MockTransport` with an in-memory task store, for the sync `Client` + CLI tests (httpx 0.27.2 `ASGITransport` is async-only) |
 | `tests/sdk/test_*.py`, `tests/cli/test_cli.py` | tests |
 | `docs/operator/cli-sdk.md` | operator/user guide |
 
@@ -533,12 +534,18 @@ git commit -m "feat(sp4): HTTP->typed-error mapping + DownloadTask model"
 
 - [ ] **Step 1: Write the failing test**
 
-`tests/sdk/_fixtures.py` (shared; mirrors `tests/api/test_tasks.py` exactly — module-scoped bootstrap with teardown drop_all, HF patched, real system-JWT):
+**Pre-review BLOCKER R1/R2 applied.** `httpx==0.27.2` `ASGITransport` is async-only — a sync `httpx.Client` cannot drive it. So: the **async** `AsyncClient` is e2e-tested against the real app via `ASGITransport` through an *async, function-scoped* `aclient` fixture (mirrors `tests/api/test_tasks.py` exactly — proven in the full suite). The **sync `Client` and the CLI** are tested with `httpx.MockTransport` (sync-compatible httpx built-in) backed by a tiny in-memory store in `tests/sdk/_mock.py` returning real FastAPI-shaped responses. `_fixtures.py` declares an explicit `__all__` (incl. the `_`-prefixed autouse fixtures) — without it `from … import *` silently drops them.
+
+`tests/sdk/_fixtures.py` (shared; the async-e2e half mirrors `tests/api/test_tasks.py`):
 ```python
-"""Shared SP4 SDK/CLI fixtures: real ASGI app + seeded DB + system-JWT."""
+"""Shared SP4 fixtures: seeded test DB + real system-JWT + async SDK client.
+
+R2: explicit __all__ — `from tests.sdk._fixtures import *` would otherwise
+drop the underscore-prefixed autouse fixtures and nothing would be seeded."""
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -546,6 +553,9 @@ from dlw.config import get_settings
 from dlw.db.base import Base
 
 SECRET = "unit-secret"
+
+__all__ = ["SECRET", "_bootstrap", "_set_token", "_patch_hf",
+           "token", "app", "aclient"]
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -605,45 +615,132 @@ def app(ephemeral_ca):
     return make_app_with_state(ephemeral_ca, enrollment_token="e")
 
 
-@pytest.fixture
-def transport(app):
-    return ASGITransport(app=app)
+@pytest_asyncio.fixture
+async def aclient(app, token):
+    """Async SDK client over the real ASGI app — same pattern/loop as
+    tests/api/test_tasks.py's `client` fixture (proven in full suite)."""
+    from dlw.sdk.aclient import AsyncClient
+    async with AsyncClient(server="http://test", token=token,
+                           transport=ASGITransport(app=app)) as c:
+        yield c
+```
+
+`tests/sdk/_mock.py` — a sync-compatible `httpx.MockTransport` with a tiny in-memory task store mirroring the real API surface (so the sync `Client`/CLI tests are deterministic without a live server; the real-contract risk is owned by the async e2e):
+```python
+"""Stateful httpx.MockTransport mirroring the real /api/v1/tasks surface.
+
+Used only by the sync Client + CLI tests (httpx 0.27.2 ASGITransport is
+async-only). Realistic FastAPI-shaped bodies/status; the async e2e
+(test_client_async.py) validates these shapes against the real app."""
+from __future__ import annotations
+
+import json
+import re
+import uuid
+
+import httpx
+
+_VALID = "Bearer good"
+TERMINAL = {"succeeded", "failed", "cancelled"}
+
+
+def make_mock_transport() -> httpx.MockTransport:
+    store: dict[str, dict] = {}
+
+    def _task(repo, rev, status="pending"):
+        return {"id": str(uuid.uuid4()), "repo_id": repo, "revision": rev,
+                "status": status, "priority": 1,
+                "created_at": "2026-05-19T00:00:00Z",
+                "completed_at": None, "error_message": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        if auth != _VALID:
+            return httpx.Response(401, json={"detail": "unauthenticated"})
+        path = request.url.path
+        m = re.fullmatch(r"/api/v1/tasks/([^/]+)", path)
+        mc = re.fullmatch(r"/api/v1/tasks/([^/]+)/cancel", path)
+        if request.method == "POST" and path == "/api/v1/tasks":
+            body = json.loads(request.content or b"{}")
+            t = _task(body["repo_id"], body["revision"])
+            store[t["id"]] = {**t, "subtasks": []}
+            return httpx.Response(201, json=t)          # TaskRead (no subtasks)
+        if request.method == "GET" and path == "/api/v1/tasks":
+            return httpx.Response(200, json={
+                "items": [{k: v for k, v in t.items() if k != "subtasks"}
+                          for t in store.values()],
+                "total": len(store)})
+        if mc and request.method == "POST":
+            t = store.get(mc.group(1))
+            if t is None:
+                return httpx.Response(404, json={"detail": "task not found"})
+            t["status"] = "cancelling"
+            return httpx.Response(202, json={
+                k: v for k, v in t.items() if k != "subtasks"})
+        if m and request.method == "GET":
+            t = store.get(m.group(1))
+            if t is None:
+                return httpx.Response(404, json={"detail": "task not found"})
+            return httpx.Response(200, json={**t, "subtasks": [
+                {"status": "pending"}, {"status": "pending"}]})  # TaskDetail
+        if m and request.method == "DELETE":
+            t = store.get(m.group(1))
+            if t is None:
+                return httpx.Response(404, json={"detail": "task not found"})
+            if t["status"] not in TERMINAL:
+                return httpx.Response(409, json={"detail": {
+                    "code": "TASK_NOT_TERMINAL", "status": t["status"]}})
+            del store[m.group(1)]
+            return httpx.Response(204)
+        return httpx.Response(404, json={"detail": "not found"})
+
+    return httpx.MockTransport(handler)
+
+
+GOOD_TOKEN = "good"   # the SDK sends "Bearer good"; _mock accepts only that
 ```
 
 `tests/sdk/test_client_sync.py`:
 ```python
-"""sync Client.tasks.submit/get over the real ASGI app (SP4)."""
+"""sync Client.tasks.submit/get via httpx.MockTransport (SP4; R1)."""
 from __future__ import annotations
 
 import pytest
 
+from dlw.sdk import errors as e
 from dlw.sdk.client import Client
-from tests.sdk._fixtures import *  # noqa: F401,F403  (fixtures)
-
-pytestmark = pytest.mark.slow
+from tests.sdk._mock import GOOD_TOKEN, make_mock_transport
 
 
-def test_submit_then_get(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def _client():
+    return Client(server="http://mock", token=GOOD_TOKEN,
+                  transport=make_mock_transport())
+
+
+def test_submit_then_get():
+    with _client() as c:
         t = c.tasks.submit(repo_id="o/r", revision="0" * 40, storage_id=1)
-        assert t.status == "pending"
-        assert t.repo_id == "o/r" and t.id
+        assert t.status == "pending" and t.repo_id == "o/r" and t.id
         got = c.tasks.get(t.id)
         assert got.id == t.id
-        # detail carries subtasks (2 from patched HF)
-        assert len(got.subtasks) == 2
+        assert len(got.subtasks) == 2          # TaskDetail shape
         assert got.refresh().id == t.id
 
 
-def test_submit_requires_storage(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def test_submit_requires_storage():
+    with _client() as c:
         with pytest.raises(TypeError):
             c.tasks.submit(repo_id="o/r", revision="0" * 40)  # no storage_id
+
+
+def test_bad_token_is_auth_error():
+    with Client(server="http://mock", token="wrong",
+                transport=make_mock_transport()) as c:
+        with pytest.raises(e.AuthError):
+            c.tasks.list()
 ```
 
-- [ ] **Step 2: Run** `uv run pytest tests/sdk/test_client_sync.py -v` → FAIL (no `client` module).
+- [ ] **Step 2: Run** `uv run pytest tests/sdk/test_client_sync.py -v` → FAIL (no `client` module). (`test_client_sync.py` imports `tests.sdk._mock` only — no DB fixtures, deterministic.)
 
 - [ ] **Step 3: Implement** — `src/dlw/sdk/client.py`:
 ```python
@@ -734,12 +831,12 @@ class Client:
         self.close()
 ```
 
-- [ ] **Step 4: Run** `uv run pytest tests/sdk/test_client_sync.py -v` → 2 PASS.
+- [ ] **Step 4: Run** `uv run pytest tests/sdk/test_client_sync.py -v` → 3 PASS.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src/dlw/sdk/client.py tests/sdk/_fixtures.py tests/sdk/test_client_sync.py
-git commit -m "feat(sp4): sync Client + TasksAPI.submit/get + shared ASGI fixtures"
+git add src/dlw/sdk/client.py tests/sdk/_fixtures.py tests/sdk/_mock.py tests/sdk/test_client_sync.py
+git commit -m "feat(sp4): sync Client + TasksAPI.submit/get + shared fixtures + mock transport"
 ```
 
 ---
@@ -751,7 +848,7 @@ git commit -m "feat(sp4): sync Client + TasksAPI.submit/get + shared ASGI fixtur
 
 (`TasksAPI.list/cancel/delete` were implemented in Task 4's `client.py` — this task is the behavioral acceptance + error-mapping coverage.)
 
-- [ ] **Step 1: Write the failing test** — `tests/sdk/test_client_sync_ops.py`:
+- [ ] **Step 1: Write the failing test** — `tests/sdk/test_client_sync_ops.py` (MockTransport, deterministic; R1/R3):
 ```python
 """list (client-side filter) + cancel + delete + error mapping (SP4)."""
 from __future__ import annotations
@@ -760,55 +857,51 @@ import pytest
 
 from dlw.sdk import errors as e
 from dlw.sdk.client import Client
-from tests.sdk._fixtures import *  # noqa: F401,F403
-
-pytestmark = pytest.mark.slow
+from tests.sdk._mock import GOOD_TOKEN, make_mock_transport
 
 
-def test_list_and_status_filter(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def _client(token=GOOD_TOKEN):
+    return Client(server="http://mock", token=token,
+                  transport=make_mock_transport())
+
+
+def test_list_and_status_filter():
+    with _client() as c:
         a = c.tasks.submit(repo_id="o/a", revision="0" * 40, storage_id=1)
         c.tasks.submit(repo_id="o/b", revision="1" * 40, storage_id=1)
         allt = c.tasks.list()
         assert {t.repo_id for t in allt} >= {"o/a", "o/b"}
-        pend = c.tasks.list(status="pending")
-        assert all(t.status == "pending" for t in pend)
-        assert c.tasks.list(status="cancelled") == [] or all(
-            t.status == "cancelled" for t in c.tasks.list(status="cancelled"))
+        assert all(t.status == "pending"
+                   for t in c.tasks.list(status="pending"))
+        assert c.tasks.list(status="cancelled") == []
         assert len(c.tasks.list(limit=1)) == 1
         assert any(t.id == a.id for t in allt)
 
 
-def test_cancel_then_delete(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def test_cancel_sets_cancelling():
+    with _client() as c:
         t = c.tasks.submit(repo_id="o/c", revision="2" * 40, storage_id=1)
         c.tasks.cancel(t.id, reason="user")
-        # cancel -> cancelling/cancelled; poll once
-        cur = c.tasks.get(t.id)
-        assert cur.status in ("cancelling", "cancelled")
+        # R3: cancel_task only ever sets "cancelling" synchronously.
+        assert c.tasks.get(t.id).status == "cancelling"
 
 
-def test_delete_non_terminal_raises_conflict(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def test_delete_non_terminal_raises_conflict():
+    with _client() as c:
         t = c.tasks.submit(repo_id="o/d", revision="3" * 40, storage_id=1)
         with pytest.raises(e.Conflict) as ei:
             c.tasks.delete(t.id)        # still pending -> 409
         assert ei.value.code == "TASK_NOT_TERMINAL"
 
 
-def test_get_missing_raises_notfound(transport, token):
-    with Client(server="http://test", token=token,
-                transport=transport) as c:
+def test_get_missing_raises_notfound():
+    with _client() as c:
         with pytest.raises(e.NotFound):
             c.tasks.get("99999999-9999-9999-9999-999999999999")
 
 
-def test_bad_token_raises_autherror(transport):
-    with Client(server="http://test", token="not-a-jwt",
-                transport=transport) as c:
+def test_bad_token_raises_autherror():
+    with _client(token="wrong") as c:
         with pytest.raises(e.AuthError):
             c.tasks.list()
 
@@ -820,7 +913,7 @@ def test_missing_token_is_usage_error(monkeypatch):
         Client(server="http://test", token=None, config_path="")
 ```
 
-- [ ] **Step 2: Run** `uv run pytest tests/sdk/test_client_sync_ops.py -v` → expected PASS (logic already in Task 4 `client.py`). If any FAIL, fix `client.py` (not the test).
+- [ ] **Step 2: Run** `uv run pytest tests/sdk/test_client_sync_ops.py -v` → expected PASS (logic already in Task 4 `client.py`). If any FAIL, fix `client.py` (not the test). (Deterministic; no DB/app.)
 
 - [ ] **Step 3:** (no new impl — Task 4 implemented these; this task is acceptance coverage.)
 
@@ -919,44 +1012,43 @@ git commit -m "test(sp4): DownloadTask.wait poll/terminal/timeout coverage"
 - Modify: `src/dlw/sdk/__init__.py` (replace skeleton with full exports)
 - Test: `tests/sdk/test_client_async.py`
 
-- [ ] **Step 1: Write the failing test** — `tests/sdk/test_client_async.py`:
+- [ ] **Step 1: Write the failing test** — `tests/sdk/test_client_async.py` (real ASGI app via the async `aclient` fixture — proven `test_tasks.py` pattern; B-B1/R3):
 ```python
-"""async AsyncClient mirrors sync surface over the real ASGI app (SP4)."""
+"""async AsyncClient over the REAL ASGI app + DB (SP4).
+
+Uses the async `aclient` fixture from _fixtures.py (same loop as the
+session-scoped engine — mirrors tests/api/test_tasks.py exactly)."""
 from __future__ import annotations
 
 import pytest
 
 from dlw.sdk import errors as e
-from dlw.sdk.aclient import AsyncClient
-from tests.sdk._fixtures import *  # noqa: F401,F403
+from tests.sdk._fixtures import *  # noqa: F401,F403  (fixtures + __all__)
 
 pytestmark = pytest.mark.slow
 
 
-async def test_async_submit_get_list_cancel(transport, token):
-    async with AsyncClient(server="http://test", token=token,
-                           transport=transport) as c:
-        t = await c.tasks.submit(repo_id="o/r", revision="0" * 40,
-                                 storage_id=1)
-        assert t.status == "pending"
-        got = await c.tasks.get(t.id)
-        assert got.id == t.id
-        again = await got.refresh()
-        assert again.id == t.id
-        lst = await c.tasks.list(status="pending")
-        assert any(x.id == t.id for x in lst)
-        await c.tasks.cancel(t.id)
-        cur = await c.tasks.get(t.id)
-        assert cur.status in ("cancelling", "cancelled")
+async def test_async_submit_get_list_cancel(aclient):
+    t = await aclient.tasks.submit(repo_id="o/r", revision="0" * 40,
+                                   storage_id=1)
+    assert t.status == "pending"
+    got = await aclient.tasks.get(t.id)
+    assert got.id == t.id
+    assert len(got.subtasks) == 2          # TaskDetail, patched HF -> 2
+    again = await got.refresh()
+    assert again.id == t.id
+    lst = await aclient.tasks.list(status="pending")
+    assert any(x.id == t.id for x in lst)
+    await aclient.tasks.cancel(t.id)
+    cur = await aclient.tasks.get(t.id)
+    assert cur.status == "cancelling"      # R3: never "cancelled" in tests
 
 
-async def test_async_delete_non_terminal_conflict(transport, token):
-    async with AsyncClient(server="http://test", token=token,
-                           transport=transport) as c:
-        t = await c.tasks.submit(repo_id="o/x", revision="4" * 40,
-                                 storage_id=1)
-        with pytest.raises(e.Conflict):
-            await c.tasks.delete(t.id)
+async def test_async_delete_non_terminal_conflict(aclient):
+    t = await aclient.tasks.submit(repo_id="o/x", revision="4" * 40,
+                                   storage_id=1)
+    with pytest.raises(e.Conflict):
+        await aclient.tasks.delete(t.id)
 
 
 async def test_async_wait_polls_until_terminal():
@@ -1351,9 +1443,9 @@ git commit -m "feat(sp4): dlw CLI skeleton (parser/dispatch/exit-codes) + consol
 - Modify: `src/dlw/cli/handlers.py`
 - Test: `tests/cli/test_cli_submit_show.py`
 
-- [ ] **Step 1: Write the failing test** — `tests/cli/test_cli_submit_show.py`:
+- [ ] **Step 1: Write the failing test** — `tests/cli/test_cli_submit_show.py` (CLI builds a sync `Client`, so the seam injects `MockTransport`; deterministic, no app/DB):
 ```python
-"""dlw submit / show end-to-end through the SDK + real ASGI app (SP4)."""
+"""dlw submit / show through the SDK + httpx.MockTransport (SP4; R1)."""
 from __future__ import annotations
 
 import json
@@ -1361,16 +1453,14 @@ import json
 import pytest
 
 import dlw.cli.main as cli
-from tests.sdk._fixtures import *  # noqa: F401,F403
-
-pytestmark = pytest.mark.slow
+from tests.sdk._mock import GOOD_TOKEN, make_mock_transport
 
 
 @pytest.fixture(autouse=True)
-def _wire(transport, token, monkeypatch):
-    monkeypatch.setattr(cli, "_transport", transport)
-    monkeypatch.setenv("DLW_TOKEN", token)
-    monkeypatch.setenv("DLW_SERVER", "http://test")
+def _wire(monkeypatch):
+    monkeypatch.setattr(cli, "_transport", make_mock_transport())
+    monkeypatch.setenv("DLW_TOKEN", GOOD_TOKEN)
+    monkeypatch.setenv("DLW_SERVER", "http://mock")
     yield
     monkeypatch.setattr(cli, "_transport", None)
 
@@ -1395,6 +1485,7 @@ def test_show_missing_exit_3(capsys):
     rc = cli.main(["show", "99999999-9999-9999-9999-999999999999"])
     assert rc == 3
 ```
+(NOTE: a fresh `make_mock_transport()` per test = fresh in-memory store; `test_show_after_submit` submits then shows within the SAME `cli.main` process so the same transport instance — set once by `_wire` — persists the task across the two `cli.main` calls. Keep `_wire` building ONE transport for the test.)
 
 - [ ] **Step 2: Run** `uv run pytest tests/cli/test_cli_submit_show.py -v` → FAIL (`NotImplementedError`).
 
@@ -1458,9 +1549,9 @@ git commit -m "feat(sp4): CLI submit/show handlers"
 - Modify: `src/dlw/cli/handlers.py`
 - Test: `tests/cli/test_cli_ops.py`
 
-- [ ] **Step 1: Write the failing test** — `tests/cli/test_cli_ops.py`:
+- [ ] **Step 1: Write the failing test** — `tests/cli/test_cli_ops.py` (MockTransport seam; R1):
 ```python
-"""dlw list/cancel/delete/watch (SP4)."""
+"""dlw list/cancel/delete/watch via httpx.MockTransport (SP4)."""
 from __future__ import annotations
 
 import json
@@ -1468,16 +1559,14 @@ import json
 import pytest
 
 import dlw.cli.main as cli
-from tests.sdk._fixtures import *  # noqa: F401,F403
-
-pytestmark = pytest.mark.slow
+from tests.sdk._mock import GOOD_TOKEN, make_mock_transport
 
 
 @pytest.fixture(autouse=True)
-def _wire(transport, token, monkeypatch):
-    monkeypatch.setattr(cli, "_transport", transport)
-    monkeypatch.setenv("DLW_TOKEN", token)
-    monkeypatch.setenv("DLW_SERVER", "http://test")
+def _wire(monkeypatch):
+    monkeypatch.setattr(cli, "_transport", make_mock_transport())
+    monkeypatch.setenv("DLW_TOKEN", GOOD_TOKEN)
+    monkeypatch.setenv("DLW_SERVER", "http://mock")
     yield
     monkeypatch.setattr(cli, "_transport", None)
 
@@ -1515,17 +1604,15 @@ def test_delete_non_terminal_exit6(capsys):
 
 def test_watch_terminal_exit0(capsys, monkeypatch):
     tid = _submit(capsys, "o/ww", "4" * 40)
-    # force terminal quickly: stub Client.tasks.get to return cancelled
+    # MockTransport keeps a task "pending"; stub TasksAPI.get to flip the
+    # status to terminal so watch's poll loop exits. `real` is captured
+    # BEFORE monkeypatch so it's the unpatched method.
     from dlw.sdk.client import TasksAPI
     real = TasksAPI.get
 
-    calls = {"n": 0}
-
     def fake_get(self, task_id):
-        t = real(self, task_id)
-        calls["n"] += 1
-        if calls["n"] >= 1:
-            t.status = "cancelled"
+        t = real(self, task_id)        # real HTTP via MockTransport
+        t.status = "cancelled"
         return t
     monkeypatch.setattr(TasksAPI, "get", fake_get)
     assert cli.main(["watch", tid, "--interval", "0"]) == 0
@@ -1573,12 +1660,12 @@ git commit -m "feat(sp4): CLI list/cancel/delete/watch handlers"
 
 ### Task 11: M3 milestone gate (controller-run — not a subagent task)
 
-- [ ] **Step 1:** `uv run pytest -q` → full suite green (SP4 is additive; expect prior 381 + new SP4 tests, 0 fail/0 error).
+- [ ] **Step 1:** `uv run pytest -q` → full suite green: the prior suite count is unchanged + all new SP4 tests pass, **0 failed / 0 errors** (do NOT hardcode the absolute count — read it from the run; SP4 is additive so no prior test should change result).
 - [ ] **Step 2:** `uv run python -m pytest tools/test_lint_invariants.py -q` → pass.
 - [ ] **Step 3:** `python tools/lint_invariants.py` → `OK: 46 invariants`.
 - [ ] **Step 4:** `python tools/lint_no_direct_status_write.py` → OK (SP4 writes no Executor.status).
 - [ ] **Step 5:** `npx --yes @stoplight/spectral-cli@6 lint api/openapi.yaml --fail-severity=error` + `npx --yes @apidevtools/swagger-cli validate api/openapi.yaml` → 0 errors / valid (api yaml unchanged by SP4, but run the gate).
-- [ ] **Step 6:** `uv run alembic upgrade head` → no-op (SP4 adds no migration; head stays `7636b35e4881`). Confirm `uv lock` unchanged (no dep added): `git status` shows no `uv.lock`/`pyproject` dependency diff (only `[project.scripts]`).
+- [ ] **Step 6:** `uv run alembic upgrade head` → no-op (SP4 adds no migration; **verify the head is unchanged from `main`, do not hardcode the sha**). Confirm no dependency diff: `git diff --stat origin/main...HEAD` touches only `src/dlw/sdk/*`, `src/dlw/cli/*`, `pyproject.toml` (`[project.scripts]` line only — NOT `dependencies`/`[dependency-groups]`), `tests/sdk/*`, `tests/cli/*`, `docs/*`; `uv.lock` unchanged.
 - [ ] No commit (gate only). If anything fails, fix before M4.
 
 ---
@@ -1595,7 +1682,7 @@ git commit -m "feat(sp4): CLI list/cancel/delete/watch handlers"
   2. **Auth** — token-only (no OIDC in MVP). Precedence: `--token` > `DLW_TOKEN` > `DLW_SYSTEM_ADMIN_TOKEN` > `~/.dlw/config.yaml` (`auth.<context>.access_token`). Server: `--server` > `DLW_SERVER` > config > `http://localhost:8000`. Missing token → exit 2.
   3. **CLI commands** — `submit/list/show/cancel/delete/watch` with one example each (mirror the SDK test invocations), `-o table|json`, exit-code table (0/1/2/3/4/5/6/8/9 per spec §4.1).
   4. **Python SDK** — sync example (`from dlw.sdk import Client; with Client(server=..., token=...) as c: t = c.tasks.submit(repo_id, revision, storage_id=...); t.wait()`) and async example (`from dlw.sdk import AsyncClient; async with AsyncClient(...) as c: ...`). Note the **monorepo import path** is `dlw.sdk` (not `dlw`) and why.
-  5. **MVP limitations (authoritative, deferred on purpose)** — verbatim the 3 from the SP4 spec §4: client-side `list` filter; polling `watch`/`wait` (no streaming/events endpoint); token-only auth. Plus the deferred command list (login/materialize/search/quota/exec/storage/audit/template/admin/completion, idempotency-key, yaml output).
+  5. **MVP limitations (authoritative, deferred on purpose)** — verbatim the 3 from the SP4 spec §4: client-side `list` filter; polling `watch`/`wait` (no streaming/events endpoint); token-only auth. **Plus (R4):** `cancel --reason`/`cancel(reason=)` is accepted but **not persisted** — the controller cancel endpoint has no reason field yet; it is reserved, no-op for now. **Plus (I1):** `watch` on an already-terminal task emits only the final record (no progress line) — by design (`wait` returns immediately when status is already terminal). Plus the deferred command list (login/materialize/search/quota/exec/storage/audit/template/admin/completion, idempotency-key, yaml output).
   6. **Cross-ref** `docs/v2.0/11-cli-and-sdk-spec.md` §6-§7 and the SP4 design/plan.
 
 - [ ] **Step 2: Commit**
@@ -1614,7 +1701,7 @@ git commit -m "docs(sp4): dlw CLI + Python SDK operator/user guide"
 
 ## Self-Review
 
-**Spec coverage:** §1 scope → Tasks 1-10; SDK `Client`/`AsyncClient`/`tasks.{submit,get,list,cancel,delete}`/`DownloadTask.{wait,refresh}` → T3/T4/T5/T6/T7; CLI `submit/list/show/cancel/delete/watch` + global flags + exit codes → T8/T9/T10; config precedence §2.1 → T2; error→exit table §5/§6 → T1 + `_http` T3 + CLI mapping T8; test strategy §7 (ASGITransport, real JWT, HF patch, FK-ordered seed + teardown drop_all, `__init__.py`, no new dep) → T4 `_fixtures.py` + every test; milestones M1-M4 → Tasks grouped accordingly; docs §8 → T12; "purely additive" → asserted in T11 Step 6 + T12 Step 3(f). No spec requirement is unmapped.
+**Spec coverage:** §1 scope → Tasks 1-10; SDK `Client`/`AsyncClient`/`tasks.{submit,get,list,cancel,delete}`/`DownloadTask.{wait,refresh}` → T3/T4/T5/T6/T7; CLI `submit/list/show/cancel/delete/watch` + global flags + exit codes → T8/T9/T10; config precedence §2.1 → T2; error→exit table §5/§6 → T1 + `_http` T3 + CLI mapping T8; test strategy §7 (pre-review R1: **async** `AsyncClient` e2e via `ASGITransport`+real DB through the async `aclient` fixture mirroring `tests/api/test_tasks.py` → T7; **sync** `Client`+CLI via `httpx.MockTransport`/`_mock.py` → T4/T5/T9/T10; R2 `__all__` in `_fixtures.py`; real JWT, HF patch, FK-ordered seed + teardown drop_all, `__init__.py`, no new dep) → T4 `_fixtures.py`+`_mock.py` + every test; milestones M1-M4 → Tasks grouped accordingly; docs §8 → T12; "purely additive" → asserted in T11 Step 6 + T12 Step 3(f). No spec requirement is unmapped.
 
 **Placeholder scan:** every code step contains complete runnable code; the only "filled in later" markers are the explicit, intentional staged stubs in T1 (`__init__` minimal→full in T7) and T8 (`handlers.run` minimal→T9→T10), each with the exact replacement code given in the later task. No `TODO`/`add error handling`/`similar to`.
 
