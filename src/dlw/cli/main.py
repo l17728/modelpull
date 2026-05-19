@@ -1,0 +1,133 @@
+"""`dlw` CLI (Phase 3 SP4) — argparse front-end over dlw.sdk.
+
+CLI-is-SDK: every handler builds a dlw.sdk.Client and calls it. Tests set
+`dlw.cli.main._transport` to an httpx transport; production leaves it
+None (real network)."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any
+
+from dlw.sdk import errors as e
+from dlw.sdk.client import Client
+
+_VERSION = "0.1.0-alpha"
+_transport: Any = None          # test seam; None in production
+
+
+def _make_client(args: argparse.Namespace) -> Client:
+    return Client(server=args.server, token=args.token,
+                  config_path=args.config, transport=_transport)
+
+
+def _print_err(exc: e.DlwError, as_json: bool) -> None:
+    if as_json:
+        sys.stderr.write(json.dumps({
+            "code": exc.code, "message": exc.message,
+            "trace_id": exc.trace_id, "details": exc.details}) + "\n")
+        return
+    sys.stderr.write(f"Error: {exc.message}\n")
+    if exc.code:
+        sys.stderr.write(f"Code:  {exc.code}\n")
+    if exc.trace_id:
+        sys.stderr.write(f"Trace: {exc.trace_id}\n")
+    if exc.details:
+        sys.stderr.write("Details:\n")
+        for k, v in exc.details.items():
+            sys.stderr.write(f"  - {k}: {v}\n")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="dlw",
+        description="dlw — distributed HuggingFace model downloader CLI")
+    p.add_argument("--version", action="store_true",
+                   help="print version and exit")
+    p.add_argument("--server", default=None, help="API base URL")
+    p.add_argument("--token", default=None, help="bearer token")
+    p.add_argument("-c", "--config", default=None, help="config file path")
+    p.add_argument("-o", "--output", choices=["table", "json"],
+                   default="table")
+    p.add_argument("-q", "--quiet", action="store_true")
+    sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("submit", help="create a download task")
+    s.add_argument("repo")
+    s.add_argument("-r", "--revision", required=True)
+    s.add_argument("-s", "--storage", type=int, required=True)
+    s.add_argument("--priority", type=int, default=1)
+    s.add_argument("--strategy", default="auto_balance")
+    s.add_argument("--upgrade-from", default=None)
+    s.add_argument("--wait", action="store_true")
+    s.add_argument("--timeout", type=float, default=None)
+
+    sub.add_parser("list", help="list tasks").add_argument(
+        "--status", default=None)
+
+    g = sub.add_parser("show", help="show one task")
+    g.add_argument("task_id")
+
+    cc = sub.add_parser("cancel", help="cancel a task")
+    cc.add_argument("task_id")
+    cc.add_argument("--reason", default=None)
+
+    sub.add_parser("delete", help="delete a terminal task").add_argument(
+        "task_id")
+
+    w = sub.add_parser("watch", help="poll a task until terminal")
+    w.add_argument("task_id")
+    w.add_argument("--interval", type=float, default=5.0)
+    w.add_argument("--timeout", type=float, default=None)
+    return p
+
+
+def _emit(obj: Any, args: argparse.Namespace) -> None:
+    if args.output == "json":
+        sys.stdout.write(json.dumps(obj, default=str) + "\n")
+        return
+    rows = obj if isinstance(obj, list) else [obj]
+    if not rows:
+        sys.stdout.write("(no tasks)\n")
+        return
+    cols = ["id", "repo_id", "revision", "status", "priority"]
+    widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows))
+              for c in cols}
+    line = "  ".join(c.ljust(widths[c]) for c in cols)
+    sys.stdout.write(line + "\n")
+    for r in rows:
+        sys.stdout.write("  ".join(
+            str(r.get(c, "")).ljust(widths[c]) for c in cols) + "\n")
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    from dlw.cli import handlers
+    return handlers.run(args, _make_client, _emit)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    argv = sys.argv[1:] if argv is None else argv
+    if "--version" in argv:
+        sys.stdout.write(f"dlw {_VERSION}\n")
+        return 0
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 2
+    if not args.cmd:
+        parser.print_help(sys.stderr)
+        return 2
+    try:
+        return _dispatch(args)
+    except KeyboardInterrupt:
+        sys.stderr.write("\nAborted.\n")
+        return 8
+    except e.DlwError as exc:
+        _print_err(exc, args.output == "json")
+        return e.exit_code_for(exc)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
