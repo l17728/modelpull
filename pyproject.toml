@@ -39,6 +39,7 @@ dev = [
 ]
 
 [project.scripts]
+dlw = "dlw.cli.main:main"
 dlw-executor = "dlw.executor.cli:main"
 dlw-seed = "dlw.cli.seed:main"
 
