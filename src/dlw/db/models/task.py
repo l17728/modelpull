@@ -130,6 +130,9 @@ class FileSubTask(Base):
     source_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_chunked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Phase 3 SP3: incremental download
+    inherit_from_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
