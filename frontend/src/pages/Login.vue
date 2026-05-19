@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
 import { useAuthStore } from '@/stores/auth'
+import { oidcLoginUrl } from '@/pages/oidc'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -32,6 +33,10 @@ async function onSubmit() {
   if (!valid) return
   authStore.login(form.token.trim())
   router.push('/')
+}
+
+function loginOidc() {
+  window.location.assign(oidcLoginUrl(import.meta.env.VITE_API_BASE))
 }
 </script>
 
@@ -67,6 +72,14 @@ async function onSubmit() {
             @click="onSubmit"
           >
             {{ t('login.submit') }}
+          </el-button>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            link
+            @click="loginOidc"
+          >
+            {{ t('login.oidc') }}
           </el-button>
         </el-form-item>
       </el-form>

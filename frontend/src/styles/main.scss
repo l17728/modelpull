@@ -1,3 +1,5 @@
+@use './tokens';
+
 *,
 *::before,
 *::after {
@@ -14,8 +16,8 @@ body,
 }
 
 body {
-  background-color: #f5f7fa;
-  color: #303133;
+  background-color: var(--dlw-bg);
+  color: var(--dlw-text);
 }
 
 a {
@@ -24,7 +26,7 @@ a {
 }
 
 .page-container {
-  padding: 24px;
+  padding: var(--dlw-space-4);
   max-width: 1280px;
   margin: 0 auto;
 }

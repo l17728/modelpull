@@ -1,54 +1,65 @@
 {
-  "app": {
-    "title": "modelpull",
-    "logout": "退出登录"
-  },
+  "app": { "title": "modelpull", "logout": "退出登录" },
   "login": {
-    "heading": "登录 modelpull",
-    "tokenLabel": "Bearer Token",
-    "tokenPlaceholder": "粘贴 DLW_BEARER_TOKEN 的值",
-    "submit": "登录",
-    "tokenRequired": "请输入 token"
+    "heading": "登录 modelpull", "tokenLabel": "Bearer Token",
+    "tokenPlaceholder": "粘贴租户用户 JWT", "submit": "登录",
+    "tokenRequired": "请输入 token", "oidc": "使用 OIDC 登录"
+  },
+  "nav": {
+    "dashboard": "概览", "tasks": "任务", "createTask": "新建任务"
+  },
+  "shell": {
+    "theme": "主题", "language": "语言", "commandHint": "命令面板 (Ctrl/⌘+K)",
+    "tenant": "租户", "role": "角色"
+  },
+  "palette": {
+    "placeholder": "跳转或执行操作…", "navGroup": "导航",
+    "actionGroup": "操作", "createTask": "新建任务", "openTaskById": "按 ID 打开任务",
+    "openTaskPrompt": "输入任务 ID"
+  },
+  "dashboard": {
+    "heading": "概览", "inProgress": "进行中", "completed": "已完成",
+    "failed": "失败", "total": "总计", "recent": "最近任务",
+    "quota": "配额", "trend": "近 24h 新建", "quotaBytes": "本月流量",
+    "quotaStorage": "存储", "quotaConcurrent": "并发任务"
   },
   "tasks": {
-    "listHeading": "任务列表",
-    "empty": "暂无任务，使用 curl POST /api/v1/tasks 创建一个",
-    "columns": {
-      "id": "ID",
-      "repo": "仓库",
-      "revision": "Revision",
-      "status": "状态",
-      "createdAt": "创建时间",
-      "actions": "操作"
-    },
-    "view": "查看",
-    "detailHeading": "任务详情",
-    "subtasksHeading": "子任务",
-    "polling": "实时刷新中…",
-    "completed": "已停止刷新（终态）",
-    "back": "返回列表",
-    "notFound": "任务不存在或已删除",
-    "subtaskColumns": {
-      "filename": "文件名",
-      "size": "大小",
-      "sha256": "SHA256",
-      "status": "状态"
-    }
+    "listHeading": "任务列表", "empty": "暂无任务，点击「新建任务」创建一个",
+    "create": "新建任务", "filterStatus": "状态筛选", "filterAll": "全部",
+    "search": "搜索仓库/ID", "cancel": "取消", "delete": "删除",
+    "cancelConfirm": "确认取消该任务？", "deleteConfirm": "确认删除该终态任务？",
+    "cancelled": "已请求取消", "deleted": "已删除",
+    "columns": { "id": "ID", "repo": "仓库", "revision": "Revision",
+      "status": "状态", "createdAt": "创建时间", "actions": "操作" },
+    "view": "查看", "detailHeading": "任务详情", "subtasksHeading": "子任务",
+    "polling": "实时刷新中…", "completed": "已停止刷新（终态）",
+    "back": "返回列表", "notFound": "任务不存在或已删除",
+    "subtaskColumns": { "filename": "文件名", "size": "大小",
+      "sha256": "SHA256", "status": "状态" }
+  },
+  "create": {
+    "heading": "新建下载任务", "repo": "仓库 (org/model)",
+    "revision": "Revision (40 位 hex sha)", "storageId": "存储后端 ID",
+    "priority": "优先级", "strategy": "源策略", "upgradeFrom": "增量基线 revision",
+    "trustNonHf": "信任非 HF 源 sha256", "submit": "创建任务",
+    "repoRequired": "请输入仓库", "repoPattern": "格式应为 org/model",
+    "revRequired": "请输入 revision", "revPattern": "应为 40 位十六进制 sha",
+    "storageRequired": "请输入存储后端 ID",
+    "serviceTokenWarn": "当前是 system-admin 服务 token（user_id=0），无法创建任务（owner FK）。请用租户用户 JWT 登录后再创建。",
+    "success": "任务已创建"
   },
   "status": {
-    "pending": "排队中",
-    "queued": "排队中",
-    "scheduling": "调度中",
-    "downloading": "下载中",
-    "succeeded": "成功",
-    "failed": "失败",
-    "cancelled": "已取消",
-    "assigned": "已分派",
-    "in_progress": "下载中"
+    "pending": "排队中", "queued": "排队中", "scheduling": "调度中",
+    "downloading": "下载中", "succeeded": "成功", "failed": "失败",
+    "cancelled": "已取消", "assigned": "已分派", "in_progress": "下载中"
   },
   "errors": {
     "invalid_token": "Token 无效或已失效，请重新登录",
     "service_unavailable": "服务暂不可用，正在重试…",
-    "network": "网络错误，请检查连接"
+    "network": "网络错误，请检查连接",
+    "quota_exceeded": "配额已超限",
+    "conflict": "状态冲突（任务可能非终态或重复）",
+    "validation": "请求参数有误",
+    "forbidden": "无权限访问"
   }
 }
