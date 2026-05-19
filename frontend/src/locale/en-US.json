@@ -5,7 +5,9 @@
     "tokenPlaceholder": "Paste a tenant-user JWT", "submit": "Sign in",
     "tokenRequired": "Token is required", "oidc": "Sign in with OIDC"
   },
-  "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task" },
+  "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task",
+    "executors": "Executors", "audit": "Audit log",
+    "quota": "Quota", "settings": "Settings" },
   "shell": {
     "theme": "Theme", "language": "Language",
     "commandHint": "Command palette (Ctrl/⌘+K)", "tenant": "Tenant", "role": "Role"
@@ -72,5 +74,33 @@
     "network": "Network error, check your connection",
     "quota_exceeded": "Quota exceeded", "conflict": "State conflict (task not terminal or duplicate)",
     "validation": "Invalid request parameters", "forbidden": "Forbidden"
+  },
+  "executors": {
+    "heading": "Executors", "empty": "No executors visible",
+    "filterStatus": "Status", "all": "All",
+    "joining": "joining", "healthy": "healthy", "degraded": "degraded",
+    "suspect": "suspect", "faulty": "faulty",
+    "health": "Health", "lastHeartbeat": "Heartbeat",
+    "disk": "Disk", "gbps": "Gbps",
+    "host": "Host", "tenant": "Tenant", "shared": "shared infra"
+  },
+  "audit": {
+    "heading": "Audit log", "empty": "No audit entries",
+    "filterAction": "Action prefix", "filterActor": "Actor user id",
+    "filterFrom": "From", "filterTo": "To", "reset": "Reset filters",
+    "loadOlder": "Load older", "systemActor": "system"
+  },
+  "quotaPage": {
+    "heading": "Quota", "byteUsage": "Bytes this month",
+    "storageUsage": "Storage", "concurrentUsage": "Concurrent tasks",
+    "threshold": { "warn": "WARN", "over": "OVER" }
+  },
+  "settings": {
+    "heading": "Settings", "profile": "Profile", "preferences": "Preferences",
+    "system": "System",
+    "principal": { "user": "User", "tenant": "Tenant", "role": "Role",
+      "projects": "Projects", "serviceToken": "Service token" },
+    "theme": "Theme", "themeLight": "Light", "themeDark": "Dark",
+    "localeLabel": "Language", "controllerState": "Controller state"
   }
 }

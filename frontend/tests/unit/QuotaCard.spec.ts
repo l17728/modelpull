@@ -26,10 +26,7 @@ describe('QuotaCard', () => {
       global: { plugins: [ElementPlus, i18n] },
     })
     expect(w.text()).toContain('90%')
-    // Pre-review BLOCKER fix: Task 11 (this component) runs BEFORE Task 12
-    // adds the i18n keys; assert against the literal key path that vue-i18n
-    // returns on a missing key.
-    expect(w.text()).toContain('quotaPage.threshold.warn')
+    expect(w.text()).toContain(en.quotaPage.threshold.warn)
   })
   test('over-cap → over chip + 100%', () => {
     const w = mount(QuotaCard, {
@@ -37,7 +34,7 @@ describe('QuotaCard', () => {
       global: { plugins: [ElementPlus, i18n] },
     })
     expect(w.text()).toContain('100%')
-    expect(w.text()).toContain('quotaPage.threshold.over')
+    expect(w.text()).toContain(en.quotaPage.threshold.over)
   })
   test('zero quota → renders 0% (no NaN)', () => {
     const w = mount(QuotaCard, {
