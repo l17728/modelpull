@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import dlw.db.models  # noqa: F401
@@ -86,3 +86,56 @@ async def test_record_object_idempotent_when_ref_exists(seeded):
         assert o.refcount == 1            # NOT 2 — ref already existed
         refs = (await s.execute(select(SubtaskObjectRef))).scalars().all()
         assert len(refs) == 1
+
+
+async def test_deref_decrements_and_drops_refs(seeded):
+    f, subs = seeded
+    async with f() as s:
+        await record_object(s, tenant_id=1, storage_id=1, storage_key="k",
+                            sha256="a" * 64, size=10, subtask_id=subs[0])
+        await record_object(s, tenant_id=1, storage_id=1, storage_key="k",
+                            sha256="a" * 64, size=10, subtask_id=subs[1])
+        await s.commit()
+        from dlw.services.storage_objects import deref_subtask
+        await deref_subtask(s, subs[0])
+        await s.commit()
+        o = (await s.execute(select(StorageObject))).scalar_one()
+        assert o.refcount == 1
+        refs = (await s.execute(select(SubtaskObjectRef))).scalars().all()
+        assert {r.subtask_id for r in refs} == {subs[1]}
+
+
+async def test_gc_deletes_only_zero_refcount_past_grace(seeded):
+    f, subs = seeded
+    from datetime import UTC, datetime, timedelta
+
+    from dlw.services.storage_objects import deref_subtask, gc_orphans
+    async with f() as s:
+        await record_object(s, tenant_id=1, storage_id=1, storage_key="k",
+                            sha256="a" * 64, size=10, subtask_id=subs[0])
+        await record_object(s, tenant_id=1, storage_id=1, storage_key="k2",
+                            sha256="b" * 64, size=10, subtask_id=subs[1])
+        await s.commit()
+        await deref_subtask(s, subs[0])
+        await s.execute(update(StorageObject)
+                        .where(StorageObject.sha256 == "a" * 64)
+                        .values(created_at=datetime.now(UTC)
+                                - timedelta(hours=2)))
+        await s.commit()
+        n = await gc_orphans(s, grace_seconds=3600)
+        await s.commit()
+        assert n == 1
+        rows = (await s.execute(select(StorageObject))).scalars().all()
+        assert [r.sha256 for r in rows] == ["b" * 64]
+
+
+async def test_gc_respects_grace(seeded):
+    f, subs = seeded
+    from dlw.services.storage_objects import deref_subtask, gc_orphans
+    async with f() as s:
+        await record_object(s, tenant_id=1, storage_id=1, storage_key="k",
+                            sha256="a" * 64, size=10, subtask_id=subs[0])
+        await s.commit()
+        await deref_subtask(s, subs[0])
+        await s.commit()
+        assert await gc_orphans(s, grace_seconds=3600) == 0
