@@ -153,17 +153,56 @@ Then add the new response schema just before `StorageConfig:` (which currently f
 
 ```
 
-- [ ] **Step 3: Validate the contract**
+- [ ] **Step 3: Extend the audit search response with `next_cursor` (additive)**
+
+In `api/openapi.yaml`, in the `/audit/log` GET block (lines 1266–1295), replace the response `schema:` block:
+
+```yaml
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/AuditEntry'}
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Opaque cursor for the next page; null when no more rows.
+```
+
+(Strictly additive — keeps the existing `items` shape, only adds the optional `next_cursor` so the static contract and the runtime DTO are consistent.)
+
+- [ ] **Step 4: Extend `src/dlw/authz/policy.csv` with grants for the 2 new resources**
+
+(Pre-review BLOCKER fix: without these, all tenant_admin tests would 403 because `make_app_with_state` builds the casbin enforcer from `policy.csv` and there are no matching rows for `/api/v1/audit*` or `/api/v1/executors*` yet.)
+
+Append after the existing `tenant_viewer ... /api/v1/quota*` line (i.e. after line 7 of `policy.csv`, BEFORE the `g, role:* …` group rows):
+
+```
+p, role:tenant_admin, /api/v1/audit*, ^GET$, tenant_match
+p, role:tenant_admin, /api/v1/executors*, ^GET$, tenant_match
+p, role:tenant_operator, /api/v1/audit*, ^GET$, tenant_match
+p, role:tenant_operator, /api/v1/executors*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/audit*, ^GET$, tenant_match
+p, role:tenant_viewer, /api/v1/executors*, ^GET$, tenant_match
+```
+
+- [ ] **Step 5: Validate the contract**
 
 Run: `npx --yes @stoplight/spectral-cli lint api/openapi.yaml --fail-severity=error`
 Expected: 0 errors (warnings allowed; the existing `oas3-unused-component ExecutorRead` warning should DISAPPEAR because it's now referenced by `ExecutorListResponse`).
 Run: `npx --yes @apidevtools/swagger-cli validate api/openapi.yaml`
 Expected: `api/openapi.yaml is valid`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-cd /d/download_weights && git add api/openapi.yaml && git commit -q -m "UI-SP3 M1: openapi — listExecutors path + extend ExecutorRead + ExecutorListResponse"
+cd /d/download_weights && git add api/openapi.yaml src/dlw/authz/policy.csv && git commit -q -m "UI-SP3 M1: openapi (listExecutors+extend ExecutorRead+ExecutorListResponse+searchAuditLog next_cursor) + policy.csv grants for audit/executors"
 ```
 
 ---
@@ -389,10 +428,8 @@ class AuditEntryRead(BaseModel):
 class AuditSearchResponse(BaseModel):
     """Response for GET /api/v1/audit/log.
 
-    The on-disk contract (`searchAuditLog`) declares only {items}; we
-    additively expose `next_cursor` because pagination is otherwise opaque
-    to the client. The extra field is forward-compatible (existing JSON
-    consumers ignore unknown fields) and is needed by the UI-SP3 audit page.
+    Matches the on-disk contract (`searchAuditLog`) which UI-SP3 extends in
+    Task 1 Step 3 to include `next_cursor` (nullable) for client pagination.
     """
     items: list[AuditEntryRead]
     next_cursor: str | None = None
@@ -521,14 +558,14 @@ async def get_audit_log(
 
 - [ ] **Step 6: Register the router in `src/dlw/main.py`**
 
-Read `src/dlw/main.py` first; find the block where existing routers are included (look for `app.include_router(tasks.router)` or similar). Append:
+The existing pattern (verified `src/dlw/main.py:285-307`): every router is **lazy-imported inside `create_app()`** using `from dlw.api.X import router as X_router; app.include_router(X_router)`. The last existing line is `app.include_router(source_proxy_router)` at line 307.
+
+Add **two lines** immediately after line 307 (inside `create_app()`, same 4-space indent):
 
 ```python
-from dlw.api import audit as audit_api
-app.include_router(audit_api.router)
+    from dlw.api.audit import router as audit_router
+    app.include_router(audit_router)
 ```
-
-(Place the `from dlw.api import audit as audit_api` line near the other `from dlw.api import …` imports; place `app.include_router(audit_api.router)` next to the other `include_router` calls. If the file uses a different idiom, follow it byte-faithfully — the goal is "appended like the existing routers".)
 
 - [ ] **Step 7: Run the test to verify it passes**
 
@@ -808,11 +845,11 @@ async def list_executors(
 
 - [ ] **Step 6: Register the router in `src/dlw/main.py`**
 
-Append next to the audit router from Task 2:
+Add **two lines** immediately after the audit-router lines added in Task 2 (inside `create_app()`, same 4-space indent):
 
 ```python
-from dlw.api import executors_read as executors_read_api
-app.include_router(executors_read_api.router)
+    from dlw.api.executors_read import router as executors_read_router
+    app.include_router(executors_read_router)
 ```
 
 - [ ] **Step 7: Run the test to verify it passes**
@@ -1685,7 +1722,11 @@ describe('QuotaCard', () => {
       global: { plugins: [ElementPlus, i18n] },
     })
     expect(w.text()).toContain('90%')
-    expect(w.text()).toContain(en.quotaPage.threshold.warn)
+    // Pre-review BLOCKER fix: Task 11 (this component) runs BEFORE Task 12
+    // adds the i18n keys, so we cannot deref `en.quotaPage.threshold.warn`
+    // (would throw at test-collection time). Assert against the literal
+    // i18n key path that vue-i18n returns on a missing key.
+    expect(w.text()).toContain('quotaPage.threshold.warn')
   })
   test('over-cap → over chip + 100%', () => {
     const w = mount(QuotaCard, {
@@ -1693,7 +1734,7 @@ describe('QuotaCard', () => {
       global: { plugins: [ElementPlus, i18n] },
     })
     expect(w.text()).toContain('100%')
-    expect(w.text()).toContain(en.quotaPage.threshold.over)
+    expect(w.text()).toContain('quotaPage.threshold.over')
   })
   test('zero quota → renders 0% (no NaN)', () => {
     const w = mount(QuotaCard, {
@@ -2236,6 +2277,8 @@ function reset() {
         :placeholder="t('audit.filterActor')"
         size="small"
         :min="1"
+        :step="1"
+        :precision="0"
         controls-position="right"
         style="width: 180px"
       />
@@ -2525,7 +2568,8 @@ const { data: health } = useSystemHealth()
         <span class="lbl">{{ t('settings.localeLabel') }}</span>
         <el-radio-group
           :model-value="ui.locale"
-          @update:model-value="(v: string) => ui.setLocale(v as 'en-US' | 'zh-CN')"
+          @update:model-value="(v: string | number | boolean | undefined) =>
+            ui.setLocale(String(v) as 'en-US' | 'zh-CN')"
         >
           <el-radio value="en-US">
             English
