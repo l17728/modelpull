@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     rebalance_interval_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
     degradation_trigger_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 
+    # Phase 3 SP3 — incremental / dedup GC
+    gc_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    gc_grace_seconds: int = Field(default=3600, ge=0)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user

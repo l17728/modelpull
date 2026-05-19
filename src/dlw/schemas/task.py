@@ -19,6 +19,7 @@ class TaskCreate(BaseModel):
     source_strategy: str = Field(default="auto_balance", max_length=32)
     source_blacklist: list[str] = Field(default_factory=list)
     trust_non_hf_sha256: bool = Field(default=False)
+    upgrade_from_revision: str | None = Field(default=None, max_length=64)
 
 
 class TaskRead(BaseModel):

@@ -16,3 +16,5 @@ class StorageConfig(BaseModel):
     region: str = Field(default="us-east-1", max_length=64)
     endpoint_url: str | None = Field(default=None, max_length=256)
     key_prefix: str = Field(default="", max_length=512)
+    backend_type: str = Field(default="s3", max_length=32)
+    base_path: str | None = Field(default=None, max_length=1024)

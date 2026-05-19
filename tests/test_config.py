@@ -113,3 +113,68 @@ def test_sp2_source_settings_defaults():
     assert s.sha_mismatch_blacklist_hours == 24
     assert s.rebalance_interval_seconds == 60.0
     get_settings.cache_clear()
+
+
+def test_sp3_gc_settings_defaults():
+    from dlw.config import get_settings
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.gc_interval_seconds == 60.0
+    assert s.gc_grace_seconds == 3600
+    get_settings.cache_clear()
+
+
+def test_sp3_inherit_is_valid_subtask_status():
+    from tools.lint_invariants import VALID_SUBTASK_STATUS
+    assert "inherit" in VALID_SUBTASK_STATUS
+
+
+def test_sp3_taskcreate_upgrade_from_revision_optional():
+    from dlw.schemas.task import TaskCreate
+    t = TaskCreate(repo_id="o/r", revision="a" * 40, storage_id=1)
+    assert t.upgrade_from_revision is None
+    t2 = TaskCreate(repo_id="o/r", revision="a" * 40, storage_id=1,
+                    upgrade_from_revision="b" * 40)
+    assert t2.upgrade_from_revision == "b" * 40
+
+
+def test_sp3_storageconfig_backend_type_default():
+    from dlw.schemas.storage import StorageConfig
+    c = StorageConfig(bucket="b")
+    assert c.backend_type == "s3" and c.base_path is None
+    c2 = StorageConfig(bucket="b", backend_type="local", base_path="/srv")
+    assert c2.backend_type == "local" and c2.base_path == "/srv"
+
+
+@pytest.mark.slow
+async def test_sp3_create_task_threads_upgrade_from_revision(engine):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from dlw.db.base import Base
+    from dlw.schemas.task import TaskCreate
+    from dlw.services.task_service import create_task
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    import dlw.db.models  # noqa: F401
+    from dlw.db.models.storage import StorageBackend
+    from dlw.db.models.tenant import Project, Tenant, User
+    fac = async_sessionmaker(engine, expire_on_commit=False)
+    async with fac() as s:
+        s.add(Tenant(id=1, slug="t", display_name="T"))
+        await s.flush()
+        s.add_all([
+            Project(id=1, tenant_id=1, name="d"),
+            User(id=1, tenant_id=1, oidc_subject="u", email="e",
+                 role="tenant_operator"),
+            StorageBackend(id=1, tenant_id=1, name="s", backend_type="s3",
+                           config_encrypted=b"")])
+        await s.flush()
+        task = await create_task(
+            s, TaskCreate(repo_id="o/r", revision="n" * 40, storage_id=1,
+                          upgrade_from_revision="o" * 40),
+            owner_user_id=1, tenant_id=1, project_id=1,
+            hf_endpoint="https://hf", hf_token=None)
+        assert task.upgrade_from_revision == "o" * 40
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)

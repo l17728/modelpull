@@ -88,6 +88,7 @@ def check_executor_status_domain() -> list[str]:
 VALID_SUBTASK_STATUS = {
     "pending", "assigned", "succeeded", "failed", "cancelled",
     "paused_disk_full", "paused_external",          # W2b2 NEW
+    "inherit",                                      # P3-SP3 NEW
 }
 
 
