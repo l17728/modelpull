@@ -21,6 +21,7 @@ from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.services.quota import record_usage
 from dlw.services.source_blacklist import blacklist_file
+from dlw.services.storage_objects import deref_subtask, record_object
 
 
 async def claim_one_subtask(
@@ -73,7 +74,7 @@ async def claim_one_subtask(
 
     stmt = (
         select(FileSubTask)
-        .where(FileSubTask.status == "pending")
+        .where(FileSubTask.status.in_(("pending", "inherit")))
         .where(~same_host_holds)
         .where(parent_active)           # W2b2 NEW
         .order_by(FileSubTask.created_at)
@@ -207,6 +208,21 @@ async def complete_subtask(
         await blacklist_file(
             session, source_id=sub.source_id, repo_id=parent.repo_id,
             filename=sub.filename, hours=24, reason="sha_mismatch")
+    if (final_status == "succeeded" and sub.s3_key
+            and sub.actual_sha256):
+        await record_object(
+            session, tenant_id=sub.tenant_id, storage_id=parent.storage_id,
+            storage_key=sub.s3_key, sha256=sub.actual_sha256,
+            size=sub.bytes_downloaded or 0, subtask_id=sub.id)
+    elif final_status == "failed" and sub.inherit_from_key:
+        # banner 7f: an inherit copy failed. diff_and_dedup already did
+        # refcount++ + a SubtaskObjectRef — undo it and re-queue the file as
+        # a normal download (next scheduling pass), so refcount can't leak.
+        await deref_subtask(session, sub.id)
+        sub.status = "pending"
+        sub.inherit_from_key = None
+        sub.last_error = error
+        return sub, parent      # do NOT run sibling/parent terminal logic
     siblings = (await session.execute(
         select(FileSubTask).where(FileSubTask.task_id == sub.task_id)
     )).scalars().all()
