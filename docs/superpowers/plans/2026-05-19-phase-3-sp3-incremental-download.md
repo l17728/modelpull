@@ -78,9 +78,49 @@ def test_sp3_taskcreate_upgrade_from_revision_optional():
     t2 = TaskCreate(repo_id="o/r", revision="a" * 40, storage_id=1,
                     upgrade_from_revision="b" * 40)
     assert t2.upgrade_from_revision == "b" * 40
-```
 
-- [ ] **Step 2: Run** `uv run pytest tests/test_config.py::test_sp3_gc_settings_defaults tests/test_config.py::test_sp3_inherit_is_valid_subtask_status tests/test_config.py::test_sp3_taskcreate_upgrade_from_revision_optional -v` → FAIL.
+
+def test_sp3_storageconfig_backend_type_default():
+    from dlw.schemas.storage import StorageConfig
+    c = StorageConfig(bucket="b")
+    assert c.backend_type == "s3" and c.base_path is None
+    c2 = StorageConfig(bucket="b", backend_type="local", base_path="/srv")
+    assert c2.backend_type == "local" and c2.base_path == "/srv"
+
+
+@pytest.mark.slow
+async def test_sp3_create_task_threads_upgrade_from_revision(db_session):
+    """create_task must persist upgrade_from_revision (banner 7e). The
+    autouse _patch_hf_global conftest fixture makes list_repo_tree return
+    2 files so create_task succeeds without an explicit HF mock."""
+    from dlw.db.base import Base
+    from dlw.schemas.task import TaskCreate
+    from dlw.services.task_service import create_task
+    async with db_session.bind.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    from dlw.db.models.tenant import Project, Tenant, User
+    from dlw.db.models.storage import StorageBackend
+    db_session.add(Tenant(id=1, slug="t", display_name="T"))
+    await db_session.flush()
+    db_session.add_all([
+        Project(id=1, tenant_id=1, name="d"),
+        User(id=1, tenant_id=1, oidc_subject="u", email="e",
+             role="tenant_operator"),
+        StorageBackend(id=1, tenant_id=1, name="s", backend_type="s3",
+                       config_encrypted=b"")])
+    await db_session.flush()
+    task = await create_task(
+        db_session,
+        TaskCreate(repo_id="o/r", revision="n" * 40, storage_id=1,
+                   upgrade_from_revision="o" * 40),
+        owner_user_id=1, tenant_id=1, project_id=1,
+        hf_endpoint="https://hf", hf_token=None)
+    assert task.upgrade_from_revision == "o" * 40
+```
+(`pytest` is already imported at the top of `tests/test_config.py`; if not, add `import pytest`. `db_session` is the shared per-test session fixture from `tests/conftest.py`; if its bind isn't directly `.begin()`-able, use the `engine` fixture pattern instead — `async with engine.begin()...` + an `async_sessionmaker` — matching the SP3 DB-fixture convention.)
+
+- [ ] **Step 2: Run** `uv run pytest "tests/test_config.py::test_sp3_gc_settings_defaults" "tests/test_config.py::test_sp3_inherit_is_valid_subtask_status" "tests/test_config.py::test_sp3_taskcreate_upgrade_from_revision_optional" "tests/test_config.py::test_sp3_storageconfig_backend_type_default" "tests/test_config.py::test_sp3_create_task_threads_upgrade_from_revision" -v` → FAIL.
 
 - [ ] **Step 3: Implement**
   - `src/dlw/config.py`: after the Phase 3 SP2 block (last SP2 field `degradation_trigger_threshold`), add:
@@ -105,13 +145,19 @@ VALID_SUBTASK_STATUS = {
 ```python
     inherit_from_key: str | None = Field(default=None, max_length=1024)
 ```
+  - `src/dlw/schemas/storage.py` `StorageConfig`: add (banner 7b — the real class has only bucket/region/endpoint_url/key_prefix; add a backend discriminator + optional local path so the executor inherit branch can pick S3-copy vs hardlink):
+```python
+    backend_type: str = Field(default="s3", max_length=32)
+    base_path: str | None = Field(default=None, max_length=1024)
+```
+  - `src/dlw/services/task_service.py` `create_task`: in the `DownloadTask(...)` constructor (currently `status="pending"` is the last kwarg), add `upgrade_from_revision=body.upgrade_from_revision,` (banner 7e — the column already exists on the model; it is currently never set).
 
-- [ ] **Step 4: Run** `uv run pytest tests/test_config.py -v` (all pass) + `python tools/lint_invariants.py` (exit 0) + `uv run python -m pytest tools/test_lint_invariants.py -q` (pass).
+- [ ] **Step 4: Run** `uv run pytest tests/test_config.py -v` (all pass, incl. the 2 new) + `python tools/lint_invariants.py` (exit 0) + `uv run python -m pytest tools/test_lint_invariants.py -q` (pass).
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src/dlw/config.py tools/lint_invariants.py src/dlw/schemas/task.py src/dlw/schemas/subtask.py tests/test_config.py
-git commit -m "feat(sp3): GC config + inherit status + upgrade_from_revision/inherit_from_key schema"
+git add src/dlw/config.py tools/lint_invariants.py src/dlw/schemas/task.py src/dlw/schemas/subtask.py src/dlw/schemas/storage.py src/dlw/services/task_service.py tests/test_config.py
+git commit -m "feat(sp3): GC config + inherit status + upgrade_from_revision wire + StorageConfig.backend_type"
 ```
 
 ---
@@ -783,23 +829,38 @@ async def test_run_scheduling_tick_inherits_before_planning(factory):
         assert sub.status == "inherit"
         obj = (await s.execute(select(StorageObject))).scalar_one()
         assert obj.refcount == 2
+        t2 = (await s.execute(select(DownloadTask))).scalar_one()
+        # BLOCKER fix (banner 7a): a fully-inherited task must NOT be paused
+        # by plan_task_sources' pinned/no_sha/no_speed gates.
+        assert t2.status != "paused_external"
+        assert t2.status == "downloading"
 ```
-(If the SP2 test module's `factory` fixture seeds storage/tenant such that `storage_id=1` exists, reuse it; otherwise the `StorageObject` row's `storage_id=1` needs no FK to storage_backends — `storage_id` is a plain BigInteger, no FK — so this works without a StorageBackend row.)
+(The SP2 `factory` fixture already seeds Tenant/Project/User/StorageBackend id=1; `StorageObject.storage_id` is a plain `BigInteger` (no FK) so `storage_id=1` works regardless.)
 
-- [ ] **Step 2: Run** `uv run pytest tests/services/test_source_scheduler.py::test_run_scheduling_tick_inherits_before_planning -v` → FAIL (diff not wired).
+- [ ] **Step 2: Run** `uv run pytest tests/services/test_source_scheduler.py::test_run_scheduling_tick_inherits_before_planning -v` → FAIL (diff not wired AND the task gets `paused_external` by the gates).
 
-- [ ] **Step 3: Implement** — in `src/dlw/services/source_scheduler.py` `run_scheduling_tick`, immediately after `task.status = "scheduling"` and BEFORE the per-source probe/`plan_task_sources` call, add:
+- [ ] **Step 3: Implement** — in `src/dlw/services/source_scheduler.py`:
+  (a) `run_scheduling_tick`: immediately after `task.status = "scheduling"` and BEFORE the per-source probe/`plan_task_sources` call, add:
 ```python
         from dlw.services.incremental import diff_and_dedup
         await diff_and_dedup(session, task)
 ```
-Also ensure `plan_task_sources` only assigns sources to still-`pending` subtasks: in `src/dlw/services/source_scheduler.py` `plan_task_sources`, the subtask query is `select(FileSubTask).where(FileSubTask.task_id == task.id)` — change it to also filter `FileSubTask.status == "pending"` so `inherit` subtasks are excluded from `sizes`/LPT/chunk-split:
+  (b) **`plan_task_sources` — relocate the pending-subs load + empty-guard to the TOP, BEFORE the pinned/no_sha256_authority/no_source_speed gates** (banner 7a — these 3 gates currently run before the subtask query at ~`source_scheduler.py:55-71` and would wrongly `paused_external` a fully-inherited task). At the very start of `plan_task_sources` (after the docstring, before the `_strategy_filter`/manifest/`pinned`/`hf_ok`/`candidates` logic), insert:
 ```python
+    # SP3 (banner 7a): only `pending` subtasks need source planning;
+    # `inherit` subs were materialised by diff_and_dedup. A fully-inherited
+    # task has zero pending subs — return early so the pinned / no-sha /
+    # no-speed pause gates below never fire (the task then flows
+    # scheduling -> downloading and its inherit subs complete to succeeded).
     subs = (await session.execute(select(FileSubTask).where(
         FileSubTask.task_id == task.id,
         FileSubTask.status == "pending"))).scalars().all()
+    if not subs:
+        return
 ```
-(If after diff_and_dedup there are zero pending subtasks — fully-inherited task — `plan_task_sources` must not pause/error on empty `sizes`: it computes `candidates`/`combo` over `manifests`; with no pending subs `sizes` is `{}`, `solve_optimal_combo` returns `ranked[:1]`, `assign_files_lpt({}, ...)` returns `{}`, the per-sub loop is empty — no-op, task proceeds to `downloading`. Verify this path doesn't raise; if `plan_task_sources` early-returns `paused_external` on empty/`no_source_speed` when there are NO pending subs, guard it: skip the source-speed gate when `not subs`.)
+  Then DELETE the later, original `subs = (await session.execute(select(FileSubTask).where(FileSubTask.task_id == task.id))).scalars().all()` line (the one feeding `sizes`) so `subs` is the single pending-only list defined at the top; everything downstream (`sizes = {x.filename: ... for x in subs}`, the assign loop) now uses pending-only subs unchanged. (If `subs` is referenced before the original query in current code, just remove the duplicate query and keep the top one — there must be exactly one `subs` binding, the pending-only one at the top.)
+
+- [ ] **Step 3b: Run** `uv run pytest tests/services/test_source_scheduler.py -v` → confirm the new test PASSES (`task.status == "downloading"`, sub `inherit`, refcount 2) AND every existing SP2 `test_source_scheduler` test still passes (the early-return only triggers when there are zero pending subs; SP2 download tasks always have pending subs so their path is unchanged).
 
 - [ ] **Step 4: Run** `uv run pytest tests/services/test_source_scheduler.py -v` → all PASS (the new test + existing SP2 tests still green).
 
@@ -908,13 +969,49 @@ async def test_inherit_complete_does_not_double_count(f):
         await s.commit()
         obj = (await s.execute(select(StorageObject))).scalar_one()
         assert obj.refcount == 1          # NOT 2 — ref already existed
+
+
+async def test_inherit_copy_failure_dereferences_and_repends(f):
+    """banner 7f: a failed inherit copy must undo the diff-time refcount++
+    and re-queue the file as pending (no permanent refcount leak)."""
+    from dlw.db.models.storage_object import SubtaskObjectRef
+    from dlw.services.storage_objects import record_ref_only
+    async with f() as s:
+        t = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                         repo_id="o/r", revision="new", storage_id=1,
+                         path_template="t", status="downloading")
+        s.add(t)
+        await s.flush()
+        tok = uuid.uuid4()
+        sub = FileSubTask(task_id=t.id, tenant_id=1, filename="w",
+                          file_size=10, expected_sha256="a" * 64,
+                          status="assigned", inherit_from_key="old/k",
+                          assignment_token=tok)
+        s.add(sub)
+        await s.flush()
+        sid = sub.id
+        await record_ref_only(s, tenant_id=1, storage_id=1,
+                              storage_key="old/k", sha256="a" * 64,
+                              size=10, subtask_id=sid)   # diff_and_dedup did this
+        await s.commit()
+        sub_done, _ = await complete_subtask(
+            s, sid, final_status="failed", actual_sha256=None,
+            bytes_downloaded=0, error="copy_object failed",
+            assignment_token=tok)
+        await s.commit()
+        assert sub_done.status == "pending"          # re-queued
+        assert sub_done.inherit_from_key is None
+        obj = (await s.execute(select(StorageObject))).scalar_one()
+        assert obj.refcount == 0                     # diff-time bump undone
+        refs = (await s.execute(select(SubtaskObjectRef))).scalars().all()
+        assert refs == []
 ```
 
 - [ ] **Step 2: Run** `uv run pytest tests/services/test_record_object_on_complete.py -v` → FAIL.
 
 - [ ] **Step 3: Implement** — in `src/dlw/services/scheduler.py`:
-  - Add a module-top import `from dlw.services.storage_objects import record_object` (no circular import: storage_objects imports only models).
-  - In `complete_subtask`, the SP2 region is: `parent = await session.get(DownloadTask, sub.task_id, with_for_update=True)` (~line 200-202) then the SP2 `blacklist_file` block (~203-209). Immediately AFTER the blacklist block and BEFORE the `siblings = ...` query (~line 210), add:
+  - Add a module-top import `from dlw.services.storage_objects import deref_subtask, record_object` (no circular import: storage_objects imports only models).
+  - In `complete_subtask`, the SP2 region is: `sub.status = final_status` (~line 186) … `parent = await session.get(DownloadTask, sub.task_id, with_for_update=True)` (~line 200-202) then the SP2 `blacklist_file` block (~203-209). Immediately AFTER the blacklist block and BEFORE the `siblings = ...` query (~line 210), add BOTH:
 ```python
     if (final_status == "succeeded" and sub.s3_key
             and sub.actual_sha256):
@@ -922,14 +1019,24 @@ async def test_inherit_complete_does_not_double_count(f):
             session, tenant_id=sub.tenant_id, storage_id=parent.storage_id,
             storage_key=sub.s3_key, sha256=sub.actual_sha256,
             size=sub.bytes_downloaded or 0, subtask_id=sub.id)
+    elif final_status == "failed" and sub.inherit_from_key:
+        # banner 7f: an inherit copy failed. diff_and_dedup already did
+        # refcount++ + a SubtaskObjectRef — undo it and re-queue the file as
+        # a normal download (next scheduling pass), so refcount can't leak.
+        await deref_subtask(session, sub.id)
+        sub.status = "pending"
+        sub.inherit_from_key = None
+        sub.last_error = error
+        return sub, parent      # do NOT run sibling/parent terminal logic
 ```
-  - Change `claim_one_subtask`'s subtask-status filter (currently `.where(FileSubTask.status == "pending")`, ~line 76) to:
+  (The `return sub, parent` short-circuits the sibling/parent-transition tail so the parent task isn't marked terminal over a subtask we just re-queued. `complete_subtask`'s normal return is `(sub, parent)` — match its return type; verify the exact tuple shape in the function's other returns and mirror it.)
+  - Change `claim_one_subtask`'s subtask-status filter (currently `.where(FileSubTask.status == "pending")`, ~line 75-76) to:
 ```python
         .where(FileSubTask.status.in_(("pending", "inherit")))
 ```
-  (so `inherit` subtasks are claimable for the lightweight copy. `"inherit"` is in `VALID_SUBTASK_STATUS` from Task 1, so the lint scan of scheduler.py is satisfied.)
+  (so `inherit` subtasks are claimable for the lightweight copy. `"inherit"` is in `VALID_SUBTASK_STATUS` from Task 1; this is a `.in_` comparison not a `status=` assignment so `tools/lint_invariants.py` doesn't flag it regardless — confirmed by the pre-review.)
 
-- [ ] **Step 4: Run** `uv run pytest tests/services/test_record_object_on_complete.py -v` → 2 PASS. Then `uv run pytest tests/services/test_scheduler.py -v` (no regression) and `python tools/lint_invariants.py` (exit 0).
+- [ ] **Step 4: Run** `uv run pytest tests/services/test_record_object_on_complete.py -v` → 3 PASS. Then `uv run pytest tests/services/test_scheduler.py -v` (no regression — the failed-inherit branch is gated on `sub.inherit_from_key`, which existing scheduler tests never set) and `python tools/lint_invariants.py` (exit 0).
 
 - [ ] **Step 5: Commit**
 ```bash
@@ -1052,14 +1159,14 @@ async def materialize_inherit(
     return DownloadResult(bytes_written=size, actual_sha256=sha256,
                           s3_key=dst_key)
 ```
-In `src/dlw/executor/runner.py` `_run_one` (around the `Assignment` build / `downloader = self._choose_downloader(...)`): BEFORE choosing the downloader, branch on the inherit marker. After `assignment = Assignment(...)` is built, insert:
+In `src/dlw/executor/runner.py` the dispatch method is **`_execute_subtask`** (NOT `_run_one` — pre-review banner 7c; verified at `runner.py:193`). It builds `assignment = Assignment(...)` (`runner.py:203-213`) then `downloader = self._choose_downloader(assignment.file_size)` (`runner.py:214`). Insert the inherit branch BETWEEN those two (after the `Assignment(...)` build, before `_choose_downloader`):
 ```python
             inherit_key = subtask.get("inherit_from_key")
             if inherit_key:
                 from dlw.executor._io import compose_key
                 from dlw.executor.inherit import materialize_inherit
                 result = await materialize_inherit(
-                    settings=self._settings,
+                    settings=self._s,
                     storage_config=assignment.storage_config,
                     src_key=inherit_key,
                     dst_key=compose_key(assignment),
@@ -1074,15 +1181,20 @@ In `src/dlw/executor/runner.py` `_run_one` (around the `Assignment` build / `dow
                 return
             downloader = self._choose_downloader(assignment.file_size)
 ```
-(Use the runner's existing settings attribute name — verify it's `self._settings` (the ExecutorSettings); if the runner stores it differently, match that. `subtask` is the poll-payload dict already in scope; `sub_id`/`assignment_token` already defined above.)
-In `src/dlw/api/executors.py` the poll endpoint builds the subtask payload from a `SubTaskRead`-shaped object — `SubTaskRead` already has `inherit_from_key` (Task 1), so `model_validate(sub)` includes it automatically. Verify the poll response serializes the full `SubTaskRead` (it does — it returns the assignment with the subtask); no code change needed beyond confirming `inherit_from_key` rides along.
+(**Verified anchors (banner 7c):** the runner's settings attribute is `self._s` (an `ExecutorSettings`; `runner.py:47`), NOT `self._settings`. `subtask` is the poll-payload dict in scope in `_execute_subtask`; `sub_id`/`assignment_token` are defined above the `Assignment(...)` build. `compose_key(assignment)` is correct (`_io.py:54`). `self._client.report(...)` accepts exactly those kwargs (`executor/client.py:184-194`).)
+
+In `src/dlw/api/executors.py` the poll endpoint builds the assignment's storage-config dict (`cfg_dict`) from the `StorageBackend` (around `executors.py:160-167`, where it does `cfg_dict.setdefault("bucket", ...)` / `cfg_dict.setdefault("region", ...)`). **Add** (banner 7b — `materialize_inherit` needs to know S3 vs local; `StorageBackend.backend_type` exists in the DB but is never threaded):
+```python
+        cfg_dict.setdefault("backend_type", storage.backend_type)
+```
+(next to the existing `cfg_dict.setdefault(...)` calls, before `StorageConfig(**cfg_dict)` — so the executor's `assignment.storage_config.backend_type` reflects the real backend; `StorageConfig.backend_type` was added in Task 1 with default `"s3"`). `SubTaskRead` already has `inherit_from_key` (Task 1) so `model_validate(sub)` rides it along automatically — no other poll change.
 
 - [ ] **Step 4: Run** `uv run pytest tests/executor/test_inherit.py tests/executor/test_runner.py -v` → PASS (runner tests still green; the inherit branch only triggers when `inherit_from_key` present).
 
 - [ ] **Step 5: Commit**
 ```bash
-git add src/dlw/executor/inherit.py src/dlw/executor/runner.py tests/executor/test_inherit.py
-git commit -m "feat(sp3): executor inherit materialization (S3 copy / hardlink) + runner dispatch"
+git add src/dlw/executor/inherit.py src/dlw/executor/runner.py src/dlw/api/executors.py tests/executor/test_inherit.py
+git commit -m "feat(sp3): executor inherit materialization (S3 copy / hardlink) + runner dispatch + poll backend_type"
 ```
 
 ---
@@ -1280,6 +1392,7 @@ async def test_lifespan_gc_loop_present(engine, tmp_path, monkeypatch):
     gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _gc_loop() -> None:
+        from dlw.services.audit import write_audit
         from dlw.services.storage_objects import gc_orphans
         while True:
             try:
@@ -1287,14 +1400,22 @@ async def test_lifespan_gc_loop_present(engine, tmp_path, monkeypatch):
                 async with factory() as session:
                     n = await gc_orphans(
                         session, grace_seconds=_gs().gc_grace_seconds)
-                    await session.commit()
                     if n:
+                        # banner 7d: GC reclaim is an audited event.
+                        await write_audit(
+                            session, action="storage.gc",
+                            resource_type="storage_objects",
+                            resource_id=None, outcome="success",
+                            tenant_id=None, actor_user_id=None,
+                            payload={"reclaimed": n})
                         logger.info("gc reclaimed %d storage_objects", n)
+                    await session.commit()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("gc tick failed; retrying")
 ```
+(`write_audit(session, *, action, resource_type, resource_id, outcome, tenant_id, actor_user_id, payload=None)` is the SP1 helper in `src/dlw/services/audit.py` — system-scope events use `tenant_id=None`/`actor_user_id=None`, like SP1's other system audits.)
 (Use the `_gs` alias — `get_settings` is not in lifespan scope.) In `_on_active`, next to the existing `rebalance_task_holder["t"] = ...`, add:
 ```python
         gc_task_holder["t"] = asyncio.create_task(_gc_loop())
@@ -1415,7 +1536,7 @@ npx --yes @apidevtools/swagger-cli validate api/openapi.yaml
 ```
 Keep 2-space indent / no trailing whitespace (yamllint scans `api/`).
 
-- [ ] **Step 3: Create `docs/operator/incremental-download.md`** (~90 lines): how `upgrade_from_revision` works (sha-diff vs prior storage_objects, unified with cross-task dedup); the `storage_objects` refcount model + INVARIANT 14 (one physical copy per tenant+backend+content); inherit materialization (S3 server-side `copy_object` / local `os.link`, no re-download); `DELETE /api/v1/tasks/{id}` semantics (terminal-only → 409; derefs; does NOT delete bytes); the leader-gated GC (`DLW_GC_INTERVAL_SECONDS`/`DLW_GC_GRACE_SECONDS`; deletes refcount=0 DB rows past grace, audited `storage.gc`); and the deferred-to-Phase-4 items (physical S3/fs byte reclamation; quota/LRU eviction). Cross-ref `docs/v2.0/06-platform-and-ecosystem.md` §2/§3 and `INVARIANTS` 14.
+- [ ] **Step 3: Create `docs/operator/incremental-download.md`** (~90 lines): how `upgrade_from_revision` works (sha-diff vs prior storage_objects, unified with cross-task dedup); the `storage_objects` refcount model + INVARIANT 14 (one physical copy per tenant+backend+content); inherit materialization (S3 server-side `copy_object` / local `os.link`, no re-download); `DELETE /api/v1/tasks/{id}` semantics (terminal-only → 409; derefs; does NOT delete bytes); the leader-gated GC (`DLW_GC_INTERVAL_SECONDS`/`DLW_GC_GRACE_SECONDS`; deletes refcount=0 DB rows past grace, audited `storage.gc`); and the deferred-to-Phase-4 items (physical S3/fs byte reclamation; quota/LRU eviction). **Include this explicit sentence (banner 6a):** "An inherited file's `storage_objects` row tracks the *original* (source) key; the executor's server-side copy creates new-revision-key bytes that are NOT tracked by any `storage_objects` row — these are orphaned bytes reclaimed in Phase 4 (physical GC); SP3's GC only frees refcount=0 DB rows." Also note the inherit-copy-failure self-heal (banner 7f: a failed inherit copy is dereferenced and re-queued as a normal download). Cross-ref `docs/v2.0/06-platform-and-ecosystem.md` §2/§3 and `INVARIANTS` 14.
 
 - [ ] **Step 4: Full suite + all real CI gates**:
 ```
@@ -1453,13 +1574,15 @@ EOF
 
 ---
 
-## Self-Review (completed during planning + to be re-checked by 2 pre-execution reviewers)
+## Self-Review (completed during planning + revised after 2-reviewer pre-execution review)
+
+**Pre-execution review applied (2026-05-19):** Two opus reviewers found 1 BLOCKER + 5 IMPORTANT, all fixed inline before implementation (spec banner §7 + plan tasks): (1 BLOCKER) `plan_task_sources` pinned/no-sha/no-speed gates strand a fully-inherited task → T6 relocates a pending-subs `if not subs: return` to the TOP of `plan_task_sources` before all gates + the T6 test now asserts `status=="downloading"`; (2) `StorageConfig` had no `backend_type` (local-hardlink branch dead) → T1 adds `backend_type`/`base_path` to `StorageConfig`, T8 threads `StorageBackend.backend_type` through the poll `cfg_dict`; (3) runner anchor was wrong → T8 uses `_execute_subtask`/`self._s` (verified `runner.py:47/193/214`); (4) spec-required `storage.gc` audit was missing → T10 `_gc_loop` calls `write_audit(action="storage.gc",...)`; (5) `create_task` never threaded `upgrade_from_revision` → T1 adds the ctor wire + a test; (6) inherit-then-fail refcount leak → T7 derefs + re-queues the sub to `pending` (banner 7f) + a test. Sound areas reviewers confirmed: record_object concurrency, the `_ref_exists` idempotency guard, claim→assigned→complete machine, DELETE FK-cascade, lint sufficiency.
 
 **Spec coverage:** config/inherit-status/schema fields → T1; models+migration+INVARIANT-14 unique → T2; storage_objects svc + inherit idempotency → T3; deref/gc behavior → T4; diff_and_dedup → T5; scheduling-loop wiring + planner-skips-inherit → T6; record_object on complete + claim-includes-inherit → T7; executor inherit materialization + runner dispatch + poll payload → T8; DELETE route → T9; leader-gated GC loop → T10; E2E ≥90% → T11; OpenAPI+operator doc+CI+PR → T12. Deferred items (physical byte GC, quota/LRU, BLAKE3, CLI) are out per spec banner/§1.3.
 
-**Placeholder scan:** every code step is complete. The two bounded plan-time verifications are explicit, not placeholders: T6 ("verify `plan_task_sources` doesn't pause on zero pending subs; guard if it does" — names the exact condition + fix), T8 ("verify the runner's settings attr name; match it" — names the exact symbol). `<rev>` = alembic-generated hash.
+**Placeholder scan:** every code step is complete; the previously-hand-waved T6 guard and T8 runner anchor are now concrete (pre-review fixes above). `<rev>` = alembic-generated hash.
 
-**Type/name consistency:** `record_object`/`record_ref_only`/`deref_subtask`/`gc_orphans` signatures identical T3↔T4↔T5↔T7↔T10. `StorageObject`/`SubtaskObjectRef` columns consistent T2↔T3↔T5↔T9↔T11. `diff_and_dedup(session, task)` consistent T5↔T6. `materialize_inherit(*, settings, storage_config, src_key, dst_key, sha256, size)` consistent T8↔(runner call). `DownloadResult(bytes_written, actual_sha256, s3_key)` matches existing `executor/types.py`. `inherit_from_key` consistent across schema (T1), model (T2), diff (T5), runner (T8), DELETE-unaffected. `"inherit"` status: added to lint set T1, set by T5, claimed by T7, materialized by T8. The inherit double-count guard (`_ref_exists` ⇒ early return) is defined in T3 and exercised by T3+T7 tests — the load-bearing correctness point.
+**Type/name consistency:** `record_object`/`record_ref_only`/`deref_subtask`/`gc_orphans` signatures identical T3↔T4↔T5↔T7(now imports `deref_subtask` + `record_object`)↔T10. `StorageObject`/`SubtaskObjectRef` columns consistent T2↔T3↔T5↔T9↔T11. `diff_and_dedup(session, task)` consistent T5↔T6. `materialize_inherit(*, settings, storage_config, src_key, dst_key, sha256, size)` consistent T8↔(runner call). `DownloadResult(bytes_written, actual_sha256, s3_key)` matches existing `executor/types.py`. `inherit_from_key` consistent across schema (T1), model (T2), diff (T5), runner (T8), DELETE-unaffected. `"inherit"` status: added to lint set T1, set by T5, claimed by T7, materialized by T8. The inherit double-count guard (`_ref_exists` ⇒ early return) is defined in T3 and exercised by T3+T7 tests — the load-bearing correctness point.
 
 ## References
 - Spec: `docs/superpowers/specs/2026-05-19-phase-3-sp3-incremental-download-design.md`
