@@ -27,3 +27,24 @@ export function formatDuration(seconds: number | null | undefined): string {
   if (m > 0) return `${m}m ${sec}s`
   return `${sec}s`
 }
+
+export function formatDateTime(iso: string | null | undefined): string {
+  if (iso === null || iso === undefined || iso === '') return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString()
+}
+
+export function formatTimeAgo(iso: string | null | undefined): string {
+  if (iso === null || iso === undefined || iso === '') return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const secs = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000))
+  if (secs < 60) return `${secs}s ago`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+}
