@@ -334,6 +334,37 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/DownloadTask'}
 
+    delete:
+      tags: [tasks]
+      summary: Delete a terminal task (dereferences its storage objects)
+      description: >
+        Terminal-only (succeeded/failed/cancelled → else 409). Tenant-scoped
+        and RBAC-gated. Dereferences each subtask's storage_objects row
+        (refcount--); physical bytes are NOT deleted here — refcount=0 rows
+        are reclaimed by the leader-gated GC past the grace window.
+      operationId: deleteTask
+      responses:
+        '204':
+          description: Task deleted; referenced storage_objects dereferenced
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: RBAC denied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
+        '404':
+          description: Task not found or cross-tenant ID (existence not leaked)
+        '409':
+          description: Task is not terminal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code]
+                properties:
+                  code: {type: string, enum: [TASK_NOT_TERMINAL]}
+                  status: {type: string}
+
   /tasks/{taskId}/cancel:
     parameters:
       - $ref: '#/components/parameters/TaskId'
@@ -1651,6 +1682,7 @@ components:
       type: string
       enum:
         - pending
+        - inherit
         - assigned
         - downloading
         - verifying_local
@@ -1724,6 +1756,7 @@ components:
         expected_sha256: {type: string, pattern: '^[0-9a-f]{64}$', nullable: true}
         actual_sha256: {type: string, pattern: '^[0-9a-f]{64}$', nullable: true}
         status: {$ref: '#/components/schemas/SubtaskStatus'}
+        inherit_from_key: {type: string, nullable: true, maxLength: 1024}
         executor_id: {type: string, nullable: true}
         executor_epoch: {type: integer, format: int64, nullable: true}
         assignment_token: {type: string, format: uuid, nullable: true}
