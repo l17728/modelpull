@@ -60,9 +60,11 @@ async def client(ephemeral_ca):
 
 
 async def _seed_executors(engine):
+    from sqlalchemy import text
     from dlw.db.models.executor import Executor
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
+        await s.execute(text("DELETE FROM executors"))
         s.add(Executor(id="t1-w1", host_id="host-a", cert_fingerprint="fp1",
                        status="healthy", epoch=1, health_score=95,
                        tenant_id=1, nic_speed_gbps=10,
