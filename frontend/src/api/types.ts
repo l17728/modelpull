@@ -142,3 +142,47 @@ export interface TaskEventsResponse {
   items: TaskEventItem[]
   next_cursor: string | null
 }
+
+export interface ExecutorRead {
+  id: string
+  status: string
+  health_score: number
+  epoch: number
+  host_id: string | null
+  tenant_id: number | null
+  last_heartbeat_at: string | null
+  nic_speed_gbps: number | null
+  disk_free_gb: number | null
+  disk_total_gb: number | null
+  created_at: string | null
+}
+
+export interface ExecutorListResponse {
+  items: ExecutorRead[]
+}
+
+export interface AuditEntry {
+  id: number
+  occurred_at: string
+  tenant_id: number | null
+  actor_user_id: number | null
+  actor_ip: string
+  action: string
+  resource_type: string
+  resource_id: string | null
+  outcome: string
+  payload: Record<string, unknown>
+  trace_id: string
+  prev_hash: string | null
+  self_hash: string
+}
+
+export interface AuditSearchResponse {
+  items: AuditEntry[]
+  next_cursor: string | null
+}
+
+export interface HealthActive {
+  status: string
+  controller_state: string
+}
