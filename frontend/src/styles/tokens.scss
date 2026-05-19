@@ -1,0 +1,23 @@
+:root {
+  --dlw-space-1: 4px;  --dlw-space-2: 8px;  --dlw-space-3: 16px;
+  --dlw-space-4: 24px; --dlw-space-5: 32px;
+  --dlw-radius: 8px;
+  --dlw-bg: #f5f7fa;          --dlw-surface: #ffffff;
+  --dlw-text: #303133;        --dlw-text-soft: #909399;
+  --dlw-border: #ebeef5;
+  --dlw-status-pending: #909399;  --dlw-status-queued: #909399;
+  --dlw-status-scheduling: #e6a23c; --dlw-status-downloading: #409eff;
+  --dlw-status-assigned: #409eff;  --dlw-status-in_progress: #409eff;
+  --dlw-status-succeeded: #67c23a; --dlw-status-failed: #f56c6c;
+  --dlw-status-cancelled: #909399;
+}
+:root.dark {
+  --dlw-bg: #141414;          --dlw-surface: #1d1e1f;
+  --dlw-text: #e5eaf3;        --dlw-text-soft: #8d9095;
+  --dlw-border: #363637;
+  --dlw-status-pending: #6b6d71;  --dlw-status-queued: #6b6d71;
+  --dlw-status-scheduling: #b88230; --dlw-status-downloading: #409eff;
+  --dlw-status-assigned: #409eff;  --dlw-status-in_progress: #409eff;
+  --dlw-status-succeeded: #529b2e; --dlw-status-failed: #c45656;
+  --dlw-status-cancelled: #6b6d71;
+}
