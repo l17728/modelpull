@@ -33,7 +33,22 @@
     "polling": "Live refreshing…", "completed": "Stopped (terminal)",
     "back": "Back to list", "notFound": "Task not found or deleted",
     "subtaskColumns": { "filename": "File", "size": "Size",
-      "sha256": "SHA256", "status": "Status" }
+      "sha256": "SHA256", "status": "Status" },
+    "detail": {
+      "tabFiles": "Files & chunks", "tabSources": "Sources",
+      "tabExecutors": "Executors", "tabEvents": "Events",
+      "progress": "Progress", "speedNow": "Current", "speedAvg": "Average",
+      "eta": "ETA", "active": "Active", "health": "Health",
+      "unknown": "unknown", "noEvents": "No events recorded",
+      "loadOlder": "Load older", "noSources": "No source allocation yet",
+      "noExecutors": "No executors participating yet",
+      "noChunks": "No files yet", "colFile": "File", "colSize": "Size",
+      "colStatus": "Status", "colChunks": "Chunks", "colProgress": "Progress",
+      "cancel": "Cancel task", "delete": "Delete task",
+      "cancelConfirm": "Cancel this task?",
+      "deleteConfirm": "Delete this terminal task?",
+      "cancelled": "Cancellation requested", "deleted": "Deleted"
+    }
   },
   "create": {
     "heading": "Create download task", "repo": "Repo (org/model)",

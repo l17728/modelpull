@@ -529,6 +529,34 @@ paths:
                     items: {$ref: '#/components/schemas/TaskEvent'}
                   next_cursor: {type: string, nullable: true}
 
+  /tasks/{taskId}/subtask-chunks:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Per-file chunk segments (download-manager visualization)
+      operationId: getSubtaskChunks
+      responses:
+        '200':
+          description: Subtask chunk report
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SubtaskChunkReport'}
+
+  /tasks/{taskId}/participating-executors:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Executors participating in this task (swimlanes)
+      operationId: getParticipatingExecutors
+      responses:
+        '200':
+          description: Participating executors
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ParticipatingExecutors'}
+
   # ========== Models ==========
   /models/search:
     get:
@@ -1866,6 +1894,55 @@ components:
         details:
           type: object
           additionalProperties: true
+
+    SubtaskChunkReport:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [subtask_id, filename, status, bytes_downloaded, is_chunked, chunks_completed, chunks]
+            properties:
+              subtask_id: {type: string, format: uuid}
+              filename: {type: string}
+              file_size: {type: integer, format: int64, nullable: true}
+              status: {type: string}
+              bytes_downloaded: {type: integer, format: int64}
+              is_chunked: {type: boolean}
+              chunks_total: {type: integer, nullable: true}
+              chunks_completed: {type: integer}
+              chunks:
+                type: array
+                items:
+                  type: object
+                  required: [chunk_index, byte_start, byte_end, source_id, status, bytes_done]
+                  properties:
+                    chunk_index: {type: integer}
+                    byte_start: {type: integer, format: int64}
+                    byte_end: {type: integer, format: int64}
+                    source_id: {type: string}
+                    status: {type: string}
+                    bytes_done: {type: integer, format: int64}
+
+    ParticipatingExecutors:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [executor_id, assigned_subtasks, active_subtasks, bytes_downloaded]
+            properties:
+              executor_id: {type: string}
+              executor_status: {type: string, nullable: true}
+              health_score: {type: integer, nullable: true}
+              last_heartbeat_at: {type: string, format: date-time, nullable: true}
+              assigned_subtasks: {type: integer}
+              active_subtasks: {type: integer}
+              bytes_downloaded: {type: integer, format: int64}
 
     # ===== Models =====
     ModelSummary:

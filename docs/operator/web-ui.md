@@ -84,3 +84,25 @@ chip is read-only (no tenant switcher); list filtering is client-side
 (no server-side filter endpoint yet).
 
 Cross-ref: `docs/getting-started.md`, `docs/operator/cli-sdk.md`.
+
+## UI-SP2 — Download-manager Task Detail
+
+`/tasks/:id` is a full download-accelerator view backed by four additive
+read-only endpoints (zero migration):
+
+- `GET /api/v1/tasks/{id}/subtask-chunks` — per-file chunk segments
+- `GET /api/v1/tasks/{id}/source-allocation` — per-source contribution + chunk routing
+- `GET /api/v1/tasks/{id}/participating-executors` — executor swimlanes
+- `GET /api/v1/tasks/{id}/events` — audit-derived event log (cursor-paginated)
+
+The page has a header (basic info + aggregate progress ring + client-derived
+speed/ETA + cancel/delete) and four tabs (Files & chunks, Sources, Executors,
+Events). All polling flows through the single `useLiveResource` seam; only the
+active tab polls (others paused via the `enabled` option).
+
+Known limitations (intentional, deferred): speed/ETA are derived client-side
+from successive byte-count polls (no backend speed source); retry/pause/upgrade
+actions are not exposed (no endpoints); the file table uses a height-capped
+`el-table` (true `el-table-v2` windowing is a documented follow-up); the event
+log reads existing `audit_log` rows only; real-time push (SSE/WS) arrives in
+UI-SP5 with no view changes.

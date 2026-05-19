@@ -35,7 +35,22 @@
     "polling": "实时刷新中…", "completed": "已停止刷新（终态）",
     "back": "返回列表", "notFound": "任务不存在或已删除",
     "subtaskColumns": { "filename": "文件名", "size": "大小",
-      "sha256": "SHA256", "status": "状态" }
+      "sha256": "SHA256", "status": "状态" },
+    "detail": {
+      "tabFiles": "文件与分块", "tabSources": "源分配",
+      "tabExecutors": "执行节点", "tabEvents": "事件",
+      "progress": "进度", "speedNow": "当前", "speedAvg": "平均",
+      "eta": "预计剩余", "active": "活跃", "health": "健康分",
+      "unknown": "未知", "noEvents": "暂无事件记录",
+      "loadOlder": "加载更早", "noSources": "暂无源分配",
+      "noExecutors": "暂无执行节点参与",
+      "noChunks": "暂无文件", "colFile": "文件", "colSize": "大小",
+      "colStatus": "状态", "colChunks": "分块", "colProgress": "进度",
+      "cancel": "取消任务", "delete": "删除任务",
+      "cancelConfirm": "确认取消该任务？",
+      "deleteConfirm": "确认删除该终态任务？",
+      "cancelled": "已请求取消", "deleted": "已删除"
+    }
   },
   "create": {
     "heading": "新建下载任务", "repo": "仓库 (org/model)",
