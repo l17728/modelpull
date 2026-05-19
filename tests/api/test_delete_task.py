@@ -67,6 +67,8 @@ async def app_client(ephemeral_ca, engine):
     async with AsyncClient(transport=ASGITransport(app=app),
                            base_url="http://test") as c:
         yield c, fac, ids
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
 
 
 def _h(tid=1):
