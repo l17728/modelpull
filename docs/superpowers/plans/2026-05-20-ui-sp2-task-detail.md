@@ -6,7 +6,7 @@
 
 **Architecture:** Backend = 1 new schemas module + 1 new services module + 4 GET routes appended to `src/dlw/api/tasks.py` (the exact proven cancel-pattern tenant gate) + `api/openapi.yaml` (implement the 2 already-declared paths to match their schemas, add 2 new paths/schemas). Frontend = additive `enabled` option on the single `useLiveResource` seam, 4 live composables + a client-derived rate composable, 6 inline-SVG/Element-Plus visual components, a rebuilt `TaskDetail.vue` with `el-tabs` + per-pane `DataBoundary` + virtualized `el-table-v2` chunk table. Zero Alembic migration (all columns already exist).
 
-**Tech Stack:** FastAPI · SQLAlchemy 2 async · asyncpg · Pydantic v2 · pytest · OpenAPI 3.1 (spectral + swagger-cli) · Vue 3.5 `<script setup>` TS strict · Pinia · @tanstack/vue-query v5.59 · axios · Element Plus 2.8.4 (incl. `el-table-v2`) · vue-i18n 9 · Vitest 2.1 + @vue/test-utils + happy-dom · pnpm.
+**Tech Stack:** FastAPI · SQLAlchemy 2 async · asyncpg · Pydantic v2 · pytest · OpenAPI 3.1 (spectral + swagger-cli) · Vue 3.5 `<script setup>` TS strict · Pinia · `@tanstack/vue-query` `^5.59` (lock-resolved 5.100.x — `enabled` accepts `MaybeRefOrGetter<boolean|undefined>`; behavior verified equivalent) · axios · Element Plus `^2.8.4` (lock-resolved 2.13.x) · vue-i18n 9 · Vitest 2.1 + @vue/test-utils + happy-dom · pnpm. (Caret deps — assert no exact minor.)
 
 ---
 
@@ -439,7 +439,7 @@ import base64
 import uuid
 from datetime import datetime
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.audit import AuditLog
@@ -919,12 +919,15 @@ async def events_for_task(
         select(FileSubTask.id).where(
             FileSubTask.task_id == task_id,
             FileSubTask.tenant_id == tenant_id))).scalars().all()
+    sub_clause = (
+        and_(AuditLog.resource_type == "subtask",
+             AuditLog.resource_id.in_([str(x) for x in sub_ids]))
+        if sub_ids else false()
+    )
     scope = or_(
         and_(AuditLog.resource_type == "task",
              AuditLog.resource_id == str(task_id)),
-        and_(AuditLog.resource_type == "subtask",
-             AuditLog.resource_id.in_([str(x) for x in sub_ids]))
-        if sub_ids else and_(False),
+        sub_clause,
     )
     stmt = (select(AuditLog)
             .where(AuditLog.tenant_id == tenant_id, scope)
@@ -2580,37 +2583,59 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import { createI18n } from 'vue-i18n'
-import { ref } from 'vue'
 import en from '@/locale/en-US.json'
 
+// Pre-review BLOCKER fix: the page relies on Vue template ref auto-unwrap
+// (`v-if="data"`, `!data`), so the mocked `useTaskDetail().data` MUST be a
+// real ref — a plain `{ value }` object never unwraps. `vi.hoisted` holders
+// must stay plain (no `ref()` — TDZ above imports); each `vi.mock` factory
+// is self-contained and async-imports `vue` (factory runs lazily, after the
+// `vue` import is resolved), creating real refs.
 const { detailData } = vi.hoisted(() => ({
   detailData: { value: null as unknown },
 }))
-vi.mock('@/composables/useTaskDetail', () => ({
-  useTaskDetail: () => ({
-    data: detailData, isLoading: ref(false), isError: ref(false),
-    error: ref(null),
-  }),
+const { mutes } = vi.hoisted(() => ({
+  mutes: { cancel: { mutate: vi.fn() }, remove: { mutate: vi.fn() } },
 }))
-const live = () => ({ data: ref(null), isLoading: ref(false),
-  isError: ref(false), error: ref(null) })
-vi.mock('@/composables/useSubtaskChunks', () => ({
-  useSubtaskChunks: live,
-}))
-vi.mock('@/composables/useSourceAllocation', () => ({
-  useSourceAllocation: live,
-}))
-vi.mock('@/composables/useParticipatingExecutors', () => ({
-  useParticipatingExecutors: live,
-}))
-vi.mock('@/composables/useTaskEvents', () => ({
-  useTaskEvents: live, fetchOlderEvents: vi.fn(),
-}))
-const { cancelMut, removeMut } = vi.hoisted(() => ({
-  cancelMut: { mutate: vi.fn() }, removeMut: { mutate: vi.fn() },
-}))
+
+vi.mock('@/composables/useTaskDetail', async () => {
+  const { ref } = await import('vue')
+  return {
+    useTaskDetail: () => ({
+      data: ref(detailData.value), isLoading: ref(false),
+      isError: ref(false), error: ref(null),
+    }),
+  }
+})
+vi.mock('@/composables/useSubtaskChunks', async () => {
+  const { ref } = await import('vue')
+  return { useSubtaskChunks: () => ({
+    data: ref(null), isLoading: ref(false),
+    isError: ref(false), error: ref(null) }) }
+})
+vi.mock('@/composables/useSourceAllocation', async () => {
+  const { ref } = await import('vue')
+  return { useSourceAllocation: () => ({
+    data: ref(null), isLoading: ref(false),
+    isError: ref(false), error: ref(null) }) }
+})
+vi.mock('@/composables/useParticipatingExecutors', async () => {
+  const { ref } = await import('vue')
+  return { useParticipatingExecutors: () => ({
+    data: ref(null), isLoading: ref(false),
+    isError: ref(false), error: ref(null) }) }
+})
+vi.mock('@/composables/useTaskEvents', async () => {
+  const { ref } = await import('vue')
+  return {
+    useTaskEvents: () => ({
+      data: ref(null), isLoading: ref(false),
+      isError: ref(false), error: ref(null) }),
+    fetchOlderEvents: vi.fn(),
+  }
+})
 vi.mock('@/composables/useTaskMutations', () => ({
-  useTaskMutations: () => ({ cancel: cancelMut, remove: removeMut }),
+  useTaskMutations: () => mutes,
   canCancel: (s: string) => s === 'downloading',
   canDelete: (s: string) => s === 'succeeded',
 }))
