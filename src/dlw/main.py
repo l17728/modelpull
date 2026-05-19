@@ -149,6 +149,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception:
                 logger.exception("rebalance tick failed; retrying")
 
+    gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+
+    async def _gc_loop() -> None:
+        from dlw.services.audit import write_audit
+        from dlw.services.storage_objects import gc_orphans
+        while True:
+            try:
+                await asyncio.sleep(_gs().gc_interval_seconds)
+                async with factory() as session:
+                    n = await gc_orphans(
+                        session, grace_seconds=_gs().gc_grace_seconds)
+                    if n:
+                        # banner 7d: GC reclaim is an audited event.
+                        await write_audit(
+                            session, action="storage.gc",
+                            resource_type="storage_objects",
+                            resource_id=None, outcome="success",
+                            tenant_id=None, actor_user_id=None,
+                            payload={"reclaimed": n})
+                        logger.info("gc reclaimed %d storage_objects", n)
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("gc tick failed; retrying")
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -163,6 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         quota_task_holder["t"] = asyncio.create_task(_quota_loop())
         sched_task_holder["t"] = asyncio.create_task(_scheduling_loop())
         rebalance_task_holder["t"] = asyncio.create_task(_rebalance_loop())
+        gc_task_holder["t"] = asyncio.create_task(_gc_loop())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -197,6 +224,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             rebalance_task_holder["t"] = None
+        gt = gc_task_holder["t"]
+        if gt is not None:
+            gt.cancel()
+            try:
+                await asyncio.wait_for(gt, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            gc_task_holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,

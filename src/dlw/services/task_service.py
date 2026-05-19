@@ -50,6 +50,7 @@ async def create_task(
         storage_id=body.storage_id,
         path_template=body.path_template,
         priority=body.priority,
+        upgrade_from_revision=body.upgrade_from_revision,
         status="pending",
     )
     session.add(task)
@@ -86,6 +87,7 @@ async def cancel_task(session: AsyncSession, task_id: uuid.UUID) -> DownloadTask
       ValueError: task already in terminal state (succeeded/failed/cancelled)
     """
     from datetime import UTC, datetime
+
     from sqlalchemy import update
 
     task = await session.get(DownloadTask, task_id, with_for_update=True)

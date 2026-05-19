@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +18,7 @@ class SubTaskRead(BaseModel):
     expected_sha256: str | None
     status: str
     s3_key: str | None = Field(default=None, max_length=1024)
+    inherit_from_key: str | None = Field(default=None, max_length=1024)
 
 
 class SubTaskReport(BaseModel):

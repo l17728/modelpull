@@ -164,6 +164,7 @@ async def post_poll(
         cfg_dict = {}
     cfg_dict.setdefault("bucket", storage.name)
     cfg_dict.setdefault("region", storage.region or "us-east-1")
+    cfg_dict.setdefault("backend_type", storage.backend_type)
     storage_config = StorageConfig(**cfg_dict)
 
     sub_read = SubTaskRead.model_validate(sub)

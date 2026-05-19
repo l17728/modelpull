@@ -211,6 +211,24 @@ class ExecutorRunner:
                 expected_sha256=subtask.get("expected_sha256"),
                 storage_config=StorageConfig(**storage_config),
             )
+            inherit_key = subtask.get("inherit_from_key")
+            if inherit_key:
+                from dlw.executor._io import compose_key
+                from dlw.executor.inherit import materialize_inherit
+                result = await materialize_inherit(
+                    settings=self._s,
+                    storage_config=assignment.storage_config,
+                    src_key=inherit_key,
+                    dst_key=compose_key(assignment),
+                    sha256=assignment.expected_sha256 or "",
+                    size=assignment.file_size or 0)
+                await self._client.report(
+                    subtask_id=sub_id, status="succeeded",
+                    assignment_token=assignment_token,
+                    actual_sha256=result.actual_sha256,
+                    bytes_downloaded=result.bytes_written,
+                    s3_key=result.s3_key)
+                return
             downloader = self._choose_downloader(assignment.file_size)
             try:
                 result = await downloader.download(assignment=assignment)

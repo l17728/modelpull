@@ -6,6 +6,7 @@ from dlw.db.models.executor import Executor
 from dlw.db.models.executor_status_history import ExecutorStatusHistory
 from dlw.db.models.source import SourceBlacklist, SourceSpeedSample, SubtaskChunk
 from dlw.db.models.storage import StorageBackend
+from dlw.db.models.storage_object import StorageObject, SubtaskObjectRef
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.db.models.tenant import Project, Tenant, User
 from dlw.db.models.usage import QuotaSnapshot, UsageRecord
@@ -13,5 +14,6 @@ from dlw.db.models.usage import QuotaSnapshot, UsageRecord
 __all__ = [
     "AuditLog", "CasbinRule", "DownloadTask", "Executor", "ExecutorStatusHistory",
     "FileSubTask", "Project", "QuotaSnapshot", "SourceBlacklist", "SourceSpeedSample",
-    "StorageBackend", "SubtaskChunk", "Tenant", "UsageRecord", "User",
+    "StorageBackend", "StorageObject", "SubtaskChunk", "SubtaskObjectRef",
+    "Tenant", "UsageRecord", "User",
 ]
