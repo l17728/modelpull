@@ -86,3 +86,6 @@ _site/
 charts/
 *.tgz
 .playwright-mcp/
+
+# local tooling (minio smoke-test binary) — not committed
+.tools/
