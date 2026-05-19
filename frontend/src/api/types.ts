@@ -44,3 +44,32 @@ export const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
   'failed',
   'cancelled',
 ])
+
+export interface Principal {
+  userId: number
+  tenantId: number
+  role: string
+  projectIds: number[]
+  isServiceToken: boolean
+}
+
+export interface QuotaCurrent {
+  tenant_id: number
+  bytes_used_month: number
+  bytes_quota_month: number
+  storage_gb_used: number
+  storage_gb_quota: number
+  concurrent_tasks: number
+  concurrent_quota: number
+}
+
+export interface TaskCreateBody {
+  repo_id: string
+  revision: string
+  storage_id: number
+  priority?: number
+  source_strategy?: string
+  source_blacklist?: string[]
+  trust_non_hf_sha256?: boolean
+  upgrade_from_revision?: string
+}
