@@ -146,3 +146,59 @@ async def executors_for_task(
             bytes_downloaded=a["bytes"],
         ))
     return out
+
+
+def _encode_cursor(occurred_at: datetime, row_id: int) -> str:
+    raw = f"{occurred_at.isoformat()}|{row_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, int]:
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    ts_str, id_str = raw.rsplit("|", 1)
+    return datetime.fromisoformat(ts_str), int(id_str)
+
+
+async def events_for_task(
+    session: AsyncSession, task_id: uuid.UUID, tenant_id: int,
+    limit: int, cursor: str | None,
+) -> tuple[list[TaskEvent], str | None]:
+    sub_ids = (await session.execute(
+        select(FileSubTask.id).where(
+            FileSubTask.task_id == task_id,
+            FileSubTask.tenant_id == tenant_id))).scalars().all()
+    sub_clause = (
+        and_(AuditLog.resource_type == "subtask",
+             AuditLog.resource_id.in_([str(x) for x in sub_ids]))
+        if sub_ids else false()
+    )
+    scope = or_(
+        and_(AuditLog.resource_type == "task",
+             AuditLog.resource_id == str(task_id)),
+        sub_clause,
+    )
+    stmt = (select(AuditLog)
+            .where(AuditLog.tenant_id == tenant_id, scope)
+            .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()))
+    if cursor:
+        c_ts, c_id = _decode_cursor(cursor)
+        stmt = stmt.where(or_(
+            AuditLog.occurred_at < c_ts,
+            and_(AuditLog.occurred_at == c_ts, AuditLog.id < c_id)))
+    rows = (await session.execute(stmt.limit(limit + 1))).scalars().all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
+        TaskEvent(
+            ts=r.occurred_at,
+            type=r.action,
+            message=(f"{r.action} (denied)" if r.outcome == "denied"
+                     else r.action),
+            details=r.payload or {},
+        )
+        for r in rows
+    ]
+    next_cursor = (
+        _encode_cursor(rows[-1].occurred_at, rows[-1].id)
+        if has_more and rows else None)
+    return items, next_cursor

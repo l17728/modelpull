@@ -233,3 +233,18 @@ async def get_participating_executors(
     return ParticipatingExecutors(
         items=await _td.executors_for_task(
             session, task_id, principal.tenant_id))
+
+
+@router.get("/{task_id}/events")
+async def get_task_events(
+    task_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> TaskEventsResponse:
+    if not await _task_in_tenant(session, task_id, principal):
+        raise HTTPException(status_code=404, detail="task not found")
+    items, next_cursor = await _td.events_for_task(
+        session, task_id, principal.tenant_id, limit, cursor)
+    return TaskEventsResponse(items=items, next_cursor=next_cursor)
