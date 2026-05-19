@@ -84,7 +84,12 @@ async def claim_one_subtask(
     candidates = (await session.execute(stmt)).scalars().all()
     for sub in candidates:
         size = sub.file_size or 0
-        if size + _DISK_SAFETY_MARGIN_BYTES <= free_bytes:
+        # SP3: an inherit subtask materializes via a server-side S3 copy /
+        # local hardlink — it writes ZERO executor local bytes, so it must
+        # bypass the disk pre-flight (else a large-repo incremental upgrade
+        # silently never gets claimed on a realistically-sized executor).
+        if (sub.inherit_from_key is not None
+                or size + _DISK_SAFETY_MARGIN_BYTES <= free_bytes):
             token = uuid.uuid4()
             sub.status = "assigned"
             sub.executor_id = executor_id

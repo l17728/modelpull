@@ -404,3 +404,45 @@ async def test_reclaim_subtasks_skips_succeeded(db_session, env) -> None:
 
     n = await reclaim_subtasks(db_session, "done-host-worker-1", current_epoch=1)
     assert n == 0  # status='succeeded' is not in the WHERE clause
+
+
+@pytest.mark.slow
+async def test_inherit_bypasses_disk_preflight_but_download_still_gated(
+    db_session: AsyncSession, env
+) -> None:
+    """SP3 regression: claim_one_subtask must exempt `inherit` subs from the
+    local-disk pre-flight (server-side copy / hardlink writes zero executor
+    bytes), while a real `pending` download of the same size stays gated."""
+    from sqlalchemy import update
+    await db_session.execute(
+        update(FileSubTask).where(FileSubTask.status == "pending")
+        .values(status="assigned"))
+    await db_session.commit()
+    db_session.add(Executor(id="lowdisk", host_id="hl",
+                            cert_fingerprint="fp", status="healthy",
+                            disk_free_gb=0, parts_dir_bytes=0))
+    task = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                        repo_id="o/r", revision="0" * 40, storage_id=1,
+                        path_template="x", status="downloading")
+    db_session.add(task)
+    await db_session.flush()
+    huge = 10 * 1024 ** 4   # 10 TiB ≫ the 0-disk executor's free space
+    db_session.add(FileSubTask(
+        task_id=task.id, tenant_id=1, filename="dl.bin",
+        file_size=huge, status="pending"))
+    db_session.add(FileSubTask(
+        task_id=task.id, tenant_id=1, filename="inh.safetensors",
+        file_size=huge, expected_sha256="a" * 64, status="inherit",
+        inherit_from_key="o/r/old/inh.safetensors"))
+    await db_session.commit()
+    sub, token = await claim_one_subtask(db_session, executor_id="lowdisk",
+                                         executor_epoch=1)
+    await db_session.commit()
+    assert sub is not None and token is not None
+    assert sub.status == "assigned"
+    assert sub.inherit_from_key == "o/r/old/inh.safetensors"
+    # the 10 TiB *download* sub is still rejected by the disk pre-flight
+    sub2, _ = await claim_one_subtask(db_session, executor_id="lowdisk",
+                                      executor_epoch=1)
+    await db_session.commit()
+    assert sub2 is None
