@@ -1,0 +1,61 @@
+{
+  "app": { "title": "modelpull", "logout": "Sign out" },
+  "login": {
+    "heading": "Sign in to modelpull", "tokenLabel": "Bearer Token",
+    "tokenPlaceholder": "Paste a tenant-user JWT", "submit": "Sign in",
+    "tokenRequired": "Token is required", "oidc": "Sign in with OIDC"
+  },
+  "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task" },
+  "shell": {
+    "theme": "Theme", "language": "Language",
+    "commandHint": "Command palette (Ctrl/⌘+K)", "tenant": "Tenant", "role": "Role"
+  },
+  "palette": {
+    "placeholder": "Jump to or run an action…", "navGroup": "Navigate",
+    "actionGroup": "Actions", "createTask": "New task",
+    "openTaskById": "Open task by ID", "openTaskPrompt": "Enter task ID"
+  },
+  "dashboard": {
+    "heading": "Overview", "inProgress": "In progress", "completed": "Completed",
+    "failed": "Failed", "total": "Total", "recent": "Recent tasks",
+    "quota": "Quota", "trend": "Created (last 24h)", "quotaBytes": "Bytes this month",
+    "quotaStorage": "Storage", "quotaConcurrent": "Concurrent tasks"
+  },
+  "tasks": {
+    "listHeading": "Tasks", "empty": "No tasks yet — click \"New task\" to create one",
+    "create": "New task", "filterStatus": "Status", "filterAll": "All",
+    "search": "Search repo / id", "cancel": "Cancel", "delete": "Delete",
+    "cancelConfirm": "Cancel this task?", "deleteConfirm": "Delete this terminal task?",
+    "cancelled": "Cancellation requested", "deleted": "Deleted",
+    "columns": { "id": "ID", "repo": "Repo", "revision": "Revision",
+      "status": "Status", "createdAt": "Created", "actions": "Actions" },
+    "view": "View", "detailHeading": "Task detail", "subtasksHeading": "Subtasks",
+    "polling": "Live refreshing…", "completed": "Stopped (terminal)",
+    "back": "Back to list", "notFound": "Task not found or deleted",
+    "subtaskColumns": { "filename": "File", "size": "Size",
+      "sha256": "SHA256", "status": "Status" }
+  },
+  "create": {
+    "heading": "Create download task", "repo": "Repo (org/model)",
+    "revision": "Revision (40-hex sha)", "storageId": "Storage backend ID",
+    "priority": "Priority", "strategy": "Source strategy",
+    "upgradeFrom": "Upgrade-from revision", "trustNonHf": "Trust non-HF sha256",
+    "submit": "Create task", "repoRequired": "Repo is required",
+    "repoPattern": "Expected org/model", "revRequired": "Revision is required",
+    "revPattern": "Must be a 40-hex sha", "storageRequired": "Storage ID is required",
+    "serviceTokenWarn": "You are using the system-admin service token (user_id=0); task creation fails the owner FK. Sign in with a tenant-user JWT to create tasks.",
+    "success": "Task created"
+  },
+  "status": {
+    "pending": "Pending", "queued": "Queued", "scheduling": "Scheduling",
+    "downloading": "Downloading", "succeeded": "Succeeded", "failed": "Failed",
+    "cancelled": "Cancelled", "assigned": "Assigned", "in_progress": "Downloading"
+  },
+  "errors": {
+    "invalid_token": "Token invalid or expired — please sign in again",
+    "service_unavailable": "Service unavailable, retrying…",
+    "network": "Network error, check your connection",
+    "quota_exceeded": "Quota exceeded", "conflict": "State conflict (task not terminal or duplicate)",
+    "validation": "Invalid request parameters", "forbidden": "Forbidden"
+  }
+}
