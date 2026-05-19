@@ -305,6 +305,8 @@ def create_app() -> FastAPI:
     app.include_router(quota_router)
     from dlw.api.source_proxy import router as source_proxy_router
     app.include_router(source_proxy_router)
+    from dlw.api.audit import router as audit_router
+    app.include_router(audit_router)
 
     # DX only: advertise the Bearer-JWT scheme in the generated OpenAPI so
     # Swagger /docs shows an "Authorize" button and authenticated
