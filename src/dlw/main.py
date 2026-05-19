@@ -305,6 +305,35 @@ def create_app() -> FastAPI:
     app.include_router(quota_router)
     from dlw.api.source_proxy import router as source_proxy_router
     app.include_router(source_proxy_router)
+
+    # DX only: advertise the Bearer-JWT scheme in the generated OpenAPI so
+    # Swagger /docs shows an "Authorize" button and authenticated
+    # "Try it out" calls send `Authorization: Bearer <token>`. Auth itself
+    # remains the manual require_principal/require_perm dependency — this
+    # changes the doc, never request handling.
+    from fastapi.openapi.utils import get_openapi
+
+    def _custom_openapi() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title, version=app.version,
+            description="modelpull controller API. Authorize with a "
+                        "tenant-user system-JWT (Bearer).",
+            routes=app.routes,
+        )
+        # Name matches the static contract api/openapi.yaml (`bearerAuth`).
+        schema.setdefault("components", {}).setdefault(
+            "securitySchemes", {})["bearerAuth"] = {
+                "type": "http", "scheme": "bearer", "bearerFormat": "JWT",
+                "description": "OIDC-issued system-JWT (HS256) or "
+                               "system_admin service token",
+        }
+        schema["security"] = [{"bearerAuth": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = _custom_openapi
     return app
 
 
