@@ -169,3 +169,35 @@ async def test_pin_modelscope_unreachable_pauses(factory):
         await s.commit()
         assert task.status == "paused_external"
         assert task.error_message == "pinned_source_unavailable"
+
+
+async def test_run_scheduling_tick_inherits_before_planning(factory):
+    """diff_and_dedup runs before plan_task_sources: a subtask whose sha has
+    an existing storage_object is `inherit` (not source-planned)."""
+    from dlw.config import get_settings
+    from dlw.db.models.storage_object import StorageObject
+    from dlw.services.source_scheduler import run_scheduling_tick
+    async with factory() as s:
+        s.add(StorageObject(tenant_id=1, storage_id=1, storage_key="old/k",
+                            sha256="a" * 64, size=10))
+        t = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                         repo_id="o/r", revision="new", storage_id=1,
+                         path_template="t", status="pending")
+        s.add(t)
+        await s.flush()
+        s.add(FileSubTask(task_id=t.id, tenant_id=1, filename="w.bin",
+                          file_size=10, expected_sha256="a" * 64,
+                          status="pending"))
+        await s.commit()
+        reg = _FakeReg({"huggingface": _FakeDriver("huggingface", [], True)})
+        await run_scheduling_tick(s, reg, _IdResolver(), get_settings())
+        await s.commit()
+        sub = (await s.execute(select(FileSubTask))).scalar_one()
+        assert sub.status == "inherit"
+        obj = (await s.execute(select(StorageObject))).scalar_one()
+        assert obj.refcount == 2
+        t2 = (await s.execute(select(DownloadTask))).scalar_one()
+        # BLOCKER fix (banner 7a): a fully-inherited task must NOT be paused
+        # by plan_task_sources' pinned/no_sha/no_speed gates.
+        assert t2.status != "paused_external"
+        assert t2.status == "downloading"

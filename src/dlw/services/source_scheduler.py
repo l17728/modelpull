@@ -38,6 +38,16 @@ async def plan_task_sources(
     registry: Any, resolver: Any, speeds: dict[str, float],
     chunk_min_mb: int, overhead_pct: float = 2.0,
 ) -> None:
+    # SP3 (banner 7a): only `pending` subtasks need source planning;
+    # `inherit` subs were materialised by diff_and_dedup. A fully-inherited
+    # task has zero pending subs — return early so the pinned / no-sha /
+    # no-speed pause gates below never fire (the task then flows
+    # scheduling -> downloading and its inherit subs complete to succeeded).
+    subs = (await session.execute(select(FileSubTask).where(
+        FileSubTask.task_id == task.id,
+        FileSubTask.status == "pending"))).scalars().all()
+    if not subs:
+        return
     allowed, pinned = _strategy_filter(
         registry.enabled_ids(), task.source_strategy or "auto_balance",
         list(task.source_blacklist or []))
@@ -69,8 +79,6 @@ async def plan_task_sources(
         task.status = "paused_external"
         task.error_message = "no_source_speed"
         return
-    subs = (await session.execute(select(FileSubTask).where(
-        FileSubTask.task_id == task.id))).scalars().all()
     sizes = {x.filename: (x.file_size or 0) for x in subs}
     combo = solve_optimal_combo(candidates, sizes, overhead_pct=overhead_pct)
     combo_speeds = {s: candidates[s] for s in combo}
@@ -116,6 +124,8 @@ async def run_scheduling_tick(session, registry, resolver, settings) -> None:
     probe_bytes = pick_probe_size_bytes(probe_size_mb=settings.probe_size_mb)
     for task in pend:
         task.status = "scheduling"
+        from dlw.services.incremental import diff_and_dedup
+        await diff_and_dedup(session, task)
         speeds: dict[str, float] = {}
         for sid in registry.enabled_ids():
             drv = registry.get(sid)
