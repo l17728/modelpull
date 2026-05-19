@@ -2,208 +2,233 @@
 
 [English](./README_en.md) | 中文
 
-> **📐 设计阶段（Design only）— 暂无可执行代码**
-> 寻找的是 **design reviewer**，不是用户。代码实现按 [ROADMAP](./ROADMAP.md) Phase 1 启动。
+> **✅ 已落地可运行** — v2.0 Phase 1/2/3 全部实现并合并（PR #1–#18，427 测试，CI 全绿）。
+> 本机即可拉起：控制器 + 下载器 + 对象存储，用 CLI/SDK 真实下载 HF 模型。
+> 上手见 [**用户手册 `docs/getting-started.md`**](./docs/getting-started.md)。
 
 [![CI](https://github.com/l17728/modelpull/actions/workflows/ci.yml/badge.svg)](https://github.com/l17728/modelpull/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-![Status](https://img.shields.io/badge/status-design--only-orange)
-![Version](https://img.shields.io/badge/spec-v2.0.13-blue)
-![Code](https://img.shields.io/badge/code-not--started-red)
+![Status](https://img.shields.io/badge/status-Phase%201%2F2%2F3%20shipped-brightgreen)
+![Version](https://img.shields.io/badge/spec-v2.0-blue)
+![Tests](https://img.shields.io/badge/tests-427%20passing-brightgreen)
 [![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
-⛔ **现在还不能下载模型**。如果你想找一个**能用**的 HF 多机下载工具，本仓库帮不到你。
-✅ 如果你是**架构师 / 分布式系统爱好者 / SRE / 想参与设计 review**，欢迎进。
+一个**分布式 HuggingFace 模型权重下载系统**：控制器编排、多下载器并行、多源加速、多租户隔离、增量去重，写入 S3 兼容对象存储。面向 **团队 / 平台 / 大模型 / 多机 / 国内多源 / 企业内网** 场景。
 
-📚 **设计成果**（~28000 行 / 14 章 / OpenAPI / Helm + Prometheus + Grafana / 6 runbook）：
+📌 **不做的事**：单机小模型下载 — [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) 已经够用。
+📌 **做的事**：多机分布式 + 多源加速 + 多租户 + 增量去重 + CLI/SDK + 企业内网部署（v2.1）+ AI Copilot（v2.1）。
 
-- 入口：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
-- v2.0 GA 后才有代码 — 见 [ROADMAP](./ROADMAP.md)
-
-📌 **不打算做的事**：单机小模型下载、基础 HF 镜像功能 — 这些 [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) 已经够用了。
-
-📌 **要做的事**：多机分布式 / 多源加速 / 多租户 / 企业内网部署 / AI Copilot 嵌入式聊天 / 在线运筹优化。详见下方"为什么做这个 + 不用 huggingface_hub 的理由"。
+📚 设计权威（~28000 行 / 14 章）：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md) ｜ 软件架构/交互流程/独特设计见 [👇 软件架构](#-软件架构) / [👇 独特软件设计](#-独特软件设计)。
 
 ---
 
 ## ⚡ 现在你可以做的 3 件事
 
-1. **读 INDEX 决定要不要深入**：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)（按角色推荐 5 条阅读路径）
-2. **提 design review issue**：[模板](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — 当前阶段最有价值的贡献
-3. **Star + Watch**：Phase 1 启动时通知
+1. **本机跑起来**：照 [`docs/getting-started.md`](./docs/getting-started.md) 部署控制器+下载器+minio，用 `dlw submit` 真实下一个模型
+2. **读架构**：下方 [软件架构](#-软件架构)（组件 + 交互时序图）与 [独特软件设计](#-独特软件设计)
+3. **读设计权威**：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)（14 章 / 按角色 5 条阅读路径）
 
 ---
 
-## 🚀 Quickstart (Phase 1 dev only)
+## 🚀 Quickstart
 
-> Phase 1 已落地：FastAPI controller + PG schema + 健康检查。
-> **不能下载模型**；这是 Week 2-6 的实施基础。
-
-需要：Python 3.12、`uv`、本地 PG 16+（或用 docker-compose 起一个）。
+完整的安装/部署/使用见 [**用户手册 `docs/getting-started.md`**](./docs/getting-started.md)；
+逐步可复现运维 runbook 见 [`docs/operator/local-deployment.md`](./docs/operator/local-deployment.md)。最小路径：
 
 ```bash
-# 1. 拉代码
-git clone https://github.com/l17728/modelpull && cd modelpull
-
-# 2. 装 uv（如未装）
-curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS/Linux
-# winget install astral-sh.uv                          # Windows
-
-# 3. 装 deps
-uv sync
-
-# 4a. 起 PG（本机已装 PG 跳过此步，设 DLW_DB_HOST/PORT 环境变量即可）
-docker compose -f docker-compose.dev.yml up -d         # PG 16 on :5432
-# 或者使用本机 PG：export DLW_DB_PORT=5433（按你实际端口）
-
-# 5. 建 dlw 数据库（一次性）
-psql -h $DLW_DB_HOST -p ${DLW_DB_PORT:-5432} -U ${DLW_DB_USER:-postgres} \
-     -d postgres -c "CREATE DATABASE dlw"
-
-# 6. 跑 migration
-uv run alembic upgrade head    # 创建 8 张表
-
-# 7. 起 controller
-uv run uvicorn dlw.main:app --host 0.0.0.0 --port 8000
-
-# 8. 测试 endpoints（另开终端）
-curl http://localhost:8000/health/live    # → {"status":"healthy"}
-curl http://localhost:8000/health/ready   # → {"status":"ready","db":"ok"}
-
-# 9. 跑 tests
-uv run pytest -v               # Phase 1: 18 tests | Week 2: 51 tests
+git clone https://github.com/l17728/modelpull && cd modelpull && uv sync
+# 1) PG(localhost:5433 库 dlw) + alembic upgrade head
+# 2) minio 起在 :9000 当 S3 后端 + 建桶 modelpull-dev
+# 3) 预生成 dev CA(./.ca, hostname=localhost) + dlw-seed --demo(并把 StorageBackend 指向 minio)
+# 4) 控制器: uvicorn dlw.main:create_app --factory --http httptools --ssl-* (HTTPS+可选mTLS) :8000
+# 5) 下载器: dlw-executor (DLW_EXECUTOR_* 环境变量, 自动 mTLS 注册)
+source .run/dlw-env.sh                 # 注入 server + 1h 租户 JWT + 信任 dev CA
+uv run dlw submit sentence-transformers/all-MiniLM-L6-v2 -r <40hex> -s 1
+uv run dlw watch <task-id>             # → 文件落到 minio 桶 modelpull-dev
 ```
 
-### Week 2 demo: drive a mock executor end-to-end via HTTP
+> 每一步的精确命令、排错矩阵在用户手册里；这里只给出形态。
 
-```bash
-export DLW_BEARER_TOKEN="dev-secret"
-TOKEN_HEADER="Authorization: Bearer dev-secret"
+---
 
-# Create a task (auto-creates 2 mock subtasks)
-TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
-  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
-  -d '{"repo_id":"deepseek-ai/DeepSeek-V3","revision":"0123456789abcdef0123456789abcdef01234567","storage_id":1}' \
-  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "Task: $TASK_ID"
+## 🏛 软件架构
 
-# Register a worker
-curl -s -X POST http://localhost:8000/api/v1/executors/join \
-  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
-  -d '{"id":"demo-worker","host_id":"demo-host"}'
+### 分层与组件
 
-# Poll twice + report success (token verified)
-for i in 1 2; do
-  POLL=$(curl -s -X POST http://localhost:8000/api/v1/executors/demo-worker/poll -H "$TOKEN_HEADER")
-  SUB_ID=$(echo "$POLL" | python -c "import sys,json; print(json.load(sys.stdin)['subtask']['id'])")
-  TOK=$(echo "$POLL" | python -c "import sys,json; print(json.load(sys.stdin)['assignment_token'])")
-  curl -s -X POST "http://localhost:8000/api/v1/subtasks/$SUB_ID/report" \
-    -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
-    -d "{\"status\":\"succeeded\",\"assignment_token\":\"$TOK\",\"actual_sha256\":\"$(printf 'f%.0s' {1..64})\",\"bytes_downloaded\":100000000}"
-done
+```mermaid
+flowchart TB
+    subgraph Clients["客户端"]
+      CLI["dlw CLI"]
+      SDK["Python SDK<br/>(sync / async)"]
+      WEB["Web UI (Vue3)"]
+    end
+    subgraph Controller["控制器 (FastAPI, active/standby)"]
+      API["API 层<br/>tasks / executors / subtasks / health"]
+      AUTHZ["鉴权: 系统JWT/OIDC 身份<br/>+ casbin RBAC + tenant_filtered"]
+      SCHED["调度: 测速 → LPT 多源组合<br/>→ 文件/chunk 路由 → 重平衡"]
+      INCR["增量: diff_and_dedup<br/>(sha 命中 → inherit)"]
+      PROXY["HF/源 反向代理<br/>(token 永不下发)"]
+      RECOV["恢复 / GC / 租户配额<br/>leader-gated 后台循环"]
+      LEAD["LeaderElector<br/>(PG advisory lock)"]
+    end
+    subgraph Executors["下载器 (无入站口, 主动出站)"]
+      EX1["executor 1<br/>stream / chunk downloader"]
+      EXN["executor N"]
+    end
+    subgraph Storage["存储后端 (可插拔 StorageBackend)"]
+      S3["S3 / OBS / minio<br/>backend_type=s3"]
+      LFS["本地FS / NFS<br/>backend_type=local"]
+    end
+    PG[("PostgreSQL<br/>真相源 + 协调")]
+    HF["HuggingFace / hf-mirror / ModelScope ..."]
 
-# Verify task completed
-curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER"
-# Expected: {"status":"succeeded", ...}
+    CLI & SDK & WEB -->|HTTPS + Bearer JWT| API
+    API --> AUTHZ --> PG
+    SCHED --> PG
+    INCR --> PG
+    EX1 & EXN -->|mTLS + executor-JWT + 心跳HMAC<br/>poll/heartbeat/report| API
+    EX1 & EXN -->|经控制器代理拉字节| PROXY --> HF
+    EX1 & EXN ==>|S3 multipart 上传 + sha256 tee| S3
+    EX1 & EXN ==> LFS
+    LEAD --> PG
+    RECOV --> PG
 ```
 
-### Week 3 demo: end-to-end with docker compose
+**关键性质**：① 下载器**主动出站**（企业内网无入站口可用）；② **HF token 永不离开控制器**（反向代理）；③ **PG 是唯一真相源**（任务/子任务/认领/fence 全持久化）；④ 存储后端**可插拔**，换云只改一行配置。
 
-```bash
-# 1 command: PG + controller + executor all up
-docker compose -f docker-compose.dev.yml up -d --build
+### 交互流程 1 — 任务生命周期（提交 → 下载 → 校验 → 完成）
 
-# Wait for controller health (executor will pick up automatically once ready)
-until curl -s http://localhost:8000/health/ready | grep -q ok; do sleep 1; done
-echo "controller ready"
+```mermaid
+sequenceDiagram
+    actor U as 用户 (dlw/SDK)
+    participant C as 控制器
+    participant HF as HuggingFace
+    participant DB as PostgreSQL
+    participant E as 下载器
+    participant S3 as 对象存储
 
-# Submit a task
-TOKEN_HEADER="Authorization: Bearer dev-token-change-me"
-TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
-  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
-  -d '{"repo_id":"o/e2e","revision":"0123456789abcdef0123456789abcdef01234567","storage_id":1}' \
-  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "Task: $TASK_ID"
-
-# Watch the executor pick it up + complete
-for i in $(seq 1 30); do
-  STATUS=$(curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER" \
-    | python -c "import sys,json; print(json.load(sys.stdin)['status'])")
-  echo "[$i] task status: $STATUS"
-  if [ "$STATUS" = "succeeded" ]; then break; fi
-  sleep 1
-done
-
-# Inspect downloaded mock files in the executor container
-docker compose -f docker-compose.dev.yml exec executor ls -la /downloads
+    U->>C: POST /api/v1/tasks {repo, revision, storage_id}
+    C->>HF: list_repo_tree (枚举文件 + sha256)
+    HF-->>C: 文件清单
+    C->>DB: 建 DownloadTask + 每文件一个 FileSubTask(pending)
+    C-->>U: 201 {task_id}
+    Note over C,DB: 调度tick: 增量diff_and_dedup → 多源测速 → LPT 组合 → 写 source_id/分片
+    loop 每个下载器持续 poll
+        E->>C: POST /executors/{id}/poll (带 epoch)
+        C->>DB: FOR UPDATE SKIP LOCKED 认领一个 subtask<br/>生成 assignment_token
+        C-->>E: subtask + assignment_token
+        E->>C: 经 /source-proxy 流式 GET 文件
+        C->>HF: 注入 HF token 转发
+        HF-->>C: 字节流
+        C-->>E: 字节流 (token 不下发)
+        E->>S3: multipart 上传 (边传边算 sha256)
+        E->>C: POST /subtasks/{id}/report {sha256, token, epoch}
+        C->>DB: 校验 token+epoch+sha256(HF为真值) → succeeded
+    end
+    C->>DB: 全部子任务终态 → 父任务 succeeded
+    U->>C: dlw watch → 轮询直到终态
 ```
 
-### Week 3 UI demo: 浏览器看任务列表 + 实时进度
+### 交互流程 2 — 下载器注册与防双发（mTLS + epoch + assignment token）
 
-A 3-page Vue 3 SPA driven by `pnpm dev` against the running controller. HTTP polling (5s on list, 1s on detail with terminal-state stop).
+```mermaid
+sequenceDiagram
+    participant E as 下载器
+    participant C as 控制器
+    participant DB as PostgreSQL
 
-````bash
-# Terminal 1 — controller
-docker compose -f docker-compose.dev.yml up -d postgres
-uv run alembic upgrade head
-uv run uvicorn dlw.main:app --port 8000
+    E->>C: POST /executors/register (CSR + enrollment_token, HTTPS)
+    C->>DB: 签发客户端证书 + executor-JWT + HMAC种子<br/>epoch += 1
+    C-->>E: cert / jwt / ca-chain / hmac-seed (写入本地 cert_dir)
+    loop 心跳/认领 (全程 mTLS)
+        E->>C: heartbeat (body 用 HMAC 签名, 防重放 nonce)
+        E->>C: poll (Authorization: executor-JWT, 带当前 epoch)
+        Note over C,DB: epoch 不匹配 → 拒绝 (陈旧执行器)
+    end
+    Note over C,DB: 失联 → 标记 faulty → reclaim 该 subtask<br/>(assignment_token 失效)
+    E--xC: 网络恢复后 report 旧 subtask
+    C->>DB: assignment_token / epoch 已变 → 拒绝 (防双完成)
+```
 
-# Terminal 2 — seed a task so the list isn't empty
-# (Replace ${DLW_BEARER_TOKEN} with the value you set in the controller's env)
-curl -X POST http://localhost:8000/api/v1/tasks \
-  -H "Authorization: Bearer $DLW_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"repo_id":"deepseek-ai/DeepSeek-V3","revision":"abc123def4567890abc123def4567890abc12345","storage_id":1}'
+### 交互流程 3 — 多源调度（一键多源加速）
 
-# Terminal 3 — frontend (Vite proxy forwards /api/* to :8000;
-# do NOT set VITE_API_BASE for dev — only for `pnpm preview`/production builds)
-cd frontend
-pnpm install
-pnpm dev    # http://localhost:5173
-````
+```mermaid
+flowchart LR
+    A["任务进入 scheduling"] --> B["并行测速<br/>所有候选源 (软超时 8s)"]
+    B --> C["EWMA 融合<br/>实测0.7 + 历史0.3"]
+    C --> D["最优组合选择<br/>(不一定全用, 慢源 +2% 协调惩罚)"]
+    D --> E["LPT 启发式<br/>文件级分配 (最长任务→最快源)"]
+    E --> F{"文件 ≥100MB<br/>且多源覆盖?"}
+    F -- 是 --> G["chunk 级并行<br/>(写 subtask_chunks)"]
+    F -- 否 --> H["整文件单源"]
+    G & H --> I["下载中持续校准"]
+    I --> J{"源退化?"}
+    J -- 是 --> K["局部重平衡<br/>未下分片切到健康源"]
+    J -- 否 --> L["完成 (HF sha256 兜底校验)"]
+    K --> I
+```
 
-Open `http://localhost:5173/`, paste the value of `$DLW_BEARER_TOKEN`, see the
-seeded task in the list, click into it. The detail page polls every second
-until the task hits a terminal state. Pair with `dlw-executor` in another
-terminal to watch subtasks transition from `pending` → `assigned` → `succeeded`.
+### 交互流程 4 — 增量下载 + 全局去重（零重下）
 
-### Week 4 demo: real HF Hub → MinIO
+```mermaid
+flowchart TB
+    S["scheduling tick"] --> D["diff_and_dedup<br/>对每个 pending 子任务"]
+    D --> Q{"该文件 sha256 在<br/>storage_objects 已存在?<br/>(tenant, storage, sha)"}
+    Q -- 命中 --> INH["子任务 → inherit<br/>refcount++ + subtask_object_refs"]
+    INH --> CP["下载器服务端 S3 copy_object<br/>/ 本地 os.link (零字节重下)"]
+    Q -- 未命中 --> P["保持 pending → 走多源下载"]
+    CP --> OK["succeeded (record_object 幂等)"]
+    P --> OK
+    OK --> GC["DELETE 任务 → deref<br/>leader-gated GC 回收 refcount=0"]
+```
 
-End-to-end with real HuggingFace + local MinIO. Replaces Week 3's mock pipeline.
+### 任务 / 子任务状态机
 
-````bash
-# Boot the full stack: PG + controller + executor + minio + bucket-init
-docker compose -f docker-compose.dev.yml up -d --build
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> scheduling: 调度tick
+    scheduling --> downloading: 已规划源(或全 inherit)
+    scheduling --> paused_external: 无源/无sha真值/被pin源不可达
+    downloading --> succeeded: 所有子任务终态成功
+    downloading --> failed: 任一子任务失败
+    downloading --> cancelling: 用户取消
+    cancelling --> cancelled
+    paused_external --> scheduling: 恢复
+    succeeded --> [*]
+    failed --> [*]
+    cancelled --> [*]
+    note right of pending
+      子任务: pending → inherit/assigned
+      → (copy|download) → succeeded/failed
+      失败 inherit 自愈: deref + 重排 pending
+    end note
+```
 
-# Wait for ready
-until curl -s http://localhost:8000/health/ready | grep -q ok; do sleep 1; done
+### 高可用（Active / Standby 控制器）
 
-# Create a download task pointing to a small public model (~90MB, multi-file)
-TOKEN_HEADER="Authorization: Bearer dev-token-change-me"
-TASK_ID=$(curl -s -X POST http://localhost:8000/api/v1/tasks \
-  -H "$TOKEN_HEADER" -H "Content-Type: application/json" \
-  -d '{"repo_id":"sentence-transformers/all-MiniLM-L6-v2","revision":"main","storage_id":1}' \
-  | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "Task: $TASK_ID"
+```mermaid
+flowchart LR
+    subgraph 两个控制器实例
+      A["实例A"]
+      B["实例B"]
+    end
+    LK[("PG advisory lock<br/>(active_lock_id)")]
+    A -->|尝试持锁| LK
+    B -->|尝试持锁| LK
+    LK -->|持锁者 = active| A
+    LK -. 未持锁 = standby .-> B
+    A -->|active: 跑恢复/调度/GC/配额循环| WORK["leader-gated 后台循环"]
+    B -->|standby: 只响应只读/认证, 不跑循环| IDLE["热备 (auth substrate 已就绪)"]
+    A x--x|崩溃释放锁| LK
+    B -->|抢到锁 → 立即 promote| WORK
+```
 
-# Watch executor pull from HF and upload to MinIO (~60-120s on a 100Mbps link)
-docker compose -f docker-compose.dev.yml logs -f executor
+> RTO ≤ 10min / RPO ≤ 15min；W3c 引入 `controller_state` + leader-gated lifespan，promote 即时（auth 子系统两端都常驻）。
 
-# Check task status
-curl -s "http://localhost:8000/api/v1/tasks/$TASK_ID" -H "$TOKEN_HEADER" \
-  | python -c "import sys,json; t=json.load(sys.stdin); print(t['status']); print(len(t['subtasks']),'subtasks')"
+### 数据模型（核心表）
 
-# Open MinIO console to see uploaded files
-echo "MinIO console: http://localhost:9001  (minioadmin / minioadmin)"
-````
-
-完整开发计划：
-
-- Phase 1 Foundation：[`docs/superpowers/plans/2026-05-07-phase-1-foundation.md`](./docs/superpowers/plans/2026-05-07-phase-1-foundation.md)
-- Phase 1 Week 2 Controller Core：[`docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-2-controller-core.md)
-- Phase 1 Week 3 Executor Process：[`docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-3-executor-process.md)
-- Phase 1 Week 3 UI Scaffold：[`docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md`](./docs/superpowers/plans/2026-05-08-phase-1-week-3-ui-scaffold.md)
-- Phase 1 Week 4 HF + S3：[`docs/superpowers/plans/2026-05-09-phase-1-week-4-hf-s3-multipart.md`](./docs/superpowers/plans/2026-05-09-phase-1-week-4-hf-s3-multipart.md)
+`tenants / projects / users`（三级身份）· `download_tasks / file_subtasks / subtask_chunks`（任务树 + 多源 chunk 路由）· `executors / executor_status_history`（注册 + epoch + 健康）· `storage_backends`（可插拔后端配置）· `storage_objects / subtask_object_refs`（全局去重 refcount，INVARIANT 14）· `source_speed_samples / source_blacklist`（多源测速 + 退化）· `usage_records / quota_snapshots`（租户配额）· `audit_log`（链式哈希防篡改）· `casbin_rule`（RBAC）。所有业务表带 `tenant_id`（INVARIANT 8）。
 
 ---
 
@@ -280,6 +305,8 @@ flowchart LR
 ---
 
 ## 核心特性
+
+> 图例：未标注 = **✅ v2.0 已实现并合并**（Phase 1/2/3）；标 **（v2.1）** = 设计完成、待实现。
 
 ### 🚀 多源调度（v2.0 头号特性）
 
@@ -358,8 +385,24 @@ flowchart LR
 
 ```
 modelpull/
+├── src/dlw/                                     👈 实现代码（已落地）
+│   ├── main.py                                  FastAPI app + leader-gated lifespan
+│   ├── config.py                                pydantic-settings (DLW_ 前缀)
+│   ├── api/                                     tasks / executors / subtasks / health / hf_proxy / source_proxy
+│   ├── auth/  authz/                            系统JWT/OIDC principal · mTLS CA · casbin RBAC
+│   ├── db/  alembic/                            SQLAlchemy 模型 + 迁移
+│   ├── services/                                调度 / 多源 / 增量去重 / 恢复 / 配额 / 选主
+│   ├── sources/                                 SourceDriver + NameResolver(多源)
+│   ├── executor/                                下载器: runner / client / downloader / cli
+│   ├── sdk/                                     Python SDK (sync Client + AsyncClient)
+│   └── cli/                                     dlw CLI (argparse) + dlw-seed
+├── tests/                                       427 测试 (api/db/services/e2e/sdk/cli/...)
+├── tools/                                       lint_invariants（CI 不变量护栏）等
+├── frontend/                                    Vue3 SPA 脚手架
 ├── docs/
-│   ├── v2.0/                                    👈 当前设计权威
+│   ├── getting-started.md                       👈 用户手册（安装/部署/使用）
+│   ├── operator/                                运维指南（local-deployment / cli-sdk / 多源 / 多租户 / 增量 ...）
+│   ├── v2.0/                                    👈 设计权威（历史追溯）
 │   │   ├── 00-INDEX.md                          导航 + 角色阅读路径
 │   │   ├── 01-architecture.md                   架构 / 状态机 / 数据模型
 │   │   ├── 02-protocol.md                       API / 心跳 / WS 协议
@@ -424,70 +467,63 @@ modelpull/
 
 ---
 
-## 设计亮点速读
+## 💡 独特软件设计
 
-### 1. 一键多源 = 测速 + LPT + 重平衡
+这些是 modelpull 区别于"朴素多机下载器"和 `huggingface_hub` 的、真正有设计取舍的点。
 
-```
-任务创建
-   ↓
-并行测速（5 sources × 4 executors = 20 并发探测，软超时 8s）
-   ↓
-EWMA 融合（实测 0.7 + 历史 0.3）
-   ↓
-最优组合选择（不一定全用，引入慢源 +2% 协调开销惩罚）
-   ↓
-LPT 启发式 file-level 分配（最长任务先分给最快源）
-   ↓
-大文件（≥100MB）+ 多源 → chunk-level 并行
-   ↓
-下载中持续校准 → 退化触发局部重平衡
-```
+### 1. 控制器侧反向代理：HF token 永不下发到下载器
 
-详见 [`06 §1.8`](./docs/v2.0/06-platform-and-ecosystem.md)。
+朴素做法是每个 worker 自己拿 HF token 去拉。本系统让**下载器经控制器 `/source-proxy` 拉字节**，token 由控制器注入并隐藏（INVARIANT 2）。代价是控制器多一跳；收益是：N 台下载器零凭证、token 轮换只在一处、企业内网下载器不持任何外部密钥。`hf-mirror/ModelScope` 等源同此模型。
 
-### 2. Fence Token 防双发
+### 2. 双层 fence 防双发 / 陈旧写入
 
-v1.x 的 CAS 仅保护 DB 层，但内存队列 + 心跳响应 + 重连之间存在间隙：
+仅靠 DB 层 CAS 挡不住"内存队列 + 心跳 + 重连"之间的间隙（A 失联被 reclaim、B 接手、A 恢复后仍完成 → 双完成）。两层 fence：
 
-```
-T1: A 拿到 S（在内存队列）
-T2: A 网络抖动失联
-T3: controller 标 A faulty → reclaim S
-T4: B 拿到 S 开始下载
-T5: A 恢复后还在下载 S（不知道被 reclaim 了）
-T6: A 完成 → controller 接受 → 双完成
-```
+- **Executor Epoch**：每次 register 单调 +1，所有请求带当前 epoch，旧 epoch 一律拒绝（陈旧执行器整体失效）。
+- **Assignment Token**：每次认领生成 fresh UUID，`report` 时校验——被 reclaim 的认领其 token 已失效。
 
-v2.0 引入两层 fence：
+配合 `FOR UPDATE SKIP LOCKED` 原子认领，"同一子任务两个认领者只一个赢"。详见 [`03 §2`](./docs/v2.0/03-distributed-correctness.md)。
 
-- **Executor Epoch**：单调递增，每次 register +1，请求必须带当前 epoch
-- **Assignment Token**：每次 assign 生成 fresh UUID，complete 时校验
+### 3. HF 是 SHA256 唯一真值，跨源不静默损坏
 
-详见 [`03 §2`](./docs/v2.0/03-distributed-correctness.md)。
+多源加速但**只信 HF 的 sha256**：从镜像/ModelScope 下完，用 HF 的 sha 兜底校验。错源/坏字节 → **loud-fail + 拉黑该源 + 回退 HF 重取**，绝不"DB 标 verified 就当真"。崩溃恢复用"远端存在性 + ChecksumSHA256 + size"三联校验，不假设本地状态可信。
 
-### 3. 不变量驱动设计
+### 4. S3 multipart 作为"分布式协作原语"
 
-14 条核心不变量（[`01 §7`](./docs/v2.0/01-architecture.md)），每条都有 CI 断言：
+多台下载器协作下同一个大模型，**不需要跨节点共享文件系统**：每个下载器把自己负责的文件/分片用 **S3 multipart upload** 写进同一个共享对象命名空间（`{tenant}/{repo}/{rev}/{file}`）。大文件 chunk 级并行后，由 S3 multipart 协议在存储侧"拼装"。这让"哪台机器下的"与"结果在哪"彻底解耦——也是本地用 minio 顶替云 S3、`dev=prod` 同一条代码路径的根因。
 
-- HF 永远是 SHA256 真值来源
-- HF Token 不离开 Controller
-- Executor 不持长期 storage 凭证
-- 业务表必须有 tenant_id
-- ……
+### 5. "增量 diff" 与"全局去重"统一为一次 sha 查表
 
-CI 强制失败任何违反不变量的 PR。
+不做两套逻辑：调度阶段 `diff_and_dedup` 对每个待下文件，只查一次 `storage_objects(tenant,storage,sha256)`——命中即 `inherit`，由下载器**服务端 `copy_object` / 本地 `os.link` 零字节重下**物化；未命中才走多源下载。`upgrade_from_revision` 的"只下变化文件"因此和"跨任务/跨 revision 去重"是**同一个机制**。`refcount` + `subtask_object_refs` 记引用，删任务 deref，leader-gated GC 回收 `refcount=0`（INVARIANT 14：每个 tenant+backend+内容仅一份物理副本）。`record_object` 对 inherit 幂等，失败 inherit 自愈（deref + 重排 pending）。
+
+### 6. 一键多源 = 控制器侧测速 + LPT 组合 + 局部重平衡
+
+任务进 scheduling → **并行实测**所有候选源（软超时 8s）→ EWMA 融合（实测0.7+历史0.3）→ **最优组合选择**（不一定全用，引入慢源加 +2% 协调惩罚）→ LPT 文件级分配（最长任务给最快源）→ 大文件+多源走 chunk 级并行 → 下载中持续校准、源退化触发**局部重平衡**（只把未下分片切到健康源，已下字节不作废）。详见 [`06 §1.8`](./docs/v2.0/06-platform-and-ecosystem.md)。
+
+### 7. 不变量驱动开发：46 条不变量 + CI 强制断言
+
+46 条核心不变量（[`docs/v2.0/INVARIANTS.md`](./docs/v2.0/INVARIANTS.md)，索引于 `01 §7`），每条 inline 声明 + `tools/lint_invariants.py` 用源码 AST 强制断言——**任何违反不变量的 PR 直接 CI 失败**。例：HF 是 sha256 真值；HF token 不离控制器；下载器不持长期 storage 凭证；所有业务表带 `tenant_id`；每个 tenant+backend+内容仅一份物理副本。这是把架构约束变成"机器可执行的护栏"，而非文档约定。
+
+### 8. Postgres 是唯一协调面（无 etcd/zk/redis）
+
+任务树、子任务认领、fence epoch、active/standby 选主全部用 **PostgreSQL** 完成：`FOR UPDATE SKIP LOCKED` 做无锁竞争认领，advisory lock 做控制器选主（持锁=active，崩溃释放即被 standby 抢占 → 即时 promote），租户隔离用 `tenant_filtered` 查询过滤。不引入额外协调组件 = 更少的运维面与故障模式。
+
+### 9. 可插拔 StorageBackend：dev=prod 同一条代码路径
+
+`StorageBackend.backend_type ∈ {s3,obs,minio,nfs,local}`。本地用 minio 顶替云 S3，**上生产只改一行 `endpoint_url` 配置、代码零改**；CI 用 `moto` 内存模拟同一 S3 代码路径。消除"本地能跑、上云就崩"的整类 bug。
+
+> 工程方法本身也有取舍：全程 `brainstorm→spec→plan→2 个 opus 预审→实现→里程碑全量+CI gate→opus 终审→squash-merge` 的子代理驱动流程，Phase 1/2/3 共 18 个 PR **全部 CI 一次过零迭代**。
 
 ---
 
 ## Roadmap
 
-| 版本 | 内容 |
-|------|------|
-| **v2.0**（设计完成） | 单租户 → 分布式 → 多租户 + 多源 → 生产加固，4 Phase / 13 周 |
-| v2.1 | **AI Copilot first-class** + **自适应下载运筹优化** + **企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）** + 跨地域复制 + SLA 分级 + 离线 export bundle + 行为遥测预热 |
-| v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 |
-| v2.3 | 多 controller cluster（按 tenant 分片）|
+| 版本 | 内容 | 状态 |
+|------|------|------|
+| **v2.0** | 单租户基座 → 分布式正确性 → 多租户 + 多源 → 增量去重 → CLI/SDK | ✅ **已实现并合并**（Phase 1/2/3，PR #1–#18） |
+| v2.1 | AI Copilot first-class + 自适应下载运筹优化 + 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）+ 跨地域复制 + SLA 分级 | 📐 设计完成，待实现 |
+| v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 | 📐 设计 |
+| v2.3 | 多 controller cluster（按 tenant 分片）| 📐 设计 |
 
 详见 [`08 §7`](./docs/v2.0/08-mvp-roadmap.md)。
 
@@ -495,21 +531,22 @@ CI 强制失败任何违反不变量的 PR。
 
 ## 现状声明
 
-✅ **完成**：
+✅ **已实现并合并（v2.0 Phase 1/2/3）**：
 
-- 18000+ 行设计文档 + 部署物料
-- 完整 OpenAPI 3.1 spec（可生成 SDK）
-- 5 位虚拟 reviewer 的 70+ 条问题已修复（架构一致性 / 分布式正确性 / 安全 / 运维 / 盲区）
-- 4-Phase 13 周实施 roadmap
-- v1.x → v2.0 数据迁移方案
-- Helm chart + Prometheus 告警 + Grafana dashboard + 6 份 runbook 脚本
+- **Phase 1** 基座：FastAPI 控制器 + PG schema + 调度/状态机 + 真实 HF→S3 multipart 下载（PR #1–#6）
+- **Phase 2** 分布式正确性：fence/recovery、chunk 下载器、cancel/paused、mTLS+executor-JWT+心跳HMAC、HF 反向代理、active/standby 控制器（PR #7–#14）
+- **Phase 3** 平台化：多租户(OIDC/RBAC/配额/tenant 隔离)、多源(测速+LPT+chunk路由+blacklist)、增量下载+全局去重(refcount/GC)、`dlw` CLI + Python SDK(sync/async)（PR #15–#18）
+- 后端 Python + FastAPI + SQLAlchemy + alembic；前端 Vue3 脚手架；**427 测试全绿，CI 全程一次过**
+- 完整 OpenAPI 3.1 spec、Helm chart、Prometheus 告警、Grafana dashboard、6 份 runbook 脚本
 
-🚧 **待开始**：
+🚧 **待开始（v2.1+，设计已完成）**：
 
-- 后端代码实现（Python + FastAPI + SQLAlchemy）
-- 前端代码实现（Vue 3 + Pinia + Element Plus）
-- CLI / Python SDK 实现
-- E2E 测试与 chaos 演练落地
+- AI Copilot 嵌入式聊天 + MCP 工具
+- 自适应在线运筹优化（子分片重规划）
+- 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Live Console）
+- 物理字节 GC + quota/LRU 驱逐（Phase 4）
+
+> 已知限制（spec 内显式 defer）：多源 chunk 级 Range↔chunk-row 对齐回退到全文件兜底（安全，不静默损坏）；SP3 GC 仅回收 refcount=0 的 DB 行（物理字节回收 defer Phase 4）；CLI/SDK 为 MVP 面（OIDC 登录/WS 事件流/materialize 等 defer）。详见各 `docs/operator/*.md`。
 
 ---
 

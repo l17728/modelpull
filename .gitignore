@@ -89,3 +89,5 @@ charts/
 
 # local tooling (minio smoke-test binary) — not committed
 .tools/
+# local runtime: controller/executor/minio data, dev CA + certs (SECRETS)
+.run/

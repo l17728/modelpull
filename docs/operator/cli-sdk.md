@@ -37,6 +37,44 @@ Config file path: `--config`/`DLW_CONFIG` > `$XDG_CONFIG_HOME/dlw/config.yaml`
 > `~/.dlw/config.yaml`. A **missing config file is not an error** (env/flags
 suffice — the non-interactive/CI path). A missing token → exit code 2.
 
+### 2.1 Two operational gotchas (verified against a live deployment)
+
+1. **Use a tenant-USER JWT to submit tasks, not the system-admin service
+   token.** The admin service token resolves to `user_id=0`, and
+   `download_tasks.owner_user_id` has an FK to `users` — there is no
+   `User(id=0)`, so `POST /api/v1/tasks` (`dlw submit`) returns **500**
+   (`fk_download_tasks_owner_user_id_users`). Mint a tenant-user JWT
+   instead (the `user_id` must match a real `users` row, e.g. the seeded
+   `user_id=1`):
+
+   ```bash
+   uv run python -c "from dlw.auth.principal import issue_system_jwt; \
+     print(issue_system_jwt(secret='<DLW_SYSTEM_JWT_SECRET>', user_id=1, \
+     tenant_id=1, role='tenant_admin', project_ids=[]))"
+   ```
+
+   The admin service token is for the admin/management plane, not task
+   ownership. The JWT TTL is 1 h — re-mint on `401`.
+
+2. **Self-signed CA: the SDK/CLI have no `--cacert`/`verify=` option**
+   (documented MVP limitation). When the controller serves HTTPS with a
+   private/dev CA, point httpx's default trust store at it via the
+   **`SSL_CERT_FILE`** env var (httpx's default SSL context honors it):
+
+   ```bash
+   export SSL_CERT_FILE="$PWD/.ca/ca-cert.pem"
+   uv run dlw --server https://localhost:8000 --token "$JWT" list
+   ```
+
+   (Raw `curl` against a self-signed controller may report `HTTP 000` in
+   some shells — that is a curl/CA quirk, not a controller fault; use the
+   CLI or httpx with the CA.)
+
+> A ready-to-`source` helper that mints a fresh tenant JWT + sets
+> `SSL_CERT_FILE` + `DLW_SERVER` is shown in
+> [`docs/operator/local-deployment.md`](./local-deployment.md) and
+> [`docs/getting-started.md`](../getting-started.md) §6.
+
 ## 3. CLI commands
 
 ```bash
