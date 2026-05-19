@@ -1,4 +1,5 @@
 import { useQuery, type QueryKey } from '@tanstack/vue-query'
+import type { Ref } from 'vue'
 
 const ERROR_BACKOFF_MS = 5_000
 const HIDDEN_MULTIPLIER = 3
@@ -15,6 +16,7 @@ export interface LiveOptions<T> {
   baseIntervalMs: number
   isTerminal?: (data: T) => boolean
   staleTime?: number
+  enabled?: Ref<boolean> | boolean
 }
 
 /**
@@ -33,6 +35,7 @@ export function useLiveResource<T>(
   return useQuery<T>({
     queryKey: key,
     queryFn: fetcher,
+    enabled: opts.enabled,
     staleTime: opts.staleTime ?? 0,
     refetchInterval: (query) => {
       const data = query.state.data as T | undefined
