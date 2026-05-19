@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -15,6 +15,13 @@ from dlw.db.models.task import DownloadTask
 from dlw.db.session import get_engine
 from dlw.db.tenant_scope import tenant_filtered
 from dlw.schemas.task import TaskCreate, TaskDetail, TaskList, TaskRead
+from dlw.schemas.task_detail import (
+    ParticipatingExecutors,
+    SourceAllocation,
+    SubtaskChunkReport,
+    TaskEventsResponse,
+)
+from dlw.services import task_detail as _td
 from dlw.services.audit import write_audit
 from dlw.services.hf_metadata import (
     HfNetworkError,
@@ -179,3 +186,25 @@ async def delete_task(
         await deref_subtask(session, sub.id)
     await session.delete(row)          # FK cascade → subtasks → object refs
     await session.commit()
+
+
+async def _task_in_tenant(
+    session: AsyncSession, task_id: uuid.UUID, principal: Principal,
+) -> bool:
+    owned = await session.scalar(
+        tenant_filtered(select(DownloadTask.id)
+                        .where(DownloadTask.id == task_id),
+                        DownloadTask, principal))
+    return owned is not None
+
+
+@router.get("/{task_id}/subtask-chunks")
+async def get_subtask_chunks(
+    task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> SubtaskChunkReport:
+    if not await _task_in_tenant(session, task_id, principal):
+        raise HTTPException(status_code=404, detail="task not found")
+    return SubtaskChunkReport(
+        items=await _td.chunks_for_task(session, task_id, principal.tenant_id))
