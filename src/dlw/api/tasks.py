@@ -22,6 +22,7 @@ from dlw.services.hf_metadata import (
     RepoNotFound,
 )
 from dlw.services.quota import QuotaExceeded, check_quota_for_new_task
+from dlw.services.storage_objects import deref_subtask
 from dlw.services.task_service import EmptyRepo, cancel_task, create_task
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -153,3 +154,28 @@ async def post_cancel_task(
         raise HTTPException(status_code=409, detail=str(e)) from e
     await session.commit()
     return TaskRead.model_validate(task)
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT,
+                response_model=None)
+async def delete_task(
+    task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "DELETE")),
+    session: AsyncSession = Depends(_session),
+) -> None:
+    row = (await session.execute(
+        tenant_filtered(
+            select(DownloadTask).where(DownloadTask.id == task_id),
+            DownloadTask, principal)
+        .options(selectinload(DownloadTask.subtasks))
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if row.status not in ("succeeded", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TASK_NOT_TERMINAL", "status": row.status})
+    for sub in row.subtasks:
+        await deref_subtask(session, sub.id)
+    await session.delete(row)          # FK cascade → subtasks → object refs
+    await session.commit()

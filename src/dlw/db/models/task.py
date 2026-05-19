@@ -66,10 +66,16 @@ class DownloadTask(Base):
     # so DB-level cleanup handles deletion. Adding ORM-level "delete-orphan"
     # would risk scheduling orphan deletes if any code path triggers a lazy
     # load of an empty in-memory subtasks collection on a flushed parent.
+    # "delete" + passive_deletes=True makes the ORM defer to that ON DELETE
+    # CASCADE on session.delete(task) instead of UPDATE-ing loaded children's
+    # task_id to NULL (NOT NULL violation) — required by DELETE /tasks. Plain
+    # "delete" (NOT "delete-orphan") only fires when the parent itself is
+    # deleted, so it carries none of the orphan-on-lazy-load risk above.
     subtasks: Mapped[list[FileSubTask]] = relationship(
         "FileSubTask",
         back_populates="task",
-        cascade="save-update, merge",
+        cascade="save-update, merge, delete",
+        passive_deletes=True,
         lazy="select",
     )
 
