@@ -61,7 +61,9 @@
 
 ### Task 1: en-US locale + zh-CN parity + i18n registration
 
-**Files:** Create `src/locale/en-US.json`; Modify `src/locale/zh-CN.json`, `src/main.ts`; Test `tests/unit/locale.spec.ts`
+**Files:** Create `src/locale/en-US.json`; Modify `src/locale/zh-CN.json`; Test `tests/unit/locale.spec.ts`
+
+> **Pre-review fix (A-B3):** Task 1 does **not** touch `src/main.ts`. The whole i18n-instance move lives in Task 3 (which creates `src/i18n.ts` + rewrites `main.ts` fully). A partial `main.ts` edit here is throwaway and risks a red gate. The locale-parity test does not need `main.ts`.
 
 - [ ] **Step 1: Write the failing test** — `frontend/tests/unit/locale.spec.ts`:
 ```ts
@@ -227,25 +229,14 @@ Create `frontend/src/locale/en-US.json` (identical structure, English values):
 }
 ```
 
-Modify `frontend/src/main.ts` — import en + register:
-```ts
-import zhCN from './locale/zh-CN.json'
-import enUS from './locale/en-US.json'
+(No `main.ts` change in Task 1 — pre-review fix A-B3; Task 3 owns the full i18n move.)
 
-const i18n = createI18n({
-  legacy: false,
-  locale: localStorage.getItem('dlw_locale') ?? 'zh-CN',
-  fallbackLocale: 'zh-CN',
-  messages: { 'zh-CN': zhCN, 'en-US': enUS },
-})
-```
-
-- [ ] **Step 4: Run** `pnpm test:unit -- tests/unit/locale.spec.ts` → PASS. Then `pnpm lint:fix && pnpm lint && pnpm typecheck`.
+- [ ] **Step 4: Run** `pnpm test:unit -- tests/unit/locale.spec.ts` → PASS. Then `pnpm lint:fix && pnpm lint`. (No `pnpm typecheck` here — no TS changed; Task 3 runs it after the i18n move.)
 
 - [ ] **Step 5: Commit**
 ```bash
-git add frontend/src/locale frontend/src/main.ts frontend/tests/unit/locale.spec.ts
-git commit -m "feat(ui-sp1): en-US locale + zh parity + i18n registration"
+git add frontend/src/locale frontend/tests/unit/locale.spec.ts
+git commit -m "feat(ui-sp1): en-US locale + zh parity"
 ```
 
 ---
@@ -435,7 +426,10 @@ app.use(VueQueryPlugin, {
   },
 })
 useUiStore().hydrate()
-app.mount('#app')
+// Pre-review fix B-I2: mount AFTER the initial route resolves so
+// App.vue's `route.name` is defined on first render — otherwise an
+// authenticated user briefly sees the bare (login) layout flash.
+router.isReady().then(() => app.mount('#app'))
 ```
 Create `frontend/src/stores/ui.ts`:
 ```ts
@@ -563,9 +557,10 @@ export interface TaskCreateBody {
   source_strategy?: string
   source_blacklist?: string[]
   trust_non_hf_sha256?: boolean
-  upgrade_from_revision?: string | null
+  upgrade_from_revision?: string
 }
 ```
+(Pre-review fix B-I5/A-B2: `upgrade_from_revision` is `?: string` — **not** `| null` — so the optional field can be `delete`d cleanly and never bound through a `v-model` cast. Task 14 reflects this.)
 Create `frontend/src/stores/session.ts`:
 ```ts
 import { computed } from 'vue'
@@ -577,8 +572,13 @@ export function decodePrincipal(token: string | null): Principal | null {
   if (!token) return null
   const parts = token.split('.')
   if (parts.length !== 3) return null
+  const payload = parts[1]              // B-A1: bind (noUncheckedIndexedAccess)
+  if (!payload) return null
   try {
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const raw = payload.replace(/-/g, '+').replace(/_/g, '/')
+    // B-B1: JWT base64url is unpadded — re-pad before atob (atob is
+    // length-dependent / throws on `len % 4 === 1` without padding).
+    const b64 = raw + '='.repeat((4 - (raw.length % 4)) % 4)
     const json = decodeURIComponent(
       atob(b64).split('').map(
         (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join(''),
@@ -669,7 +669,6 @@ describe('task-detail polling via computeInterval', () => {
 - [ ] **Step 3: Implement** `frontend/src/composables/useLiveResource.ts`:
 ```ts
 import { useQuery, type QueryKey } from '@tanstack/vue-query'
-import { type MaybeRefOrGetter, toValue } from 'vue'
 
 const ERROR_BACKOFF_MS = 5_000
 const HIDDEN_MULTIPLIER = 3
@@ -692,13 +691,17 @@ export interface LiveOptions<T> {
  * Single realtime seam. Today: adaptive polling on vue-query. UI-SP5 swaps
  * the internals to SSE/WS — consumers (views) never change.
  */
+// Pre-review fix A-I1: vue-query v5.59 does NOT accept a getter for
+// `queryKey` — it must be a QueryKey (array). Reactivity comes from putting
+// refs *inside* the array (v5 unwraps them), exactly like the scaffold's
+// proven useTaskDetail.ts (`queryKey: ['task', taskId]`).
 export function useLiveResource<T>(
-  key: MaybeRefOrGetter<QueryKey>,
+  key: QueryKey,
   fetcher: () => Promise<T>,
   opts: LiveOptions<T>,
 ) {
   return useQuery<T>({
-    queryKey: () => toValue(key),
+    queryKey: key,
     queryFn: fetcher,
     staleTime: opts.staleTime ?? 0,
     refetchInterval: (query) => {
@@ -737,7 +740,7 @@ import { TERMINAL_STATUSES, type TaskDetail } from '@/api/types'
 
 export function useTaskDetail(taskId: Ref<string>) {
   return useLiveResource<TaskDetail>(
-    () => ['task', taskId.value],
+    ['task', taskId],
     async () => (await client.get<TaskDetail>(`/api/v1/tasks/${taskId.value}`)).data,
     { baseIntervalMs: 1_000, isTerminal: (d) => TERMINAL_STATUSES.has(d.status) },
   )
@@ -1925,11 +1928,57 @@ describe('mapCreateError', () => {
     expect(mapCreateError(409)).toBe('errors.conflict')
     expect(mapCreateError(422)).toBe('errors.validation')
     expect(mapCreateError(429)).toBe('errors.quota_exceeded')
+    expect(mapCreateError(403)).toBe('errors.forbidden')
     expect(mapCreateError(503)).toBe('errors.service_unavailable')
     expect(mapCreateError(500)).toBe('errors.service_unavailable')
   })
 })
 ```
+
+Also add a **mounted wiring test** (pre-review fix B-M3 — the create-submit path + service-token guard are load-bearing; `TaskCreate` uses raw `client`, not vue-query, so no QueryClient needed) — `frontend/tests/unit/TaskCreate.spec.ts`:
+```ts
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import ElementPlus, { ElMessage } from 'element-plus'
+import { createI18n } from 'vue-i18n'
+import zh from '@/locale/zh-CN.json'
+import { useAuthStore } from '@/stores/auth'
+
+const post = vi.fn()
+vi.mock('@/api/client', () => ({ client: { post: (...a: unknown[]) => post(...a) } }))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
+
+const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zh } })
+function mountCreate() {
+  return import('@/pages/TaskCreate.vue').then((m) =>
+    mount(m.default, { global: { plugins: [ElementPlus, i18n] } }))
+}
+const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, '')
+
+describe('TaskCreate wiring', () => {
+  beforeEach(() => { setActivePinia(createPinia()); post.mockReset() })
+
+  test('429 → quota_exceeded error message', async () => {
+    useAuthStore().login(`h.${b64({ sub: '1', tid: 1, role: 'tenant_admin', pids: [] })}.s`)
+    const spy = vi.spyOn(ElMessage, 'error')
+    post.mockRejectedValueOnce({ response: { status: 429 } })
+    const w = await mountCreate()
+    ;(w.vm as unknown as { form: Record<string, unknown> }).form.repo_id = 'o/m'
+    ;(w.vm as unknown as { form: Record<string, unknown> }).form.revision = 'a'.repeat(40)
+    await (w.vm as unknown as { submit: () => Promise<void> }).submit()
+    expect(spy).toHaveBeenCalledWith(zh.errors.quota_exceeded)
+  })
+
+  test('service token → submit disabled', async () => {
+    useAuthStore().login(`h.${b64({ sub: '0', tid: 1, role: 'system_admin', pids: [] })}.s`)
+    const w = await mountCreate()
+    const btn = w.findComponent({ name: 'ElButton' })
+    expect(btn.props('disabled')).toBe(true)
+  })
+})
+```
+(TaskCreate's `submit` + `form` must be exposed for the test — add `defineExpose({ submit, form })` at the end of its `<script setup>` in Step 3.)
 
 - [ ] **Step 2: Run** `pnpm test:unit -- tests/unit/createValidation.spec.ts` → FAIL.
 
@@ -1951,6 +2000,7 @@ export function validateCreate(b: Partial<TaskCreateBody>): string[] {
 }
 
 export function mapCreateError(status: number | undefined): string {
+  if (status === 403) return 'errors.forbidden'   // B-M2: RBAC denied
   if (status === 409) return 'errors.conflict'
   if (status === 422) return 'errors.validation'
   if (status === 429) return 'errors.quota_exceeded'
@@ -1977,7 +2027,7 @@ const submitting = ref(false)
 const form = reactive<TaskCreateBody>({
   repo_id: '', revision: '', storage_id: 1, priority: 1,
   source_strategy: 'auto_balance', trust_non_hf_sha256: false,
-  upgrade_from_revision: null,
+  upgrade_from_revision: '',     // B-A2/B-I5: string (not null) — no v-model cast
 })
 
 async function submit() {
@@ -2000,6 +2050,8 @@ async function submit() {
     submitting.value = false
   }
 }
+
+defineExpose({ submit, form })   // B-M3: mounted wiring test drives these
 </script>
 
 <template>
@@ -2055,7 +2107,7 @@ async function submit() {
       </el-form-item>
       <el-form-item :label="t('create.upgradeFrom')">
         <el-input
-          v-model="form.upgrade_from_revision as string"
+          v-model="form.upgrade_from_revision"
           placeholder="(optional) 40-hex sha"
         />
       </el-form-item>
@@ -2078,11 +2130,11 @@ async function submit() {
 </template>
 ```
 
-- [ ] **Step 4: Run** `pnpm test:unit -- tests/unit/createValidation.spec.ts` → PASS. `pnpm lint:fix && pnpm lint && pnpm typecheck`.
+- [ ] **Step 4: Run** `pnpm test:unit -- tests/unit/createValidation.spec.ts tests/unit/TaskCreate.spec.ts` → PASS. `pnpm lint:fix && pnpm lint && pnpm typecheck`.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add frontend/src/tasks/createValidation.ts frontend/src/pages/TaskCreate.vue frontend/tests/unit/createValidation.spec.ts
+git add frontend/src/tasks/createValidation.ts frontend/src/pages/TaskCreate.vue frontend/tests/unit/createValidation.spec.ts frontend/tests/unit/TaskCreate.spec.ts
 git commit -m "feat(ui-sp1): TaskCreate form + service-token preflight guard"
 ```
 
