@@ -644,6 +644,24 @@ paths:
                       controller_state: { type: string, enum: [standby] }
 
   # ========== Executors ==========
+  /executors:
+    get:
+      tags: [executors]
+      summary: List executors visible to the principal (UI-SP3)
+      operationId: listExecutors
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [joining, healthy, degraded, suspect, faulty]
+      responses:
+        '200':
+          description: Executors visible to the principal
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ExecutorListResponse'}
+
   /executors/register:
     post:
       tags: [executors]
@@ -1289,10 +1307,15 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items]
                 properties:
                   items:
                     type: array
                     items: {$ref: '#/components/schemas/AuditEntry'}
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Opaque cursor for the next page; null when no more rows.
 
   # ========== Storage Backends ==========
   /storage-backends:
@@ -2499,7 +2522,11 @@ components:
     ExecutorRead:
       type: object
       required: [id, status, health_score, epoch]
-      description: Returned by /join and /heartbeat to confirm registration.
+      description: |
+        Returned by /join, /heartbeat, and the browser-facing /executors list.
+        UI-SP3 extends this with optional/nullable fields needed by the
+        Executors page; pre-existing consumers (mTLS /join, /heartbeat) are
+        unaffected because all new fields are nullable / optional.
       properties:
         id:
           type: string
@@ -2515,6 +2542,42 @@ components:
           type: integer
           minimum: 0
           description: Current epoch (fence token). Increments on every /join.
+        host_id:
+          type: string
+          nullable: true
+          description: Physical host identifier (groups co-located executors).
+        tenant_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Owning tenant; null for shared-infra executors.
+        last_heartbeat_at:
+          type: string
+          format: date-time
+          nullable: true
+        nic_speed_gbps:
+          type: integer
+          nullable: true
+        disk_free_gb:
+          type: integer
+          format: int64
+          nullable: true
+        disk_total_gb:
+          type: integer
+          format: int64
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ExecutorListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ExecutorRead'}
 
     StorageConfig:
       type: object
