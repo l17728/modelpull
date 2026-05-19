@@ -208,3 +208,28 @@ async def get_subtask_chunks(
         raise HTTPException(status_code=404, detail="task not found")
     return SubtaskChunkReport(
         items=await _td.chunks_for_task(session, task_id, principal.tenant_id))
+
+
+@router.get("/{task_id}/source-allocation")
+async def get_source_allocation(
+    task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> SourceAllocation:
+    if not await _task_in_tenant(session, task_id, principal):
+        raise HTTPException(status_code=404, detail="task not found")
+    return await _td.source_allocation_for_task(
+        session, task_id, principal.tenant_id)
+
+
+@router.get("/{task_id}/participating-executors")
+async def get_participating_executors(
+    task_id: uuid.UUID,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "GET")),
+    session: AsyncSession = Depends(_session),
+) -> ParticipatingExecutors:
+    if not await _task_in_tenant(session, task_id, principal):
+        raise HTTPException(status_code=404, detail="task not found")
+    return ParticipatingExecutors(
+        items=await _td.executors_for_task(
+            session, task_id, principal.tenant_id))
