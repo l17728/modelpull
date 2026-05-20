@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # UI-SP5e — SSE tick rate for /quota/current/stream (clamped at runtime).
     quota_stream_interval_seconds: float = Field(default=15.0)
 
+    # UI-SP5f — SSE tick rate for /tasks/{id}/events/stream (clamped at runtime).
+    task_events_stream_interval_seconds: float = Field(default=5.0)
+
     # Phase 2 W3c — controller leader election
     active_lock_id: int = Field(
         default=0x444C5743_414B5631,

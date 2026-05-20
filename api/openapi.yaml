@@ -529,6 +529,31 @@ paths:
                     items: {$ref: '#/components/schemas/TaskEvent'}
                   next_cursor: {type: string, nullable: true}
 
+  /tasks/{taskId}/events/stream:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Live task-events SSE stream (UI-SP5f)
+      operationId: streamTaskEvents
+      responses:
+        '200':
+          description: SSE stream of TaskEventsResponse snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <TaskEventsResponse JSON>\n\n`
+                  ({items, next_cursor}). Live feed always pushes
+                  page 1 (newest first); the client's "Load older"
+                  button still uses the one-shot
+                  /tasks/{taskId}/events?cursor=… endpoint. Stream
+                  terminates only on client disconnect or shutdown.
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404':
+          description: Task not found (or not in caller's tenant)
+
   /tasks/stream:
     get:
       tags: [tasks]
