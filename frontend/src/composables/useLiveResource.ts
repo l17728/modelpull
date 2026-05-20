@@ -111,7 +111,15 @@ export function useLiveResource<T>(
 
     stopDataWatch = watch(() => q.data.value, tryStart, { immediate: true })
     stopStreamingWatch = watch(streaming, tryStart)
-    onScopeDispose(() => { ac.abort() })
+    onScopeDispose(() => {
+      ac.abort()
+      // Explicit watcher cleanup. tryStart already stops both on first
+      // successful open; this catches the never-opened paths (e.g.
+      // enabled-permanent-false consumer) so Vue's scope-dispose isn't
+      // the only reaper. (Final-review MEDIUM; cosmetic but cheap.)
+      stopDataWatch?.()
+      stopStreamingWatch?.()
+    })
   }
 
   return q
