@@ -106,3 +106,26 @@ actions are not exposed (no endpoints); the file table uses a height-capped
 `el-table` (true `el-table-v2` windowing is a documented follow-up); the event
 log reads existing `audit_log` rows only; real-time push (SSE/WS) arrives in
 UI-SP5 with no view changes.
+
+## UI-SP3 — Infrastructure & Governance
+
+Four new pages backed by **two additive read-only endpoints** (zero migration):
+
+- `GET /api/v1/audit/log` — tenant-scoped audit search (filters: action prefix,
+  actor_user_id, from/to time range; cursor-paginated; matches the on-disk
+  `searchAuditLog` contract).
+- `GET /api/v1/executors` — browser-facing executor list (own-tenant +
+  shared-infra view; `system_admin` sees all). Lives in a new module
+  (`src/dlw/api/executors_read.py`) because the existing `api/executors.py` is
+  mTLS-only per `tools/lint_invariants.py:check_no_bearer_on_executor_routes`.
+
+Pages: **/executors** (host-grouped list + status filter), **/audit** (filterable +
+cursor pagination), **/quota** (3 cards over the existing `/quota/current`),
+**/settings** (frontend-only: principal info from `stores/session.ts`,
+theme/locale from `stores/ui.ts`, controller state from `/health/active`).
+
+**Known deferrals** (intentional, no backend support today): executor
+drain/restart, metrics history, heartbeat history; HF-token rotation;
+license-policy CRUD; source-driver registration; maintenance mode;
+`/quota/usage` (declared but no backing tables); ML forecast; chargeback PDF;
+real-time audit tail (UI-SP5).
