@@ -246,3 +246,51 @@ the full 15 s tick. Subsequent snapshots tick at
 `quota_stream_router` is registered BEFORE `quota_router` in
 `src/dlw/main.py`. The Settings page does NOT consume `useQuota` (it
 only reads `useSystemHealth`); SP5e does not change Settings behavior.
+
+### UI-SP5f — Task Events SSE follow-on
+
+Sixth application of the view-free SSE template, and the first SP2
+sub-resource composable to graduate from polling to SSE. The Events
+tab on TaskDetail (`useTaskEvents`, consumed by the events panel in
+`TaskDetail.vue`) now talks SSE via
+`GET /api/v1/tasks/{task_id}/events/stream` (5 s default tick;
+`DLW_TASK_EVENTS_STREAM_INTERVAL_SECONDS` overrides; clamped
+`[0.5, 60.0]`). The view-side consumers are unchanged; the SP2
+"Load older" cursor pagination (`fetchOlderEvents`) is untouched.
+
+The stream sends page 1 only — it reuses
+`events_for_task(session, task_id, tenant_id, limit=50, cursor=None)`
+(SP2-introduced; already a service, no extraction needed) and wraps
+the result as `TaskEventsResponse`. Older pages still come from the
+one-shot `GET /api/v1/tasks/{task_id}/events?cursor=…` endpoint. The
+stream URL is **reactive to the `taskId` ref**: `useTaskEvents`
+derives `streamUrl` from a `computed` over the `taskId` prop. Same
+routing precaution as SP5c/SP5d/SP5e: `tasks_events_stream_router`
+is registered after `tasks_list_stream_router` and BEFORE
+`tasks_router` in `src/dlw/main.py`.
+
+**Seam evolution forced by SP5f**: `useLiveResource`'s
+`streaming` gate was a `const` evaluated once at composable
+call-time (SP5-SP5e all passed `enabled = undefined` or a Ref
+starting `true`, so this was fine). SP5f's `useTaskEvents` is the
+first SSE consumer whose `enabled` Ref starts `false` (Events tab is
+inactive at TaskDetail mount; user clicks to activate). With the old
+seam, the SSE would never open. SP5f converts `streaming` to a
+`computed(() => shouldStream(...))` and adds a second
+`watch(streaming, tryStart)` alongside the existing
+`watch(() => q.data.value, tryStart, { immediate: true })` so the
+SSE lazy-opens on first `enabled === true` AND data-available
+transition. Existing 5 consumers are unaffected (their
+`streaming.value` is `true` from start, so the immediate data
+watcher opens the SSE exactly as before). Regression-proof:
+`useLiveResourceEnabledSse.spec.ts` covers all three timing cases
+(enabled=false-permanent, enabled=false-then-true, enabled=true-at-mount).
+
+**Browser connection-cap note**: a TaskDetail page with the Events
+tab active will hold two concurrent SSE connections to the
+controller origin (the SP5 task-detail stream `/tasks/{id}/stream`
+for the header aggregator + the new SP5f events stream
+`/tasks/{id}/events/stream`). Well within the per-origin HTTP/2 cap
+(~100); the HTTP/1.1 6-stream cap (e.g. Vite dev proxy) is unlikely
+to be exhausted in practice given tab-gated lifecycle. No mitigation
+implemented; documented for awareness.
