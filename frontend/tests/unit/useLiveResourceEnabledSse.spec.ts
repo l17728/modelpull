@@ -1,11 +1,11 @@
 import { describe, expect, test, vi } from 'vitest'
-import { ref, nextTick, defineComponent } from 'vue'
+import { ref, nextTick, defineComponent, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { createPinia, setActivePinia } from 'pinia'
 
 const { streamSseMock } = vi.hoisted(() => ({
-  streamSseMock: vi.fn(() => new Promise(() => {})),
+  streamSseMock: vi.fn((_opts: { url: string }) => new Promise(() => {})),
 }))
 vi.mock('@/api/sse', async () => {
   const actual = await vi.importActual<typeof import('@/api/sse')>('@/api/sse')
@@ -14,7 +14,7 @@ vi.mock('@/api/sse', async () => {
 
 import { useLiveResource } from '@/composables/useLiveResource'
 
-function mountWith(enabled: ReturnType<typeof ref<boolean>>) {
+function mountWith(enabled: Ref<boolean>) {
   setActivePinia(createPinia())
   const Comp = defineComponent({
     setup() {
