@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Phase 2 W3b — HF reverse-proxy
     hf_proxy_timeout_seconds: int = Field(default=300, ge=10, le=3600)
 
+    # UI-SP5 — SSE tick rate for /tasks/{id}/stream (clamped at runtime).
+    task_stream_interval_seconds: float = Field(default=1.0)
+
     # Phase 2 W3c — controller leader election
     active_lock_id: int = Field(
         default=0x444C5743_414B5631,
