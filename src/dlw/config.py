@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # UI-SP5b — SSE tick rate for /executors/stream (clamped at runtime).
     executors_stream_interval_seconds: float = Field(default=5.0)
 
+    # UI-SP5c — SSE tick rate for /tasks/stream (clamped at runtime).
+    tasks_list_stream_interval_seconds: float = Field(default=5.0)
+
     # Phase 2 W3c — controller leader election
     active_lock_id: int = Field(
         default=0x444C5743_414B5631,
