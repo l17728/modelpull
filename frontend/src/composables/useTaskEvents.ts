@@ -1,4 +1,4 @@
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import { useLiveResource } from '@/composables/useLiveResource'
 import { client } from '@/api/client'
 import type { TaskEventsResponse } from '@/api/types'
@@ -6,11 +6,20 @@ import type { TaskEventsResponse } from '@/api/types'
 export function useTaskEvents(
   taskId: Ref<string>, enabled: Ref<boolean>, terminal: Ref<boolean>,
 ) {
+  const streamUrl = computed(
+    () => `/api/v1/tasks/${taskId.value}/events/stream`)
   return useLiveResource<TaskEventsResponse>(
     ['task-events', taskId],
     async () => (await client.get<TaskEventsResponse>(
       `/api/v1/tasks/${taskId.value}/events?limit=50`)).data,
-    { baseIntervalMs: 5_000, enabled, isTerminal: () => terminal.value },
+    {
+      baseIntervalMs: 5_000,
+      enabled,
+      isTerminal: () => terminal.value,
+      streamUrl,
+      applyEvent: (_prev, ev) =>
+        JSON.parse(ev.data) as TaskEventsResponse,
+    },
   )
 }
 

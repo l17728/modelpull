@@ -297,6 +297,12 @@ def create_app() -> FastAPI:
     # path wins over `/{task_id}` (FastAPI iterates routers in include order).
     from dlw.api.tasks_list_stream import router as tasks_list_stream_router
     app.include_router(tasks_list_stream_router)
+    # SP5f: tasks-events stream router included BEFORE tasks_router for
+    # defensive consistency with SP5c/SP5d/SP5e lesson. The new path
+    # `/{task_id}/events/stream` has distinct depth from any existing
+    # `/{task_id}/*` route, so no actual collision — pattern only.
+    from dlw.api.tasks_events_stream import router as tasks_events_stream_router
+    app.include_router(tasks_events_stream_router)
     from dlw.api.tasks import router as tasks_router
     app.include_router(tasks_router)
     from dlw.api.executors import router as executors_router
