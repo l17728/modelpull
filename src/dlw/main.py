@@ -309,6 +309,11 @@ def create_app() -> FastAPI:
     app.include_router(quota_router)
     from dlw.api.source_proxy import router as source_proxy_router
     app.include_router(source_proxy_router)
+    # SP5d: audit stream router registered BEFORE audit_router for
+    # defensive consistency with SP5c lesson (static paths win on include
+    # order; harmless if no parameterized sibling exists today).
+    from dlw.api.audit_stream import router as audit_stream_router
+    app.include_router(audit_stream_router)
     from dlw.api.audit import router as audit_router
     app.include_router(audit_router)
     from dlw.api.executors_read import router as executors_read_router
