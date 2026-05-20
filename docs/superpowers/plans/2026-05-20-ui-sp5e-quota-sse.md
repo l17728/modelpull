@@ -228,8 +228,6 @@ from dlw.services.quota_read import get_quota_snapshot
 
 router = APIRouter(prefix="/api/v1/quota", tags=["quota"])
 
-_KEEPALIVE_EVERY_TICKS = 3  # vestigial (cf. SP5+); kept for parity
-
 
 def _clamped_interval() -> float:
     raw = float(getattr(
@@ -259,7 +257,6 @@ async def stream_quota_current(
         yield b":open\n\n"
         # First tick = the pre-stream snapshot (already fetched; cheap).
         yield (f"data: {json.dumps(initial)}\n\n").encode("utf-8")
-        ticks_since_data = 0
         tick_count = 1
         if max_ticks is not None and tick_count >= max_ticks:
             return
@@ -280,14 +277,9 @@ async def stream_quota_current(
                 if snap is None:
                     return  # tenant gone mid-stream — close cleanly
                 yield (f"data: {json.dumps(snap)}\n\n").encode("utf-8")
-                ticks_since_data = 0
                 tick_count += 1
                 if max_ticks is not None and tick_count >= max_ticks:
                     return
-                ticks_since_data += 1
-                if ticks_since_data >= _KEEPALIVE_EVERY_TICKS:
-                    yield b":keepalive\n\n"
-                    ticks_since_data = 0
         except asyncio.CancelledError:
             return
 
@@ -301,7 +293,14 @@ async def stream_quota_current(
     )
 ```
 
-- [ ] **Step 2**: Modify `src/dlw/main.py` — register `quota_stream_router` BEFORE the existing `quota_router`. Find the existing `from dlw.api.quota import router as quota_router` / `app.include_router(quota_router)` pair (around line 308-309) and insert the new pair before it:
+- [ ] **Step 2**: Modify `src/dlw/main.py` — register `quota_stream_router` BEFORE the existing `quota_router`. The existing block at `main.py:308-309` reads:
+
+```python
+    from dlw.api.quota import router as quota_router
+    app.include_router(quota_router)
+```
+
+**REPLACE those two lines with the four-line block below** (do NOT add to them — adding without replacing would include `quota_router` twice, registering `/api/v1/quota/current` on two routers):
 
 ```python
     # SP5e: quota stream router registered BEFORE quota_router for

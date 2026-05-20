@@ -250,15 +250,17 @@ stays `['quota']`.
 
 - `frontend/src/pages/QuotaPage.vue` — NOT modified.
 - `frontend/src/components/infra/QuotaCard.vue` — NOT modified.
-- The Settings page also reads `useQuota()` — NOT modified.
+- `frontend/src/pages/Settings.vue` does NOT consume `useQuota` (it only
+  reads `useSystemHealth`) — irrelevant to this SP.
 - Existing `frontend/tests/unit/sp3Composables.spec.ts::useQuota`
   (if it exists) — NOT modified; must pass unchanged.
 
 ### 4.4 Headed smoke
 
 Same recipe: fresh `:8011` controller with SP5e code + Vite proxying to
-it + headed Playwright navigate to `/quota` (or `/settings`), observe
-`/quota/current/stream` SSE request in DevTools network.
+it + headed Playwright navigate to `/quota`, observe
+`/quota/current/stream` SSE request in DevTools network. (`/settings`
+does NOT call `useQuota`, so it is NOT a valid smoke route for this SP.)
 
 ## 5. Milestones
 
