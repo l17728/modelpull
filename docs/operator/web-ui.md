@@ -129,3 +129,40 @@ drain/restart, metrics history, heartbeat history; HF-token rotation;
 license-policy CRUD; source-driver registration; maintenance mode;
 `/quota/usage` (declared but no backing tables); ML forecast; chargeback PDF;
 real-time audit tail (UI-SP5).
+
+## UI-SP5 — Realtime SSE swap (delivered)
+
+`useLiveResource` now supports an opt-in SSE transport. The locked promise
+recorded in SP1/SP2/SP3 — *"SP5 swaps internals to SSE/WS with zero view
+changes"* — is honored: every view, page, and other composable is unchanged.
+
+- **Backend**: `GET /api/v1/tasks/{id}/stream` — hand-rolled
+  `text/event-stream` via FastAPI `StreamingResponse` (same idiom as
+  `hf_proxy.py`). 1 Hz default tick rate (env
+  `DLW_TASK_STREAM_INTERVAL_SECONDS` overrides; clamped `[0.1, 10.0]`).
+  Tenant-scoped via the proven cancel-pattern (404 cross-tenant). Terminates
+  on terminal task status, client disconnect, or controller shutdown. A
+  `?max_ticks=N` query param is supported for testability (httpx
+  `ASGITransport` buffers the response body until the generator closes, so
+  multi-tick tests need a natural-termination hatch).
+- **Frontend**: `frontend/src/api/sse.ts` (pure `parseSseChunk` + `streamSse`
+  fetch + ReadableStream with exponential backoff, Bearer-via-header). The
+  `useLiveResource` composable gains optional `streamUrl` + `applyEvent`
+  fields; when both are set, the composable opens an SSE connection after
+  the first snapshot and writes events into the vue-query cache. On 3
+  consecutive failures the stream gives up and polling resumes automatically.
+  On 401 the streamer calls `auth.logout()`; on 403/404 it fails fast (no
+  backoff burn).
+- **One consumer opts in**: `useTaskDetail`. Every other composable
+  (`useTaskList`, `useQuota`, the 4 SP2 sub-resource composables, the 3 SP3
+  composables) stays on polling.
+
+**At a glance**: open `/tasks/<id>` in DevTools Network — you'll see one
+long-lived `text/event-stream` connection per visit instead of a 1 Hz polling
+loop.
+
+**Deferrals**: WebSocket transport (SSE delivers the same outcome simpler);
+streaming for the 4 SP2 sub-resources (would force a multi-resource envelope
+that breaks view-free); SSE for the low-frequency SP3 composables (push value
+is negligible at 5–30 s cadences). UI-SP4 (AI-Copilot) remains the v2.1
+follow-up.

@@ -529,6 +529,25 @@ paths:
                     items: {$ref: '#/components/schemas/TaskEvent'}
                   next_cursor: {type: string, nullable: true}
 
+  /tasks/{taskId}/stream:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Live TaskDetail SSE stream (UI-SP5)
+      operationId: streamTaskDetail
+      responses:
+        '200':
+          description: SSE stream of TaskDetail snapshots (text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <TaskDetail JSON>\n\n`. Stream terminates
+                  on terminal task status, client disconnect, or controller
+                  shutdown. Keep-alive comment lines (`:keepalive`) may appear.
+
   /tasks/{taskId}/subtask-chunks:
     parameters:
       - $ref: '#/components/parameters/TaskId'
