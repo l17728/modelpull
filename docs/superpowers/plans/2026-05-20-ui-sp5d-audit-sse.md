@@ -43,7 +43,7 @@
 
 ### Task 1: OpenAPI + config
 
-- [ ] **Step 1**: In `api/openapi.yaml`, find the existing `/audit/log:` GET block (around line 1266 — SP3-added). Insert `/audit/log/stream:` block immediately after the response of `/audit/log` and before the next sibling path (look for the `# ==========` section header that follows `/audit/log`).
+- [ ] **Step 1**: In `api/openapi.yaml`, find the existing `/audit/log:` GET block (around line 1343 — SP3-added). The next section header that follows is `# ========== Storage Backends ==========` at line ~1379. Insert `/audit/log/stream:` block immediately before that section header (i.e. after the `/audit/log` GET response closes).
 
 ```yaml
 
