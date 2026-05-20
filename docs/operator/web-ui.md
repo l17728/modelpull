@@ -163,6 +163,17 @@ loop.
 
 **Deferrals**: WebSocket transport (SSE delivers the same outcome simpler);
 streaming for the 4 SP2 sub-resources (would force a multi-resource envelope
-that breaks view-free); SSE for the low-frequency SP3 composables (push value
-is negligible at 5–30 s cadences). UI-SP4 (AI-Copilot) remains the v2.1
-follow-up.
+that breaks view-free). UI-SP4 (AI-Copilot) remains the v2.1 follow-up.
+
+### UI-SP5b — Executors SSE follow-on
+
+Same architecture, second consumer. `useExecutors` (the `/executors` page)
+now talks SSE via `GET /api/v1/executors/stream` (5 s default tick;
+`DLW_EXECUTORS_STREAM_INTERVAL_SECONDS` overrides; clamped `[0.5, 60.0]`).
+The page (`Executors.vue`) is unchanged; only the composable opts in. SP3's
+existing tests (`ExecutorsPage.spec.ts` + the `sp3Composables.spec.ts`
+useExecutors wiring test) pass without modification — the view-free property
+holds against a second consumer.
+
+Tenant filtering reuses SP3's `list_executors_for_principal` (own-tenant +
+shared-infra; `system_admin`/service-token bypass).
