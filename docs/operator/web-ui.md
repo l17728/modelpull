@@ -221,3 +221,28 @@ fetcher uses, so changing any filter both re-fetches and re-streams under
 the new URL — preserving the "filter ⇒ live tail of that filter" semantics
 SP3 established. Same routing precaution as SP5c: `audit_stream_router` is
 registered BEFORE `audit_router` in `src/dlw/main.py`.
+
+### UI-SP5e — Quota snapshot SSE follow-on
+
+Fifth application of the view-free SSE template. The Quota page
+(`useQuota`, consumed by `QuotaPage.vue` and the `QuotaCard` infra
+component) now talks SSE via `GET /api/v1/quota/current/stream`
+(15 s default tick; `DLW_QUOTA_STREAM_INTERVAL_SECONDS` overrides;
+clamped `[0.5, 60.0]`). The view-side consumers are unchanged.
+
+The endpoint and the existing one-shot `GET /api/v1/quota/current` share
+a single service function `get_quota_snapshot(session, tenant_id)` in
+`src/dlw/services/quota_read.py` (extracted as part of SP5e — the prior
+in-handler query was replaced by a call to the service; the existing
+`tests/api/test_quota_api.py` is the regression proof of the refactor).
+This is the first SP5* application that introduces a service extraction
+alongside the SSE wrapper — DRY justified by adding a second caller.
+
+The stream emits the **first snapshot immediately** as part of opening
+(using the same pre-stream tenant existence check that issues 404 when
+the tenant is gone), so the UI gets data on `:open`+1 instead of waiting
+the full 15 s tick. Subsequent snapshots tick at
+`quota_stream_interval_seconds`. Same routing precaution as SP5c/SP5d:
+`quota_stream_router` is registered BEFORE `quota_router` in
+`src/dlw/main.py`. The Settings page does NOT consume `useQuota` (it
+only reads `useSystemHealth`); SP5e does not change Settings behavior.
