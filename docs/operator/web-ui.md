@@ -177,3 +177,24 @@ holds against a second consumer.
 
 Tenant filtering reuses SP3's `list_executors_for_principal` (own-tenant +
 shared-infra; `system_admin`/service-token bypass).
+
+### UI-SP5c — Tasks-list SSE follow-on
+
+Third application of the view-free SSE template. The Tasks landing page
+(`useTaskList`, consumed by both `TaskList.vue` and the Dashboard "recent
+tasks" widget) now talks SSE via `GET /api/v1/tasks/stream` (5 s default
+tick; `DLW_TASKS_LIST_STREAM_INTERVAL_SECONDS` overrides; clamped
+`[0.5, 60.0]`). The page and composable consumers are unchanged; SP1's
+existing tests pass unmodified.
+
+Tenant filtering reuses the existing `list_tasks` aggregation
+(`tenant_filtered(select(DownloadTask))`) — same RBAC and slim shape
+(`{items: TaskRead[], total: int}`, no subtasks) as the `GET /api/v1/tasks`
+endpoint.
+
+**Routing note**: `tasks_list_stream_router` is registered BEFORE
+`tasks_router` in `src/dlw/main.py` so the static `/stream` path wins over
+the parameterized `/{task_id}` route (FastAPI iterates routers in include
+order; this was a first-of-kind issue caught by the SP5c pre-review gate
+— SP5/SP5b didn't expose it because their stream paths had no sibling
+parameterized routes under the same prefix).
