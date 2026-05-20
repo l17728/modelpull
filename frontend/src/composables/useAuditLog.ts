@@ -22,7 +22,11 @@ function buildQuery(
   const p = new URLSearchParams()
   p.set('limit', '50')
   if (f.action) p.set('action', f.action)
-  if (f.actor !== null) p.set('actor_user_id', String(f.actor))
+  // Guard against el-input-number emitting `undefined` on clear (final-review
+  // MEDIUM): require a finite number, not just `!== null`.
+  if (typeof f.actor === 'number' && Number.isFinite(f.actor)) {
+    p.set('actor_user_id', String(f.actor))
+  }
   if (f.from) p.set('from', f.from)
   if (f.to) p.set('to', f.to)
   if (cursor) p.set('cursor', cursor)

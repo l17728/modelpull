@@ -8,6 +8,7 @@ import en from '@/locale/en-US.json'
 const { auditData } = vi.hoisted(() => ({
   auditData: { value: null as unknown },
 }))
+const { fetchOlder } = vi.hoisted(() => ({ fetchOlder: vi.fn() }))
 
 vi.mock('@/composables/useAuditLog', async () => {
   const { ref } = await import('vue')
@@ -16,7 +17,7 @@ vi.mock('@/composables/useAuditLog', async () => {
       data: ref(auditData.value), isLoading: ref(false),
       isError: ref(false), error: ref(null),
     }),
-    fetchOlderAudit: vi.fn(),
+    fetchOlderAudit: fetchOlder,
   }
 })
 
@@ -29,7 +30,11 @@ function mountPage() {
 }
 
 describe('Audit page', () => {
-  beforeEach(() => { setActivePinia(createPinia()); auditData.value = null })
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    auditData.value = null
+    fetchOlder.mockReset()
+  })
   test('no data → empty', async () => {
     const w = await mountPage()
     await flushPromises()
@@ -49,5 +54,42 @@ describe('Audit page', () => {
     await flushPromises()
     expect(w.findAllComponents({ name: 'AuditRow' }).length).toBe(1)
     expect(w.text()).toContain(en.audit.loadOlder)
+  })
+
+  test('loadOlder twice → cursor advances, button hides when exhausted', async () => {
+    auditData.value = {
+      items: [{ id: 1, occurred_at: '2026-05-20T12:00:00Z', tenant_id: 1,
+        actor_user_id: null, actor_ip: '', action: 'a', resource_type: 't',
+        resource_id: null, outcome: 'success', payload: {}, trace_id: '',
+        prev_hash: null, self_hash: 's' }],
+      next_cursor: 'C1',
+    }
+    fetchOlder.mockResolvedValueOnce({
+      items: [{ id: 2, occurred_at: '2026-05-20T11:59:00Z', tenant_id: 1,
+        actor_user_id: null, actor_ip: '', action: 'a', resource_type: 't',
+        resource_id: null, outcome: 'success', payload: {}, trace_id: '',
+        prev_hash: null, self_hash: 's' }],
+      next_cursor: 'C2',
+    })
+    fetchOlder.mockResolvedValueOnce({
+      items: [{ id: 3, occurred_at: '2026-05-20T11:58:00Z', tenant_id: 1,
+        actor_user_id: null, actor_ip: '', action: 'a', resource_type: 't',
+        resource_id: null, outcome: 'success', payload: {}, trace_id: '',
+        prev_hash: null, self_hash: 's' }],
+      next_cursor: null,
+    })
+    const w = await mountPage()
+    await flushPromises()
+    const findBtn = () => w.findAll('button').find(
+      (b) => b.text() === en.audit.loadOlder)
+    expect(findBtn()).toBeTruthy()
+    await findBtn()!.trigger('click')
+    await flushPromises()
+    expect(fetchOlder.mock.calls[0]?.[1]).toBe('C1')
+    await findBtn()!.trigger('click')
+    await flushPromises()
+    expect(fetchOlder.mock.calls[1]?.[1]).toBe('C2')
+    expect(w.findAllComponents({ name: 'AuditRow' }).length).toBe(3)
+    expect(findBtn()).toBeFalsy()
   })
 })

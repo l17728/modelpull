@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import DataBoundary from '@/components/DataBoundary.vue'
@@ -17,18 +17,25 @@ const { data, isLoading, isError } = useAuditLog({ action, actor, from, to })
 const older = ref<AuditEntry[]>([])
 const all = computed<AuditEntry[]>(() =>
   [...(data.value?.items ?? []), ...older.value])
-const nextCursor = computed(() => data.value?.next_cursor ?? null)
+
+// Final-review HIGH fix: the cursor must advance after each "Load older";
+// before, both the guard and the request reused page-1's `next_cursor`
+// forever -> duplicate rows on the second click.
+const olderCursor = ref<string | null>(null)
+watch(() => data.value?.next_cursor ?? null,
+      (c) => { olderCursor.value = c }, { immediate: true })
 const loadingOlder = ref(false)
 
 async function loadOlder() {
-  if (!nextCursor.value) return
+  if (!olderCursor.value) return
   loadingOlder.value = true
   try {
     const page = await fetchOlderAudit({
       action: action.value, actor: actor.value,
       from: from.value, to: to.value,
-    }, nextCursor.value)
+    }, olderCursor.value)
     older.value = [...older.value, ...page.items]
+    olderCursor.value = page.next_cursor
   } finally {
     loadingOlder.value = false
   }
@@ -40,6 +47,7 @@ function reset() {
   from.value = null
   to.value = null
   older.value = []
+  olderCursor.value = null
 }
 </script>
 
@@ -99,7 +107,7 @@ function reset() {
         :entry="e"
       />
       <div
-        v-if="nextCursor"
+        v-if="olderCursor"
         class="load-older"
       >
         <el-button
