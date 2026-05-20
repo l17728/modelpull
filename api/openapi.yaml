@@ -1316,6 +1316,34 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/RbacDenied'}
 
+  /quota/current/stream:
+    get:
+      tags: [quota]
+      summary: Live quota snapshot SSE stream (UI-SP5e)
+      operationId: streamQuotaCurrent
+      description: Live SSE feed of the caller's tenant quota snapshot. Requires bearer system-JWT.
+      responses:
+        '200':
+          description: SSE stream of QuotaCurrent snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <QuotaCurrent JSON>\n\n`
+                  ({tenant_id, bytes_used_month, bytes_quota_month,
+                   storage_gb_used, storage_gb_quota, concurrent_tasks,
+                   concurrent_quota}). Stream terminates only on client
+                  disconnect or shutdown.
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: Insufficient role (RBAC denied)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RbacDenied'}
+        '404':
+          description: Tenant not found
+
   /quota/usage:
     get:
       tags: [quota]
