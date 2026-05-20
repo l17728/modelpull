@@ -305,6 +305,11 @@ def create_app() -> FastAPI:
     app.include_router(subtasks_router)
     from dlw.api.hf_proxy import router as hf_proxy_router
     app.include_router(hf_proxy_router)
+    # SP5e: quota stream router registered BEFORE quota_router for
+    # defensive consistency with SP5c/SP5d lesson (static paths win on
+    # include order; harmless if no parameterized sibling exists today).
+    from dlw.api.quota_stream import router as quota_stream_router
+    app.include_router(quota_stream_router)
     from dlw.api.quota import router as quota_router
     app.include_router(quota_router)
     from dlw.api.source_proxy import router as source_proxy_router
