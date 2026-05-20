@@ -6,7 +6,9 @@
     "tokenRequired": "请输入 token", "oidc": "使用 OIDC 登录"
   },
   "nav": {
-    "dashboard": "概览", "tasks": "任务", "createTask": "新建任务"
+    "dashboard": "概览", "tasks": "任务", "createTask": "新建任务",
+    "executors": "执行节点", "audit": "审计日志",
+    "quota": "配额", "settings": "设置"
   },
   "shell": {
     "theme": "主题", "language": "语言", "commandHint": "命令面板 (Ctrl/⌘+K)",
@@ -76,5 +78,33 @@
     "conflict": "状态冲突（任务可能非终态或重复）",
     "validation": "请求参数有误",
     "forbidden": "无权限访问"
+  },
+  "executors": {
+    "heading": "执行节点", "empty": "无可见执行节点",
+    "filterStatus": "状态", "all": "全部",
+    "joining": "加入中", "healthy": "健康", "degraded": "降级",
+    "suspect": "可疑", "faulty": "故障",
+    "health": "健康分", "lastHeartbeat": "心跳",
+    "disk": "磁盘", "gbps": "Gbps",
+    "host": "主机", "tenant": "租户", "shared": "共享基础设施"
+  },
+  "audit": {
+    "heading": "审计日志", "empty": "暂无审计记录",
+    "filterAction": "动作前缀", "filterActor": "操作者 user id",
+    "filterFrom": "起始时间", "filterTo": "结束时间", "reset": "重置筛选",
+    "loadOlder": "加载更早", "systemActor": "系统"
+  },
+  "quotaPage": {
+    "heading": "配额", "byteUsage": "本月流量",
+    "storageUsage": "存储", "concurrentUsage": "并发任务",
+    "threshold": { "warn": "警告", "over": "超限" }
+  },
+  "settings": {
+    "heading": "设置", "profile": "个人资料", "preferences": "偏好设置",
+    "system": "系统",
+    "principal": { "user": "用户", "tenant": "租户", "role": "角色",
+      "projects": "项目", "serviceToken": "服务 token" },
+    "theme": "主题", "themeLight": "浅色", "themeDark": "深色",
+    "localeLabel": "语言", "controllerState": "控制器状态"
   }
 }

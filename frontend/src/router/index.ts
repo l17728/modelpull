@@ -24,6 +24,22 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/TaskDetail.vue'),
     props: true,
   },
+  {
+    path: '/executors', name: 'executors',
+    component: () => import('@/pages/Executors.vue'),
+  },
+  {
+    path: '/audit', name: 'audit',
+    component: () => import('@/pages/Audit.vue'),
+  },
+  {
+    path: '/quota', name: 'quota',
+    component: () => import('@/pages/QuotaPage.vue'),
+  },
+  {
+    path: '/settings', name: 'settings',
+    component: () => import('@/pages/Settings.vue'),
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

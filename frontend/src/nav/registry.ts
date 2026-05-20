@@ -9,6 +9,10 @@ export const NAV_ITEMS: NavItem[] = [
   { route: 'dashboard', labelKey: 'nav.dashboard', icon: 'Odometer' },
   { route: 'taskList', labelKey: 'nav.tasks', icon: 'List' },
   { route: 'taskCreate', labelKey: 'nav.createTask', icon: 'Plus' },
+  { route: 'executors', labelKey: 'nav.executors', icon: 'Monitor' },
+  { route: 'audit', labelKey: 'nav.audit', icon: 'Document' },
+  { route: 'quota', labelKey: 'nav.quota', icon: 'DataLine' },
+  { route: 'settings', labelKey: 'nav.settings', icon: 'Setting' },
 ]
 
 export function visibleNav(role: string, items: NavItem[] = NAV_ITEMS): NavItem[] {
