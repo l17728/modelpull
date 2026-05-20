@@ -529,6 +529,23 @@ paths:
                     items: {$ref: '#/components/schemas/TaskEvent'}
                   next_cursor: {type: string, nullable: true}
 
+  /tasks/stream:
+    get:
+      tags: [tasks]
+      summary: Live tenant-scoped tasks-list SSE stream (UI-SP5c)
+      operationId: streamTaskList
+      responses:
+        '200':
+          description: SSE stream of TaskList snapshots (text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <TaskList JSON>\n\n` ({items, total}).
+                  Stream terminates only on client disconnect or controller
+                  shutdown. Keep-alive comment lines (`:keepalive`) may appear.
+
   /tasks/{taskId}/stream:
     parameters:
       - $ref: '#/components/parameters/TaskId'
