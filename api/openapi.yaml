@@ -1376,6 +1376,38 @@ paths:
                     nullable: true
                     description: Opaque cursor for the next page; null when no more rows.
 
+  /audit/log/stream:
+    get:
+      tags: [audit]
+      summary: Live audit-log SSE stream (UI-SP5d)
+      operationId: streamAuditLog
+      parameters:
+        - in: query
+          name: actor_user_id
+          schema: {type: integer, format: int64}
+        - in: query
+          name: action
+          schema: {type: string}
+        - in: query
+          name: from
+          schema: {type: string, format: date-time}
+        - in: query
+          name: to
+          schema: {type: string, format: date-time}
+      responses:
+        '200':
+          description: SSE stream of AuditSearchResponse snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <AuditSearchResponse JSON>\n\n`
+                  ({items, next_cursor}). Live feed always pushes page 1
+                  (newest first); the client's "Load older" button still
+                  uses the one-shot /audit/log?cursor=… endpoint. Stream
+                  terminates only on client disconnect or shutdown.
+
   # ========== Storage Backends ==========
   /storage-backends:
     get:
