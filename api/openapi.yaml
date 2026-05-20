@@ -681,6 +681,29 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ExecutorListResponse'}
 
+  /executors/stream:
+    get:
+      tags: [executors]
+      summary: Live executors-list SSE stream (UI-SP5b)
+      operationId: streamExecutors
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [joining, healthy, degraded, suspect, faulty]
+      responses:
+        '200':
+          description: SSE stream of ExecutorListResponse snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <ExecutorListResponse JSON>\n\n`. Stream
+                  terminates only on client disconnect or controller shutdown.
+                  Keep-alive comment lines (`:keepalive`) may appear.
+
   /executors/register:
     post:
       tags: [executors]
