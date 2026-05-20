@@ -4,7 +4,7 @@
 
 **Goal:** Add `GET /api/v1/tasks/{task_id}/events/stream` + opt `useTaskEvents` in to the SP5 seam. 6th application of the view-free SSE template; first SP2 sub-resource composable to graduate from polling to SSE.
 
-**Architecture:** Backend mirrors `audit_stream.py` (page-1 stream over a cursor-paginated source); reuses SP2's `events_for_task` service; pre-stream tenant gate (5-line `tenant_filtered(select(DownloadTask.id)…)` block copied verbatim from `tasks_stream.py`) → 404 cross-tenant before `:open`. Frontend `useTaskEvents` opts in with a `computed(() => \`/api/v1/tasks/${taskId.value}/events/stream\`)` reactive `streamUrl`. `TaskDetail.vue` page and SP2 event-tab component UNCHANGED; `fetchOlderEvents` "Load older" function unchanged.
+**Architecture:** Backend mirrors `audit_stream.py` (page-1 stream over a cursor-paginated source); reuses SP2's `events_for_task` service; pre-stream tenant gate (5-line `tenant_filtered(select(DownloadTask.id)…)` block copied verbatim from `tasks_stream.py`) → 404 cross-tenant before `:open`. Frontend `useTaskEvents` opts in with a `computed(() => \`/api/v1/tasks/${taskId.value}/events/stream\`)` reactive `streamUrl`. `TaskDetail.vue` page and SP2 event-tab component UNCHANGED; `fetchOlderEvents` "Load older" function unchanged. **`useLiveResource` seam evolved**: `streaming` becomes a `computed` (was a `const` evaluated once at call-time) so that an `enabled: Ref<boolean>` starting `false` can later flip true and open the SSE — required because `useTaskEvents` is the first SSE consumer whose `enabled` starts false (Events tab inactive at TaskDetail mount).
 
 ---
 
@@ -31,10 +31,12 @@
 - `src/dlw/config.py` — add `task_events_stream_interval_seconds` setting.
 
 **Frontend (modify):**
+- `frontend/src/composables/useLiveResource.ts` — **seam fix**: convert `streaming` from a `const` to a `computed`; watch BOTH `q.data.value` and `streaming.value` before opening SSE (so `enabled: Ref<false>` at mount can later flip true and lazy-open the stream). Required by SP5f's `useTaskEvents` (1st SSE consumer with `enabled` starting false). Existing 5 SP5* consumers unaffected because their `streaming.value` is `true` from start.
 - `frontend/src/composables/useTaskEvents.ts` — opt-in: add reactive `streamUrl` + `applyEvent`.
 
 **Frontend (create):**
-- `frontend/tests/unit/useTaskEventsStream.spec.ts` — new spec (mirror `useAuditLogStream.spec.ts`).
+- `frontend/tests/unit/useLiveResourceEnabledSse.spec.ts` — **seam regression test**: assert that an SSE consumer with `enabled: ref(false)` initially does NOT call streamSse; when `enabled` flips true and useQuery data arrives, streamSse IS called.
+- `frontend/tests/unit/useTaskEventsStream.spec.ts` — new composable spec (mirror `useAuditLogStream.spec.ts`).
 
 **Docs (modify):** `docs/operator/web-ui.md` (append SP5f section).
 
@@ -48,7 +50,7 @@
 - Modify: `api/openapi.yaml:531` (after `/tasks/{taskId}/events` block, before `/tasks/stream`)
 - Modify: `src/dlw/config.py:52` (after `quota_stream_interval_seconds`)
 
-- [ ] **Step 1**: In `api/openapi.yaml`, find the existing `/tasks/{taskId}/events:` block (line 509-530). Insert `/tasks/{taskId}/events/stream:` block immediately after, before `/tasks/stream:`:
+- [ ] **Step 1**: In `api/openapi.yaml`, find the existing `/tasks/{taskId}/events:` block (anchor: line ~509, ends at the `next_cursor` property close ~line 530). Insert `/tasks/{taskId}/events/stream:` block on the blank line immediately before `/tasks/stream:` (anchor: `/tasks/stream:` is the next path block after `/tasks/{taskId}/events`):
 
 ```yaml
 
@@ -296,11 +298,13 @@ async def _bootstrap(engine):
                            backend_type="s3", config_encrypted=b""),
             DownloadTask(id=TASK_T1, tenant_id=1, project_id=1,
                          owner_user_id=1, storage_id=1,
-                         model="org/m1", revision_sha="0" * 40,
+                         repo_id="org/m1", revision="0" * 40,
+                         path_template="hf/{model}/{revision}/{file}",
                          status="running"),
             DownloadTask(id=TASK_T2, tenant_id=2, project_id=2,
                          owner_user_id=2, storage_id=2,
-                         model="org/m2", revision_sha="1" * 40,
+                         repo_id="org/m2", revision="1" * 40,
+                         path_template="hf/{model}/{revision}/{file}",
                          status="running"),
         ])
         await session.commit()
@@ -399,7 +403,10 @@ async def test_task_events_stream_single_snapshot(
     assert "items" in body
     assert "next_cursor" in body
     assert len(body["items"]) >= 1
-    assert all(it.get("resource_type") == "task" for it in body["items"])
+    # TaskEvent schema fields: ts, type, message, details (resource_type
+    # is on the AuditLog model but events_for_task drops it in the mapping).
+    for it in body["items"]:
+        assert {"ts", "type", "message", "details"} <= set(it.keys())
 
 
 @pytest.mark.slow
@@ -451,7 +458,227 @@ Expected: SP1-SP5e tests + new SP5f tests all pass. The 2 known Windows-local `t
 
 # Milestone M2 — Frontend cutover
 
-### Task 4: `useTaskEvents` opts in to SSE seam
+### Task 4: Seam fix — reactive `streaming` so `enabled` starting false can later open SSE
+
+**Files:**
+- Modify: `frontend/src/composables/useLiveResource.ts`
+- Create: `frontend/tests/unit/useLiveResourceEnabledSse.spec.ts`
+
+- [ ] **Step 1**: Modify `frontend/src/composables/useLiveResource.ts`. Current shape (lines ~43-49 + 76-120) evaluates `const streaming = shouldStream(...)` once at call-time and gates the SSE branch on it. **Replace** with a reactive `computed` + watchers that lazy-open the SSE once both `streaming.value` and `q.data.value` are ready.
+
+Full new file:
+
+```ts
+import { onScopeDispose, ref, computed, toValue, watch, type MaybeRefOrGetter, type Ref, type WatchStopHandle } from 'vue'
+import { useQuery, useQueryClient, type QueryKey } from '@tanstack/vue-query'
+import { shouldStream, streamSse, type SseEvent } from '@/api/sse'
+import { useAuthStore } from '@/stores/auth'
+
+const ERROR_BACKOFF_MS = 5_000
+const HIDDEN_MULTIPLIER = 3
+
+export function computeInterval(o: {
+  base: number; terminal: boolean; hidden: boolean; errored: boolean
+}): number | false {
+  if (o.terminal) return false
+  if (o.errored) return ERROR_BACKOFF_MS
+  return o.hidden ? o.base * HIDDEN_MULTIPLIER : o.base
+}
+
+export interface LiveOptions<T> {
+  baseIntervalMs: number
+  isTerminal?: (data: T) => boolean
+  staleTime?: number
+  enabled?: Ref<boolean> | boolean
+  /** UI-SP5: opt in to SSE. SP5f: streaming is now reactive — an
+   * enabled Ref that starts false will lazy-open the SSE on first
+   * enabled === true (after useQuery has produced data). */
+  streamUrl?: string | Ref<string>
+  applyEvent?: (prev: T | undefined, ev: SseEvent) => T
+}
+
+export function useLiveResource<T>(
+  key: QueryKey,
+  fetcher: () => Promise<T>,
+  opts: LiveOptions<T>,
+) {
+  // SP5f: reactive streaming gate. Was a `const` (evaluated once at
+  // call-time) in SP5-SP5e because no consumer passed an `enabled`
+  // Ref that started false. `useTaskEvents` (SP5f) is the first; the
+  // computed makes streamUrl lazy-open when enabled flips true.
+  const streaming = computed(() => shouldStream({
+    streamUrl: opts.streamUrl,
+    applyEvent: opts.applyEvent as
+      ((prev: unknown, ev: SseEvent) => unknown) | undefined,
+    enabled: opts.enabled,
+  }))
+
+  const pollingFallback = ref(false)
+
+  const q = useQuery<T>({
+    queryKey: key,
+    queryFn: fetcher,
+    enabled: opts.enabled,
+    staleTime: opts.staleTime ?? 0,
+    refetchInterval: (query) => {
+      const data = query.state.data as T | undefined
+      const errored = query.state.status === 'error'
+      const terminal = data !== undefined && !!opts.isTerminal?.(data)
+      const hidden = typeof document !== 'undefined'
+        && document.visibilityState === 'hidden'
+      if (streaming.value && !pollingFallback.value) {
+        return false
+      }
+      return computeInterval({
+        base: opts.baseIntervalMs, terminal, hidden, errored,
+      })
+    },
+  })
+
+  if (opts.streamUrl && opts.applyEvent) {
+    const qc = useQueryClient()
+    const ac = new AbortController()
+    const auth = useAuthStore()
+    const apply = opts.applyEvent
+    let started = false
+    let stopDataWatch: WatchStopHandle | undefined
+    let stopStreamingWatch: WatchStopHandle | undefined
+
+    const tryStart = () => {
+      if (started) return
+      if (!streaming.value) return
+      if (q.data.value === undefined) return
+      started = true
+      stopDataWatch?.()
+      stopStreamingWatch?.()
+      const url = toValue(opts.streamUrl as MaybeRefOrGetter<string>)
+      void streamSse({
+        url, token: auth.accessToken, signal: ac.signal,
+        onEvent: (ev) => {
+          const prev = qc.getQueryData<T>(key)
+          const next = apply(prev, ev)
+          qc.setQueryData(key, next)
+        },
+        onUnauthorized: () => {
+          auth.logout()
+        },
+      }).then(() => {
+        // streamSse resolved without abort → it gave up (3 consecutive
+        // failures). Fall back to polling.
+        pollingFallback.value = true
+        void q.refetch()
+      }).catch(() => {
+        // 401 path — onUnauthorized already invoked.
+      })
+    }
+
+    stopDataWatch = watch(() => q.data.value, tryStart, { immediate: true })
+    stopStreamingWatch = watch(streaming, tryStart)
+    onScopeDispose(() => { ac.abort() })
+  }
+
+  return q
+}
+```
+
+- [ ] **Step 2**: Create `frontend/tests/unit/useLiveResourceEnabledSse.spec.ts`:
+
+```ts
+import { describe, expect, test, vi } from 'vitest'
+import { ref, nextTick, defineComponent } from 'vue'
+import { mount } from '@vue/test-utils'
+import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
+import { createPinia, setActivePinia } from 'pinia'
+
+const { streamSseMock } = vi.hoisted(() => ({
+  streamSseMock: vi.fn(() => new Promise(() => {})),
+}))
+vi.mock('@/api/sse', async () => {
+  const actual = await vi.importActual<typeof import('@/api/sse')>('@/api/sse')
+  return { ...actual, streamSse: streamSseMock }
+})
+
+import { useLiveResource } from '@/composables/useLiveResource'
+
+function mountWith(enabled: ReturnType<typeof ref<boolean>>) {
+  setActivePinia(createPinia())
+  const Comp = defineComponent({
+    setup() {
+      const q = useLiveResource<{ v: number }>(
+        ['k'],
+        async () => ({ v: 1 }),
+        {
+          baseIntervalMs: 5_000,
+          enabled,
+          streamUrl: '/api/v1/stream',
+          applyEvent: (_p, ev) => JSON.parse(ev.data),
+        },
+      )
+      return { q }
+    },
+    template: '<div>{{ q.data?.v }}</div>',
+  })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return mount(Comp, {
+    global: { plugins: [[VueQueryPlugin, { queryClient: qc }]] },
+  })
+}
+
+describe('useLiveResource seam — enabled flips true (SP5f regression)', () => {
+  test('enabled=false at mount: streamSse NOT called', async () => {
+    streamSseMock.mockClear()
+    const enabled = ref(false)
+    const w = mountWith(enabled)
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(streamSseMock).not.toHaveBeenCalled()
+    w.unmount()
+  })
+  test('enabled flips false→true: streamSse called once data arrives', async () => {
+    streamSseMock.mockClear()
+    const enabled = ref(false)
+    const w = mountWith(enabled)
+    await nextTick()
+    enabled.value = true
+    // Allow useQuery to fetch + the watcher to fire.
+    for (let i = 0; i < 20 && streamSseMock.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(streamSseMock).toHaveBeenCalledTimes(1)
+    expect(streamSseMock.mock.calls[0]?.[0]?.url).toBe('/api/v1/stream')
+    w.unmount()
+  })
+  test('enabled=true at mount: streamSse called once data arrives (no regression)', async () => {
+    streamSseMock.mockClear()
+    const enabled = ref(true)
+    const w = mountWith(enabled)
+    for (let i = 0; i < 20 && streamSseMock.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(streamSseMock).toHaveBeenCalledTimes(1)
+    w.unmount()
+  })
+})
+```
+
+- [ ] **Step 3**: Run the new seam test + the existing seam tests:
+
+```bash
+cd /d/download_weights/frontend && pnpm vitest run tests/unit/useLiveResource 2>&1 | tail -10
+```
+
+Expected: all `useLiveResource*` tests pass (the new one + any pre-existing).
+
+- [ ] **Step 4**: Commit.
+
+```bash
+git add frontend/src/composables/useLiveResource.ts frontend/tests/unit/useLiveResourceEnabledSse.spec.ts
+git commit -q -m "UI-SP5f M2: seam — make streaming reactive (lazy SSE on enabled flip true); regression test for SP5-SP5e + new SP5f path"
+```
+
+---
+
+### Task 5: `useTaskEvents` opts in to SSE seam
 
 **Files:**
 - Modify: `frontend/src/composables/useTaskEvents.ts`
@@ -583,7 +810,7 @@ git commit -q -m "UI-SP5f M2: useTaskEvents opts in to SSE (view-free; TaskDetai
 
 # Milestone M3 — Smoke + docs
 
-### Task 5: headed Playwright smoke + operator docs
+### Task 6: headed Playwright smoke + operator docs
 
 **Files:**
 - Create: `.run/pw/sp5f-smoke.mjs` (in gitignored `.run/`)

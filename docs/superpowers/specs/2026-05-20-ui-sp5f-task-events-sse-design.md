@@ -32,7 +32,23 @@ streamUrl + page-1 cursor split.
    tick (env `DLW_TASK_EVENTS_STREAM_INTERVAL_SECONDS`, clamped
    `[0.5, 60.0]` at runtime). Same `?max_ticks=N` testability hatch.
 
-2. **Frontend**: `useTaskEvents` opts in via the SP5 seam. `streamUrl`
+2. **Seam evolution (forced by SP5f)**: `useLiveResource`'s gating
+   currently evaluates `streaming = shouldStream(...)` ONCE at
+   call-time. All 5 prior SP5* consumers (SP5/SP5b/SP5c/SP5d/SP5e)
+   passed `enabled = undefined` or a Ref that started `true`, so this
+   was fine. **SP5f's `useTaskEvents` is the first SSE consumer with
+   an `enabled` Ref that starts `false`** (the Events tab is inactive
+   at TaskDetail mount; user clicks to activate). With the current
+   seam, `streaming` would be locked to `false` for the lifetime of
+   the composable instance and the SSE would never open. Fix: convert
+   `streaming` to a `computed(() => shouldStream(...))` and watch BOTH
+   `q.data.value` (first useQuery success) AND `streaming.value`
+   (enabled flips true) before opening the SSE. Existing 5 consumers'
+   behavior is unchanged because their `streaming.value` is `true`
+   from start. Regression-proof: all existing seam tests + 1 new
+   `enabled-flips-true` test.
+
+3. **Frontend**: `useTaskEvents` opts in via the SP5 seam. `streamUrl`
    is a **`computed` over the `taskId` ref** — mirror SP5d's reactive
    pattern (here only 1 ref instead of 4, but same idiom). `applyEvent`
    JSON-parses the snapshot. Signature/return-shape UNCHANGED;
@@ -265,11 +281,12 @@ DevTools network.
   practice (tab-gated composables typically have only the active tab's
   stream open; HTTP/2 in production raises the cap to ~100). Document
   but do not engineer around.
-- **`useTaskEvents` is `enabled`-gated** by the active tab — `useLiveResource`'s
-  existing `enabled` semantics ensure the stream only opens when the
-  Events tab is active. Verify this still holds with `streamUrl`
-  added — i.e., `streamUrl`+`enabled=false` must NOT open the stream.
-  This is the seam's existing contract from SP5; SP5f relies on it.
+- **`useTaskEvents` is `enabled`-gated** by the active tab. See §1 item
+  2 — this is the structural reason the seam needs to evolve. Without
+  the fix, `streamUrl`+`enabled=false` would silently never open the
+  stream because `streaming` is locked at call-time. With the fix,
+  `streaming` is reactive and the SSE opens on the first
+  `enabled === true` AND `q.data` defined transition.
 - **httpx ASGITransport buffering** — same as prior SSEs; mitigated by
   `?max_ticks=N`.
 - **Route collision** — N/A (the new path has a distinct depth from
