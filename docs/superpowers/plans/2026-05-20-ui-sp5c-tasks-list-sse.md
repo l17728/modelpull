@@ -128,6 +128,10 @@ async def _bootstrap(engine):
         session.add(Project(id=2, tenant_id=2, name="other"))
         session.add(User(id=1, tenant_id=1, oidc_subject="dev",
                          email="d@l", role="tenant_admin"))
+        # Pre-review BLOCKER 2 fix: tenant 2 needs its own User row so the
+        # cross-tenant POST as user_id=2 doesn't FK-violate users.id.
+        session.add(User(id=2, tenant_id=2, oidc_subject="dev2",
+                         email="d2@l", role="tenant_admin"))
         session.add(StorageBackend(id=1, tenant_id=1, name="default",
                                    backend_type="s3", config_encrypted=b""))
         session.add(StorageBackend(id=2, tenant_id=2, name="other",
@@ -170,12 +174,13 @@ async def client(ephemeral_ca):
         yield c
 
 
-async def _seed_tasks(client, *, tenant_admin_headers, n: int, prefix: str):
+async def _seed_tasks(client, *, tenant_admin_headers, n: int, prefix: str,
+                      storage_id: int = 1):
     out: list[str] = []
     for i in range(n):
         r = await client.post("/api/v1/tasks", json={
             "repo_id": f"o/{prefix}-{i}", "revision": "0" * 40,
-            "storage_id": 1,
+            "storage_id": storage_id,
         }, headers=tenant_admin_headers)
         assert r.status_code == 201, r.text
         out.append(r.json()["id"])
@@ -213,8 +218,11 @@ async def test_tasks_list_stream_tenant_isolation(
                                 n=2, prefix="t1")
     other = principal_headers(secret=SECRET, role="tenant_admin",
                               user_id=2, tenant_id=2)
+    # Pre-review IMPORTANT 1 fix: use tenant-2's storage so the seeded task
+    # doesn't leak across tenants (current backend doesn't validate storage
+    # ownership but the test should be semantically correct).
     await _seed_tasks(client, tenant_admin_headers=other,
-                       n=1, prefix="t2")
+                       n=1, prefix="t2", storage_id=2)
     received = await _collect(
         client, "/api/v1/tasks/stream?max_ticks=1", auth,
         count=1, timeout=3.0)
@@ -358,12 +366,29 @@ async def stream_tasks_list(
     )
 ```
 
-- [ ] **Step 4**: Register router in `src/dlw/main.py`. Inside `create_app()`, immediately after the existing `executors_stream_router` lines (added by SP5b):
+- [ ] **Step 4**: Register router in `src/dlw/main.py` — **MUST go BEFORE `tasks_router`** (pre-review BLOCKER 1).
+
+**Background**: SP5/SP5b registered their stream routers at the end (after all REST routers) and that was fine because their prefixes (`/api/v1/tasks` for SP5's `/{task_id}/stream`, `/api/v1/executors` for SP5b's `""`) didn't expose any route-collision risk. SP5c does: the new `/api/v1/tasks/stream` shares the `tasks_router` prefix AND is at the same level as `/{task_id}`. FastAPI iterates registered routes in include order; if `tasks_router` is registered first, `GET /api/v1/tasks/stream` is matched against `/{task_id}` first → Pydantic tries to parse `"stream"` as a UUID → 422. The fix is to register the SP5c router BEFORE `tasks_router` so its static `/stream` wins.
+
+In `src/dlw/main.py`, find this block inside `create_app()`:
 
 ```python
+    from dlw.api.tasks import router as tasks_router
+    app.include_router(tasks_router)
+```
+
+Insert the SP5c router **immediately above** it:
+
+```python
+    # SP5c MUST be registered BEFORE tasks_router so the static `/stream`
+    # path wins over `/{task_id}` (FastAPI iterates routers in include order).
     from dlw.api.tasks_list_stream import router as tasks_list_stream_router
     app.include_router(tasks_list_stream_router)
+    from dlw.api.tasks import router as tasks_router
+    app.include_router(tasks_router)
 ```
+
+(I.e. the existing `from dlw.api.tasks import …` + `app.include_router(tasks_router)` lines stay; the two new lines go right above them.)
 
 - [ ] **Step 5**: Run → PASS.
 
