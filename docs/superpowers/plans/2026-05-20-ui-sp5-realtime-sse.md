@@ -354,6 +354,12 @@ async def stream_task_detail(
     interval = _clamped_interval()
 
     async def _body() -> AsyncIterator[bytes]:
+        # Pre-review IMPORTANT fix: flush an immediate comment line so the
+        # response headers + first byte ship together. Defeats httpx 0.27.x
+        # ASGITransport buffering (which would otherwise hold the response
+        # until generator close) AND any production reverse-proxy buffering.
+        # SSE parser ignores comment lines; tests' "data:" filter also skips.
+        yield b":open\n\n"
         ticks_since_data = 0
         try:
             while True:
@@ -424,7 +430,7 @@ cd /d/download_weights && git add src/dlw/api/tasks_stream.py src/dlw/main.py te
 - [ ] **Step 1: Full backend suite**
 
 Run: `uv run pytest tests/ -q`
-Expected: prior 447 + new 4 = 451; 0 failures.
+Expected: prior baseline (record `uv run pytest tests/ --collect-only -q | tail -1` BEFORE Task 1 if uncertain) + 4 new tests; 0 failures.
 
 - [ ] **Step 2: OpenAPI + invariant + status-write lint**
 
@@ -539,16 +545,23 @@ export function parseSseChunk(
     let event = 'message'
     let data = ''
     let id: string | undefined
+    // Pre-review IMPORTANT fix: track presence of any `data:` field, not just
+    // truthy strings, so legitimate payloads like "0" / "false" / "" aren't
+    // silently dropped (cf. SSE spec — empty data is a valid event).
+    let hasData = false
     for (const line of block.split(/\r?\n/)) {
       if (line === '' || line.startsWith(':')) continue
       const i = line.indexOf(':')
       const field = i === -1 ? line : line.slice(0, i)
       const value = i === -1 ? '' : line.slice(i + 1).replace(/^ /, '')
       if (field === 'event') event = value
-      else if (field === 'data') data += (data ? '\n' : '') + value
+      else if (field === 'data') {
+        hasData = true
+        data += (data ? '\n' : '') + value
+      }
       else if (field === 'id') id = value
     }
-    if (data) {
+    if (hasData) {
       events.push(id !== undefined ? { event, data, id } : { event, data })
     }
   }
@@ -682,6 +695,12 @@ export async function streamSse(opts: StreamSseOptions): Promise<void> {
         opts.onUnauthorized()
         throw new Error('SSE 401')
       }
+      // Pre-review IMPORTANT fix: permanent client errors (task gone /
+      // forbidden) should fail-fast — burning 7+ s of backoff on a 404 is
+      // pure latency before the consumer's poll-fallback kicks in.
+      if (resp.status === 403 || resp.status === 404) {
+        return
+      }
       if (!resp.ok || !resp.body) {
         throw new Error(`SSE upstream status ${resp.status}`)
       }
@@ -724,16 +743,82 @@ export async function streamSse(opts: StreamSseOptions): Promise<void> {
 }
 ```
 
-- [ ] **Step 4: Run gate test → PASS; typecheck → 0; lint OK**
+- [ ] **Step 4: Add a streamSse happy-path unit test (pre-review IMP 4)**
+
+The streamer is ~70 LOC of cancellation-sensitive logic; the pure parser + gate don't exercise it. Add ONE happy-path test using a stub `fetchImpl` that returns a `ReadableStream` of two SSE events; abort after the second:
+
+Create `frontend/tests/unit/streamSse.spec.ts`:
+
+```ts
+import { describe, expect, test } from 'vitest'
+import { streamSse, type SseEvent } from '@/api/sse'
+
+describe('streamSse', () => {
+  test('parses events from a ReadableStream and stops on abort', async () => {
+    const ac = new AbortController()
+    const got: SseEvent[] = []
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: a\n\n'))
+        c.enqueue(new TextEncoder().encode('data: b\n\n'))
+        c.close()
+      },
+    })
+    const fetchImpl = (async () => new Response(stream, { status: 200 })) as
+      typeof fetch
+    await streamSse({
+      url: '/x', token: 't', signal: ac.signal,
+      onEvent: (e) => {
+        got.push(e)
+        if (got.length === 2) ac.abort()
+      },
+      onUnauthorized: () => {},
+      fetchImpl,
+    })
+    expect(got.map((e) => e.data)).toEqual(['a', 'b'])
+  })
+
+  test('401 → calls onUnauthorized and rejects without retry', async () => {
+    const ac = new AbortController()
+    let unauth = 0
+    const fetchImpl = (async () => new Response('', { status: 401 })) as
+      typeof fetch
+    await expect(streamSse({
+      url: '/x', token: 't', signal: ac.signal,
+      onEvent: () => {},
+      onUnauthorized: () => { unauth++ },
+      fetchImpl,
+    })).rejects.toThrow(/SSE 401/)
+    expect(unauth).toBe(1)
+  })
+
+  test('404 → resolves without retry (permanent client error)', async () => {
+    const ac = new AbortController()
+    const fetchImpl = (async () => new Response('not found', { status: 404 }))
+      as typeof fetch
+    await streamSse({
+      url: '/x', token: 't', signal: ac.signal,
+      onEvent: () => {},
+      onUnauthorized: () => {},
+      fetchImpl,
+    })
+  })
+})
+```
+
+Run: `cd /d/download_weights/frontend && pnpm test:unit -- streamSse`
+Expected: 3 PASS.
+
+- [ ] **Step 5: Run gate test → PASS; typecheck → 0; lint OK**
 
 `pnpm test:unit -- streamGate` → 7 PASS.
 `pnpm typecheck` → 0 errors.
 `pnpm lint:fix && pnpm lint` → OK.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-cd /d/download_weights && git add frontend/src/api/sse.ts frontend/tests/unit/streamGate.spec.ts && git commit -q -m "UI-SP5 M2: streamSse fetch+ReadableStream client + shouldStream pure gate"
+cd /d/download_weights && git add frontend/src/api/sse.ts frontend/tests/unit/streamGate.spec.ts frontend/tests/unit/streamSse.spec.ts && git commit -q -m "UI-SP5 M2: streamSse fetch+ReadableStream client + shouldStream pure gate + happy-path tests"
 ```
 
 ---
@@ -758,7 +843,7 @@ cd /d/download_weights && git add frontend/src/api/sse.ts frontend/tests/unit/st
 Read `frontend/src/composables/useLiveResource.ts` first (post-SP2 has `enabled?: Ref<boolean> | boolean`). Replace the file with:
 
 ```ts
-import { onScopeDispose, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
+import { onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref, type WatchStopHandle } from 'vue'
 import { useQuery, useQueryClient, type QueryKey } from '@tanstack/vue-query'
 import { shouldStream, streamSse, type SseEvent } from '@/api/sse'
 import { useAuthStore } from '@/stores/auth'
@@ -828,18 +913,31 @@ export function useLiveResource<T>(
   })
 
   const qc = useQueryClient()
-  const pollingFallback: { value: boolean } = { value: false }
+  // Pre-review fix (IMPORTANT 1): use a ref for clarity; the callback re-reads
+  // the closure variable per refetchInterval-eval, but matching Vue idioms
+  // makes intent obvious and future-proofs anyone wanting to watch() this.
+  const pollingFallback = ref(false)
 
   if (streaming && opts.applyEvent) {
     const ac = new AbortController()
     const auth = useAuthStore()
     const apply = opts.applyEvent
-    // Start the stream as soon as we have a first successful snapshot.
-    const stopWatch = watch(
+    // Pre-review BLOCKER fix: Vue 3.5's `watch({ immediate: true })` invokes
+    // the handler SYNCHRONOUSLY inside the watch() call — before `stopWatch`
+    // is assigned the returned stop handle. If vue-query serves a cached
+    // snapshot synchronously (e.g. HMR / route revisit / future initialData),
+    // calling `stopWatch()` from inside the handler would hit TDZ
+    // (ReferenceError). Fix: `let stopWatch` + optional-call + a `started`
+    // flag so the kick-off runs exactly once even if the watcher fires
+    // synchronously on registration.
+    let stopWatch: WatchStopHandle | undefined
+    let started = false
+    stopWatch = watch(
       () => q.data.value,
       (snapshot) => {
-        if (snapshot === undefined) return
-        stopWatch()  // only kick off once
+        if (snapshot === undefined || started) return
+        started = true
+        stopWatch?.()  // safe — undefined on synchronous immediate fire
         const url = toValue(opts.streamUrl as MaybeRefOrGetter<string>)
         void streamSse({
           url, token: auth.accessToken, signal: ac.signal,
@@ -939,7 +1037,7 @@ cd /d/download_weights && git add frontend/src/composables/useTaskDetail.ts && g
 
 - [ ] **Step 1: Full backend suite**
 
-`uv run pytest tests/ -q` → 451 (447 + 4) PASS.
+`uv run pytest tests/ -q` → (M1 baseline + 4) PASS; 0 failures.
 
 - [ ] **Step 2: Full frontend gate**
 
