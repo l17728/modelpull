@@ -198,3 +198,26 @@ the parameterized `/{task_id}` route (FastAPI iterates routers in include
 order; this was a first-of-kind issue caught by the SP5c pre-review gate
 — SP5/SP5b didn't expose it because their stream paths had no sibling
 parameterized routes under the same prefix).
+
+### UI-SP5d — Audit-log SSE follow-on
+
+Fourth application of the view-free SSE template. The Audit page
+(`useAuditLog`, consumed by `Audit.vue` — including the SP3 "Load older"
+cursor pagination, which is untouched) now talks SSE via
+`GET /api/v1/audit/log/stream` (10 s default tick;
+`DLW_AUDIT_STREAM_INTERVAL_SECONDS` overrides; clamped `[0.5, 60.0]`).
+The view and the SP3 spec are unchanged; SP3's existing audit tests pass
+unmodified.
+
+The stream sends page-1 only — it reuses `search_audit_log(..., cursor=None,
+limit=50)` and wraps the result as `AuditSearchResponse`. Older pages are
+still fetched via the cursor-paginated `GET /api/v1/audit/log` endpoint
+(SP3-introduced); "Load older" continues to advance `olderCursor` against
+`data.value?.next_cursor` (the SP3 cursor-not-advancing fix).
+
+The stream URL is **reactive to filters**: `useAuditLog` derives
+`streamUrl` from the same `(action, actor, from, to)` filter refs the
+fetcher uses, so changing any filter both re-fetches and re-streams under
+the new URL — preserving the "filter ⇒ live tail of that filter" semantics
+SP3 established. Same routing precaution as SP5c: `audit_stream_router` is
+registered BEFORE `audit_router` in `src/dlw/main.py`.
