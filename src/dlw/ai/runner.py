@@ -99,7 +99,8 @@ class OpenCodeRunner(AgentRunner):
         proc = await asyncio.create_subprocess_exec(
             self._bin, "run", "--print", ctx.user_message,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise AIBackendUnavailable("opencode stdout pipe unavailable")
         # Drain stderr concurrently to avoid a pipe-buffer deadlock.
         stderr_buf: list[bytes] = []
 

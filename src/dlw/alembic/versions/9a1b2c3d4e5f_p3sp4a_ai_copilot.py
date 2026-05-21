@@ -19,8 +19,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.create_table(
         "ai_conversations",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
-                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("tenant_id", sa.BigInteger(),
                   sa.ForeignKey("tenants.id"), nullable=False),
         sa.Column("owner_user_id", sa.BigInteger(),
@@ -41,8 +40,7 @@ def upgrade() -> None:
                     ["tenant_id", "last_message_at"])
     op.create_table(
         "ai_messages",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
-                  server_default=sa.text("gen_random_uuid()")),
+        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("conversation_id", postgresql.UUID(as_uuid=True),
                   sa.ForeignKey("ai_conversations.id", ondelete="CASCADE"),
                   nullable=False),

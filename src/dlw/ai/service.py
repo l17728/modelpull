@@ -71,13 +71,19 @@ async def run_chat(
             except Exception as exc:  # noqa: BLE001 — isolate tool errors
                 out = {"error": str(exc)}
                 outcome = "error"
-            await write_audit(
-                ts, action=f"ai.tool.{name}", resource_type="ai_tool",
-                resource_id=str(conv_id), outcome=outcome,
-                tenant_id=principal.tenant_id,
-                actor_user_id=principal.user_id,
-                payload={"actor_kind": "ai_copilot", "input": tool_input})
-            await ts.commit()
+            # Best-effort audit (invariant 16). Isolate an audit/commit failure
+            # so it can't propagate as a runner exception or hold the session:
+            # the tool result still returns; the `async with` closes ts cleanly.
+            try:
+                await write_audit(
+                    ts, action=f"ai.tool.{name}", resource_type="ai_tool",
+                    resource_id=str(conv_id), outcome=outcome,
+                    tenant_id=principal.tenant_id,
+                    actor_user_id=principal.user_id,
+                    payload={"actor_kind": "ai_copilot", "input": tool_input})
+                await ts.commit()
+            except Exception:  # noqa: BLE001
+                await ts.rollback()
         return out
 
     # 3. Drive the runner, collecting assistant text + tool calls for persist.
