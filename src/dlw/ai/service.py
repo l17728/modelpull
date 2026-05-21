@@ -188,9 +188,19 @@ async def run_confirmation(
         call.confirmation_at = datetime.now(UTC)
         if decision == "rejected":
             call.status = resolved_status = "rejected"
+        elif decision == "modified" and not modified_input:
+            # Defense-in-depth (final-review HIGH): the API validator already
+            # requires modified_input for a 'modified' decision, but guard at
+            # the service layer too — executing with {} would falsely audit
+            # user_final_input={} (inv 40). Leave the call pending.
+            yield AgentEvent("error",
+                             {"code": "bad_request",
+                              "message": "modified_input required for "
+                                         "decision=modified"})
+            return
         else:
             final_input = proposed if decision == "approved" \
-                else dict(modified_input or {})
+                else dict(modified_input)
             tool = WRITE_TOOLS.get(tool_name)
             if tool is None:
                 out = {"error": f"unknown tool {tool_name}"}
