@@ -51,6 +51,8 @@ _UV_BIN: str = _find_uv()
 
 EXPECTED_TABLES = {
     "alembic_version",
+    "ai_conversations",
+    "ai_messages",
     "audit_log",
     "casbin_rule",
     "download_tasks",
