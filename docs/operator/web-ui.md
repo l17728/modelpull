@@ -294,3 +294,33 @@ for the header aggregator + the new SP5f events stream
 (~100); the HTTP/1.1 6-stream cap (e.g. Vite dev proxy) is unlikely
 to be exhausted in practice given tab-gated lifecycle. No mitigation
 implemented; documented for awareness.
+
+### UI-SP5g — Subtask-chunks SSE follow-on
+
+Seventh application of the view-free SSE template, and the second SP2
+sub-resource composable to graduate from polling to SSE. The Files
+tab on TaskDetail (`useSubtaskChunks`) now talks SSE via
+`GET /api/v1/tasks/{task_id}/subtask-chunks/stream` (2 s default tick;
+`DLW_TASK_CHUNKS_STREAM_INTERVAL_SECONDS` overrides; clamped
+`[0.5, 60.0]`). The view-side consumers are unchanged.
+
+The stream reuses `chunks_for_task(session, task_id, tenant_id)`
+(SP2-introduced; a plain list, no cursor) wrapped as
+`SubtaskChunkReport`. No seam change was needed — SP5f's reactive
+`streaming` gate already supports `enabled`-gated consumers. Because
+the Files tab is **default-active** on TaskDetail, the chunks SSE
+opens on landing (the "enabled === true at mount" seam path, same as
+the original 5 always-on consumers), unlike SP5f's Events tab which
+required a click. Same routing precaution as SP5c-SP5f:
+`tasks_chunks_stream_router` is registered after
+`tasks_events_stream_router` and BEFORE `tasks_router` in
+`src/dlw/main.py`.
+
+**Connection-cap status (monitored)**: a TaskDetail page where the
+user has visited both the Files and Events tabs now holds 3
+concurrent SSE connections (header + events + chunks), still well
+under the HTTP/1.1 6-per-origin cap. The remaining 2 SP2 tabs
+(Sources, Executors) are SP5h/SP5i candidates; when the 4th tab
+stream is added the worst case reaches 5, at which point a seam
+"close-on-disable" change (bounding concurrent streams to 2: header +
+active tab) becomes worthwhile. Deferred until then (YAGNI).

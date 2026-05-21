@@ -604,6 +604,28 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/SubtaskChunkReport'}
 
+  /tasks/{taskId}/subtask-chunks/stream:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Live subtask-chunks SSE stream (UI-SP5g)
+      operationId: streamSubtaskChunks
+      responses:
+        '200':
+          description: SSE stream of SubtaskChunkReport snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <SubtaskChunkReport JSON>\n\n`
+                  ({items}). Stream terminates only on client
+                  disconnect or shutdown.
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404':
+          description: Task not found (or not in caller's tenant)
+
   /tasks/{taskId}/participating-executors:
     parameters:
       - $ref: '#/components/parameters/TaskId'

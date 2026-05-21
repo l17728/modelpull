@@ -303,6 +303,10 @@ def create_app() -> FastAPI:
     # `/{task_id}/*` route, so no actual collision — pattern only.
     from dlw.api.tasks_events_stream import router as tasks_events_stream_router
     app.include_router(tasks_events_stream_router)
+    # SP5g: tasks-chunks stream router included BEFORE tasks_router for
+    # defensive consistency. Distinct depth from any /{task_id}/* route.
+    from dlw.api.tasks_chunks_stream import router as tasks_chunks_stream_router
+    app.include_router(tasks_chunks_stream_router)
     from dlw.api.tasks import router as tasks_router
     app.include_router(tasks_router)
     from dlw.api.executors import router as executors_router
