@@ -431,3 +431,38 @@ in-process); SP4d token-budget quota (inv 18 — `tokens_input/output`
 columns exist but are not enforced); SP4e external-content tools +
 prompt-injection sanitization (inv 19/41 — the MVP's tools return only
 internal data, so no external content enters the LLM context).
+
+## UI-SP4b — AI Copilot write tools + confirmation gate
+
+Second AI slice: the Copilot can now **propose** write operations
+(`dlw_cancel_task`, `dlw_create_task`), but they execute **only after
+explicit user confirmation** (🔒 invariant 17). Adds the `ai_tool_calls`
+table (alembic head → `a2b3c4d5e6f7`).
+
+**Two-phase protocol**:
+- **Phase 1** — `POST /api/v1/ai/chat {message}`: the runner emits a
+  `tool_call_pending_confirm` event (tool, input, rationale, estimated
+  impact). The service persists a **pending** `ai_tool_calls` row and
+  forwards the event; **nothing executes**. The drawer shows a confirm
+  card (Approve / Modify / Reject) and locks the composer until resolved.
+- **Phase 2** — `POST /api/v1/ai/chat {conversation_id,
+  tool_confirmation:{call_id, decision, modified_input?}}`: the service
+  (not the LLM) loads the pending call **scoped to the caller's
+  tenant+owner** (you cannot confirm another user's proposal), locks it
+  `FOR UPDATE` (race-safe double-confirm guard), and on
+  `approved`/`modified` executes via the **same service-layer path** as
+  the REST handler (`cancel_task` / `check_quota` + `create_task`) — so
+  a *modified* input is re-validated end-to-end (🔒 invariant 40, no
+  reuse of the AI's proposal). The whole turn (business write + call-row
+  update + confirmation metadata) commits in **one atomic transaction**.
+  Every resolution is audited `ai.tool.<name>` with
+  `payload.actor_kind="ai_copilot"`, `actor_user_id`=the confirming
+  human, and both `ai_proposed_input` + `user_final_input` (🔒
+  invariants 16 + 40).
+
+Write tools stay tenant-scoped via the principal (🔒 invariant 15) and
+map service exceptions to error results (never crash the stream). The
+stub backend models the two-phase flow deterministically (CI-safe; no
+secret). **Deferred** (named slices): SP4c sandboxed-MCP subprocess (inv
+37), SP4d token-budget quota (inv 18), SP4e external-content tools +
+sanitization (inv 19/41).
