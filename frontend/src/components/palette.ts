@@ -5,7 +5,7 @@ export interface Command {
   label: string
   kind: 'nav' | 'action'
   routeName?: string
-  action?: 'createTask' | 'openTaskById'
+  action?: 'createTask' | 'openTaskById' | 'openCopilot'
 }
 
 export function buildCommands(role: string, t: (k: string) => string): Command[] {
@@ -17,6 +17,8 @@ export function buildCommands(role: string, t: (k: string) => string): Command[]
       kind: 'action', action: 'createTask' },
     { id: 'action:openTaskById', label: t('palette.openTaskById'),
       kind: 'action', action: 'openTaskById' },
+    { id: 'action:openCopilot', label: t('palette.openCopilot'),
+      kind: 'action', action: 'openCopilot' },
   ]
   return [...nav, ...actions]
 }

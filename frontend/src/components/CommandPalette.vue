@@ -4,11 +4,13 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useSessionStore } from '@/stores/session'
+import { useUiStore } from '@/stores/ui'
 import { buildCommands, type Command } from '@/components/palette'
 
 const { t } = useI18n()
 const router = useRouter()
 const session = useSessionStore()
+const ui = useUiStore()
 const open = ref(false)
 const q = ref('')
 
@@ -39,6 +41,8 @@ async function run(c: Command) {
       inputPattern: /\S+/,
     }).catch(() => null)
     if (r?.value) router.push({ name: 'taskDetail', params: { id: r.value.trim() } })
+  } else if (c.action === 'openCopilot') {
+    ui.toggleCopilot()
   }
 }
 </script>
