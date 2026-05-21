@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     gc_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
     gc_grace_seconds: int = Field(default=3600, ge=0)
 
+    # UI-SP4a — AI Copilot
+    ai_backend: str = Field(default="stub")   # stub | opencode | claude_code | openai_compat
+    ai_model_name: str = Field(default="stub-model")
+    ai_opencode_bin: str = Field(default="opencode")
+    ai_max_tool_iters: int = Field(default=8, ge=1, le=50)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user

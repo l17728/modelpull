@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from dlw.config import get_settings
 from dlw.db import Base
 from dlw.db.models import (  # noqa: F401  side-effect import
+    AIConversation,
+    AIMessage,
     AuditLog,
     CasbinRule,
     DownloadTask,
