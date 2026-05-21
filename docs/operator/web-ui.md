@@ -466,3 +466,38 @@ stub backend models the two-phase flow deterministically (CI-safe; no
 secret). **Deferred** (named slices): SP4c sandboxed-MCP subprocess (inv
 37), SP4d token-budget quota (inv 18), SP4e external-content tools +
 sanitization (inv 19/41).
+
+## UI-SP4d — AI Copilot token-budget quota
+
+Third AI slice: a **per-tenant monthly LLM token budget** (🔒 invariant
+18), independent of the download-traffic quota. Adds the column
+`tenants.quota_ai_tokens_month` (default **1,000,000**, NOT NULL) and the
+append-only ledger table `ai_token_usage` (alembic head →
+`b3c4d5e6f7a8`).
+
+**Enforcement** is at the start of each chat turn: before any
+conversation is created or the LLM is invoked, the service sums the
+tenant's token usage **for the current calendar month (UTC)** and
+compares it to the quota. When the budget is exhausted the turn is
+**blocked** — the SSE stream emits a single `quota_exceeded` event
+(`{metric:"ai_tokens", remaining:0}`) and returns, creating no
+conversation and persisting no message. The drawer surfaces this as a
+warning note in the assistant bubble. **Downloads are unaffected** — only
+AI chat is gated; a download task proposed earlier and confirmed via the
+SP4b flow is still independently bound by the download quota.
+
+**Recording**: each completed turn writes one `ai_token_usage` row and
+stamps `tokens_input`/`tokens_output` on the assistant message. Recording
+is best-effort/isolated — a ledger write failure never loses the turn.
+The monthly window resets implicitly on the 1st (no job; the sum simply
+ignores prior-month rows).
+
+**Honest scope note**: the deterministic `stub` backend consumes no real
+LLM tokens, so the service records a **nominal estimate** (≈ characters ÷
+4) per turn — enough to accumulate usage and make the budget testable. A
+real backend (e.g. opencode, or a future Anthropic runner) would report
+actual token counts at the same hook. The enforcement + ledger machinery
+is the deliverable; the per-token accuracy follows the backend.
+
+**Deferred** (named slices): SP4c sandboxed-MCP subprocess (inv 37),
+SP4e external-content tools + prompt-injection sanitization (inv 19/41).
