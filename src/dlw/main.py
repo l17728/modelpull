@@ -307,6 +307,10 @@ def create_app() -> FastAPI:
     # defensive consistency. Distinct depth from any /{task_id}/* route.
     from dlw.api.tasks_chunks_stream import router as tasks_chunks_stream_router
     app.include_router(tasks_chunks_stream_router)
+    # SP5h: tasks-source-alloc stream router included BEFORE tasks_router
+    # for defensive consistency. Distinct depth from any /{task_id}/* route.
+    from dlw.api.tasks_source_alloc_stream import router as tasks_source_alloc_stream_router
+    app.include_router(tasks_source_alloc_stream_router)
     from dlw.api.tasks import router as tasks_router
     app.include_router(tasks_router)
     from dlw.api.executors import router as executors_router

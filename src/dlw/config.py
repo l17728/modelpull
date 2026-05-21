@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # UI-SP5g — SSE tick rate for /tasks/{id}/subtask-chunks/stream (clamped at runtime).
     task_chunks_stream_interval_seconds: float = Field(default=2.0)
 
+    # UI-SP5h — SSE tick rate for /tasks/{id}/source-allocation/stream (clamped at runtime).
+    task_source_alloc_stream_interval_seconds: float = Field(default=2.0)
+
     # Phase 2 W3c — controller leader election
     active_lock_id: int = Field(
         default=0x444C5743_414B5631,
