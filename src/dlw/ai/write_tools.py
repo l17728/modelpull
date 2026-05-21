@@ -60,8 +60,9 @@ async def _create(session: AsyncSession, principal: Principal, *,
                   repo_id: str, revision: str, storage_id: int,
                   priority: int = 1,
                   source_strategy: str = "auto_balance") -> dict:
-    from dlw.services.hf_metadata import (EmptyRepo, HfNetworkError,
+    from dlw.services.hf_metadata import (HfNetworkError,
                                           HfPrivateOrAuthRequired, RepoNotFound)
+    from dlw.services.task_service import EmptyRepo
     try:
         await check_quota_for_new_task(session, principal.tenant_id)
     except QuotaExceeded as e:
