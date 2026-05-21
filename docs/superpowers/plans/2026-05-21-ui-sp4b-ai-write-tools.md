@@ -67,7 +67,11 @@ class AIToolCall(Base):
 
 - [ ] **Step 2**: Register `AIToolCall` in `db/models/__init__.py` (import + `__all__`) and `src/dlw/alembic/env.py` (import list).
 
-- [ ] **Step 3**: Create migration `src/dlw/alembic/versions/a2b3c4d5e6f7_p3sp4b_ai_tool_calls.py` (down_revision `9a1b2c3d4e5f`) with the §2.1 DDL (no `server_default` on `id`; `idx_ai_tool_conv` index). downgrade drops index + table.
+- [ ] **Step 3**: Create migration `src/dlw/alembic/versions/a2b3c4d5e6f7_p3sp4b_ai_tool_calls.py` (down_revision `9a1b2c3d4e5f`) with the §2.1 DDL, **except**: to avoid `compare_server_default=True` drift (env.py enables it — SP4a CRITICAL-1), the migration columns must MATCH the model's defaults exactly:
+  - `id`: **no** `server_default` (Python `default=uuid.uuid4`).
+  - `requires_confirmation` / `status`: **no** `server_default` (the model uses Python `default=True` / `default="pending"`; these tables are only ever inserted via the ORM, never raw SQL, so a DB-side default isn't needed — and adding one would diverge from the model and trip `alembic check`).
+  - `created_at`: keep `server_default=sa.func.now()` (the model also sets `server_default=func.now()` → consistent).
+  Add `op.create_index("idx_ai_tool_conv", "ai_tool_calls", ["conversation_id"])`. downgrade drops index then table.
 
 - [ ] **Step 4**: `tests/db/test_alembic.py` — add `"ai_tool_calls"` to `EXPECTED_TABLES`.
 
@@ -139,7 +143,7 @@ async def _cancel(session: AsyncSession, principal: Principal, *,
         return {"error": "task not found"}
     except ValueError:
         return {"error": "task not cancellable (terminal)"}
-    await session.commit()
+    await session.flush()   # pre-review I1/I2: FLUSH not commit — run_confirmation owns the single atomic commit
     return {"task_id": str(task.id), "status": task.status}
 
 
@@ -175,7 +179,7 @@ async def _create(session: AsyncSession, principal: Principal, *,
         return {"error": "huggingface unreachable"}
     except EmptyRepo:
         return {"error": "repo has no files at this revision"}
-    await session.commit()
+    await session.flush()   # pre-review I1/I2: FLUSH not commit — run_confirmation owns the single atomic commit
     return {"task_id": str(task.id), "status": task.status,
             "repo_id": task.repo_id, "revision": task.revision}
 
@@ -246,6 +250,8 @@ In `run()`, first:
 
 (The `id` is filled by the service when it persists the pending call; the stub emits `""` and the service overwrites it.)
 
+**Regression note (pre-review)**: `"download"`/`"下载"` are ALSO in SP4a's `_TASK_KEYWORDS` (read-only path). The write-proposal branch runs FIRST and `return`s, so a "download org/repo" message now proposes a create instead of listing tasks. Audit the existing SP4a stub tests (`test_ai_chat.py` sends "list my tasks" / "show tasks please" — **no slash, no "download"** → unaffected) to confirm none contain `"download"`/`"create"` + a `word/word` token; the new branch only triggers on the regex match, so existing read-only tests stay green. `_REPO_RE` is intentionally broad (any `word/word`) — false-positive *proposals* are harmless (nothing executes without confirm); real LLM backends decide properly.
+
 - [ ] **Step 2**: Commit.
 
 ```bash
@@ -280,6 +286,8 @@ git commit -q -m "UI-SP4b M1: stub runner proposes write tools (tool_call_pendin
 
 - [ ] **Step 2**: Add a `run_confirmation` async generator (phase 2), and route to it from the endpoint when `tool_confirmation` is present:
 
+**Pre-review-corrected design (use this verbatim).** Single session per phase-2 request: lock the pending call `FOR UPDATE`, do the tool execution **and** the call-row update **and** the metadata in ONE transaction with ONE commit (atomic — no TOCTOU, no partial state, no lost metadata). The write tools FLUSH (not commit — see Task 2 fix). The audit runs in a SEPARATE best-effort session AFTER the business commit (so an audit blip can't roll back or hang the result — SP4a CRITICAL-2 pattern).
+
 ```python
 from dlw.ai.write_tools import WRITE_TOOLS
 from dlw.db.models.ai import AIConversation, AIToolCall
@@ -288,6 +296,12 @@ async def run_confirmation(
     *, session_maker, principal, conversation_id, call_id, decision,
     modified_input,
 ) -> AsyncIterator[AgentEvent]:
+    proposed: dict = {}
+    tool_name = ""
+    final_input: dict = {}
+    out: dict = {}
+    resolved_status = ""   # rejected | executed | error
+    # ---- single transaction: lock → check → execute → update → commit ----
     async with session_maker() as s:
         call = (await s.execute(
             select(AIToolCall).join(
@@ -295,79 +309,76 @@ async def run_confirmation(
             .where(AIToolCall.id == call_id,
                    AIToolCall.conversation_id == conversation_id,
                    AIConversation.tenant_id == principal.tenant_id,
-                   AIConversation.owner_user_id == principal.user_id))
+                   AIConversation.owner_user_id == principal.user_id)
+            .with_for_update(of=AIToolCall))      # B2: serialize concurrent confirms
         ).scalar_one_or_none()
         if call is None:
             yield AgentEvent("error", {"code": "not_found",
                                        "message": "pending call not found"})
             return
-        if call.status != "pending":
+        if call.status != "pending":              # double-confirm guard (now race-safe)
             yield AgentEvent("error", {"code": "already_resolved",
                                        "message": f"call is {call.status}"})
             return
         proposed = call.proposed_input
         tool_name = call.tool_name
-        # mark decision metadata
         call.confirmation_decision = decision
         call.confirmed_by_user_id = principal.user_id
         call.confirmation_at = datetime.now(UTC)
         if decision == "rejected":
-            call.status = "rejected"
-            await s.commit()
-        await s.commit() if decision == "rejected" else None
+            call.status = resolved_status = "rejected"
+        else:
+            # approved | modified — execute via the service layer (inv 40:
+            # modified_input is re-validated end-to-end; no AI-conclusion reuse).
+            final_input = proposed if decision == "approved" else dict(modified_input)
+            tool = WRITE_TOOLS.get(tool_name)
+            if tool is None:
+                out = {"error": f"unknown tool {tool_name}"}
+            else:
+                try:
+                    # tool.run FLUSHES (not commits) on the SAME session `s`,
+                    # so the business write + the call-row update commit atomically.
+                    out = await tool.run(s, principal, **final_input)
+                except Exception as exc:  # noqa: BLE001
+                    out = {"error": str(exc)}
+            ok = "error" not in out
+            call.final_input = final_input
+            call.output = out
+            call.status = resolved_status = "executed" if ok else "error"
+            if not ok:
+                call.error_code = str(out.get("error"))[:64]
+        await s.commit()                          # one atomic commit
 
-    if decision == "rejected":
+    # ---- best-effort audit (isolated; SP4a CRITICAL-2) ----
+    try:
         async with session_maker() as a:
+            payload = {"actor_kind": "ai_copilot", "ai_proposed_input": proposed}
+            if resolved_status != "rejected":
+                payload["user_final_input"] = final_input
             await write_audit(
                 a, action=f"ai.tool.{tool_name}", resource_type="ai_tool",
-                resource_id=str(call_id), outcome="rejected",
+                resource_id=str(call_id),
+                outcome="rejected" if resolved_status == "rejected"
+                else ("success" if resolved_status == "executed" else "error"),
                 tenant_id=principal.tenant_id, actor_user_id=principal.user_id,
-                payload={"actor_kind": "ai_copilot",
-                         "ai_proposed_input": proposed})
+                payload=payload)
             await a.commit()
-        yield AgentEvent("assistant.message_delta",
-                         {"text": "Operation cancelled."})
-        yield AgentEvent("done", {"conversation_id": str(conversation_id),
-                                  "ai_message_id": "", "tokens_used": 0})
-        return
+    except Exception:  # noqa: BLE001
+        pass
 
-    # approved | modified — execute via the service layer (inv 40 full revalidation)
-    final_input = proposed if decision == "approved" else (modified_input or {})
-    tool = WRITE_TOOLS.get(tool_name)
-    async with session_maker() as xs:
-        if tool is None:
-            out = {"error": f"unknown tool {tool_name}"}
-        else:
-            try:
-                out = await tool.run(xs, principal, **final_input)
-            except Exception as exc:  # noqa: BLE001
-                out = {"error": str(exc)}
-    ok = "error" not in out
-    async with session_maker() as us:
-        call2 = await us.get(AIToolCall, call_id)
-        call2.final_input = final_input
-        call2.output = out
-        call2.status = "executed" if ok else "error"
-        if not ok:
-            call2.error_code = str(out.get("error"))[:64]
-        await us.commit()
-    async with session_maker() as a:
-        await write_audit(
-            a, action=f"ai.tool.{tool_name}", resource_type="ai_tool",
-            resource_id=str(call_id), outcome="success" if ok else "error",
-            tenant_id=principal.tenant_id, actor_user_id=principal.user_id,
-            payload={"actor_kind": "ai_copilot", "ai_proposed_input": proposed,
-                     "user_final_input": final_input})
-        await a.commit()
-    yield AgentEvent("tool_result", {"id": str(call_id), "ok": ok,
-                                     "output": out})
-    yield AgentEvent("assistant.message_delta",
-                     {"text": "Done." if ok else f"Failed: {out.get('error')}"})
+    # ---- emit terminal events ----
+    if resolved_status == "rejected":
+        yield AgentEvent("assistant.message_delta", {"text": "Operation cancelled."})
+    else:
+        ok = resolved_status == "executed"
+        yield AgentEvent("tool_result", {"id": str(call_id), "ok": ok, "output": out})
+        yield AgentEvent("assistant.message_delta",
+                         {"text": "Done." if ok else f"Failed: {out.get('error')}"})
     yield AgentEvent("done", {"conversation_id": str(conversation_id),
                               "ai_message_id": "", "tokens_used": 0})
 ```
 
-(Clean up the rejected-commit double-call when implementing — commit once. The pseudocode above is illustrative; the implementer simplifies the rejected branch to a single commit.)
+**Why this is correct** (addresses pre-review B1/B2/I1/I2/I3): one session + `with_for_update(of=AIToolCall)` serializes concurrent confirms (TOCTOU gone); the tool's business write, the call-row's `final_input`/`output`/`status`, AND the confirmation metadata (`decision`/`confirmed_by`/`at`) all commit in **one** transaction (no partial/lost state); the write tools flush (Task 2) so there's a single owning commit; the audit is isolated best-effort after the commit.
 
 - [ ] **Step 3**: Commit.
 
@@ -382,10 +393,44 @@ git commit -q -m "UI-SP4b M1: two-phase chat — phase1 persists pending tool ca
 
 **Files:** Modify `src/dlw/api/ai.py`.
 
-- [ ] **Step 1**: Extend `ChatRequest` with `tool_confirmation: ToolConfirmation | None = None` and make `message: str | None = None`. Add the `ToolConfirmation` model (call_id: uuid, decision: Literal[...], modified_input: dict | None). In `chat()`:
-  - if `body.tool_confirmation` is set: require `conversation_id`; stream via `run_confirmation(...)`.
-  - else: require non-blank `message` (422); stream via `run_chat(...)` as before.
-  Keep the same SSE framing + `build_runner` (only needed for phase 1).
+- [ ] **Step 1**: Extend the request models in `src/dlw/api/ai.py`:
+
+```python
+from typing import Literal
+from pydantic import BaseModel, model_validator
+
+class ToolConfirmation(BaseModel):
+    call_id: uuid.UUID
+    decision: Literal["approved", "rejected", "modified"]
+    modified_input: dict | None = None
+
+    @model_validator(mode="after")
+    def _require_modified_input(self) -> "ToolConfirmation":
+        # pre-review B2/I1: a 'modified' decision MUST carry modified_input,
+        # else invariant-40 audit would record user_final_input={} (a falsehood).
+        if self.decision == "modified" and not self.modified_input:
+            raise ValueError("modified_input is required when decision='modified'")
+        return self
+
+class ChatRequest(BaseModel):
+    conversation_id: uuid.UUID | None = None
+    message: str | None = None
+    tool_confirmation: ToolConfirmation | None = None
+
+    @model_validator(mode="after")
+    def _phase_consistency(self) -> "ChatRequest":
+        if self.tool_confirmation is not None:
+            if self.conversation_id is None:
+                raise ValueError("conversation_id is required with tool_confirmation")
+        elif self.message is None or not self.message.strip():
+            raise ValueError("message is required (and non-blank)")
+        return self
+```
+
+In `chat()`:
+  - if `body.tool_confirmation` is set → phase 2: stream via `run_confirmation(session_maker=…, principal=…, conversation_id=body.conversation_id, call_id=body.tool_confirmation.call_id, decision=body.tool_confirmation.decision, modified_input=body.tool_confirmation.modified_input)`. (No `build_runner` needed.)
+  - else → phase 1: `build_runner` + `run_chat(...)` as in SP4a.
+  Same SSE framing (`:open` + `event:`/`data:` frames). A pydantic validation failure surfaces as FastAPI 422 automatically (so the blank-message / missing-conversation_id / missing-modified_input cases are 422 before the handler body).
 
 - [ ] **Step 2**: Import smoke + commit.
 
@@ -411,6 +456,7 @@ git commit -q -m "UI-SP4b M1: /ai/chat accepts tool_confirmation → phase-2 con
   - **cross-tenant confirm**: tenant-2 principal confirms tenant-1's pending call_id → error/404; the call stays pending.
   - **double-confirm**: approve then approve again → second → `already_resolved` error.
   - **unauth** phase1 + phase2 → 401.
+  - **422 validation** (pre-review): `{tool_confirmation:{...}, conversation_id:null}` → 422; `{tool_confirmation:{decision:"modified", modified_input:null, call_id:...}, conversation_id:...}` → 422; blank `{message:"  "}` → 422.
 
 - [ ] **Step 3**: Run + commit.
 
@@ -432,7 +478,7 @@ git commit -q -m "UI-SP4b M1: backend tests — write-tool tenant isolation, two
 ### Task 7: aiClient.confirmTool + useCopilot pendingConfirm/confirm + tests
 
 - [ ] **Step 1**: `aiClient.ts` — add `confirmTool({conversationId, callId, decision, modifiedInput, onEvent})` (same fetch-SSE POST with `{conversation_id, tool_confirmation:{call_id, decision, modified_input}}`).
-- [ ] **Step 2**: `useCopilot.ts` — on `tool_call_pending_confirm`, attach a `pendingConfirm = {callId, tool, input, rationale, estimatedImpact}` to the current assistant message (and stop, awaiting user). Add `confirm(decision, modifiedInput?)`: clears the pendingConfirm, opens phase-2 stream via `confirmTool`, appends `tool_result`/delta into a new assistant message.
+- [ ] **Step 2**: `useCopilot.ts` — on `tool_call_pending_confirm`, attach a `pendingConfirm = {callId, tool, input, rationale, estimatedImpact}` to the current assistant message (and stop, awaiting user). Add `confirm(decision, modifiedInput?)`: clears the pendingConfirm on that message, opens phase-2 stream via `confirmTool`, appends `tool_result`/delta into a new assistant message. **Also export `hasPendingConfirm = computed(() => messages.value.some(m => m.pendingConfirm))`** (pre-review I4) — used to lock the composer so the user can't start a NEW phase-1 turn while a confirm is outstanding (UI-layer reinforcement of invariant 17; the backend pending-call guard is the real gate).
 - [ ] **Step 3**: Extend `useCopilot.spec.ts`: a `tool_call_pending_confirm` event → message gets `pendingConfirm`; `confirm("approved")` calls `confirmTool` and assembles the result.
 - [ ] **Step 4**: lint + tsc + run specs; commit.
 
@@ -445,7 +491,7 @@ git commit -q -m "UI-SP4b M2: aiClient.confirmTool + useCopilot pendingConfirm/c
 ### Task 8: CopilotConfirmCard + drawer wiring + i18n + spec
 
 - [ ] **Step 1**: `CopilotConfirmCard.vue` — props `{tool, input, rationale, estimatedImpact}` + emits `approve` / `reject` / `modify(modifiedInput)`. Renders tool name, pretty-JSON input, rationale, impact; buttons Approve/Reject/Modify; Modify reveals an editable JSON `<el-input type="textarea">` (parse on submit; on parse error show inline message).
-- [ ] **Step 2**: `CopilotDrawer.vue` — when an assistant message has `pendingConfirm`, render `<CopilotConfirmCard>` wired to `copilot.confirm(...)`. Disable the composer while a confirm is outstanding.
+- [ ] **Step 2**: `CopilotDrawer.vue` — when an assistant message has `pendingConfirm`, render `<CopilotConfirmCard>` wired to `copilot.confirm(...)`. Disable the composer while a confirm is outstanding: `:disabled="copilot.streaming.value || copilot.hasPendingConfirm.value"` on both the input and the send button (pre-review I4 — without the `hasPendingConfirm` term the composer re-enables after phase-1 `done` and the user could start a second turn mid-confirmation).
 - [ ] **Step 3**: i18n `copilot.confirm.*` (title/approve/reject/modify/rationale/impact/modifyHint) in both locales at parity.
 - [ ] **Step 4**: `CopilotConfirmCard.spec.ts` — renders input/rationale; Approve emits `approve`; Modify with edited JSON emits `modify` with parsed object.
 - [ ] **Step 5**: Full frontend gate + commit.
