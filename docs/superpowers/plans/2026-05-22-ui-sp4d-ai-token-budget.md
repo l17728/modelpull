@@ -21,7 +21,7 @@
 - Post-turn usage recording is BEST-EFFORT/isolated (try/except, own session) — a recording failure must not lose the turn (SP4a CRITICAL-2 pattern).
 - `run_confirmation` (phase 2) is unchanged — it calls no LLM.
 - Use a tenant-user JWT in API tests (not the system-admin service token: `user_id=0` → owner-FK 500).
-- Both `en-US.json` / `zh-CN.json` at exact key parity.
+- Both `en-US.json` / `zh-CN.json` at exact key parity. **Locale dir is `frontend/src/locale/` (SINGULAR) — not `locales/`.**
 - Existing CI gates only: pytest, spectral, swagger-cli, lint_invariants, frontend eslint `--max-warnings=0` + vue-tsc + `vitest run`, frontend-build. No new runtime deps.
 
 ---
@@ -38,7 +38,7 @@
 - **Create** `tests/services/test_ai_quota.py` — service-level tests.
 - **Modify** `tests/api/test_ai_chat.py` — over/under-budget chat tests.
 - **Modify** `frontend/src/composables/useCopilot.ts` — handle `quota_exceeded`.
-- **Modify** `frontend/src/locales/en-US.json` + `zh-CN.json` — `copilot.quotaExceeded`.
+- **Modify** `frontend/src/locale/en-US.json` + `zh-CN.json` — `copilot.quotaExceeded`.
 - **Modify** `frontend/src/composables/__tests__/useCopilot.spec.ts` — quota_exceeded test.
 - **Modify** `docs/operator/web-ui.md` — SP4d section.
 
@@ -175,10 +175,12 @@ Expected: completes; `quota_ai_tokens_month` + `ai_token_usage` created. (Dev DB
 Run: `uv run pytest tests/db/test_alembic.py -v`
 Expected: PASS (upgrade-head produces the expected set incl. `ai_token_usage`; downgrade→base→re-upgrade clean — confirms `drop_column` reverses the alter).
 
-- [ ] **Step 6: Verify no autogenerate drift** (the model server_default must match the migration).
+- [ ] **Step 6: BLOCKING drift gate** (env.py enables `compare_server_default=True`, so a BigInteger `server_default="1000000"` could autogenerate a spurious `alter_column ... server_default` diff if PG renders the stored default in a different form). This step MUST pass clean before commit — it is not advisory.
 
-Run: `uv run alembic -c alembic.ini revision --autogenerate -m _drift_check 2>&1 | Select-String "add_column|drop_column|alter_column|server_default"`
-Expected: no matches relating to `quota_ai_tokens_month` / `ai_token_usage`. Then DELETE the generated drift-check file (do not commit it).
+Run: `uv run alembic -c alembic.ini revision --autogenerate -m _drift_check`, then open the generated file and inspect its `upgrade()`.
+Expected: `upgrade()` body is empty (`pass`) w.r.t. `quota_ai_tokens_month` / `ai_token_usage` — NO `add_column`, `drop_column`, `alter_column`, or `op.create_table("ai_token_usage")`.
+- If a `quota_ai_tokens_month` `server_default` diff appears: the model/migration default forms disagree. Fix by setting BOTH the model and the migration to `server_default=sa.text("'1000000'")` (or the exact form alembic reports as canonical), re-run upgrade head, and re-run this gate until empty.
+- Only once the gate is clean: DELETE the generated drift-check file (do not commit it).
 
 - [ ] **Step 7: Commit.**
 
@@ -360,49 +362,63 @@ git commit -m "feat(sp4d): ai_quota service — check + record token budget"
 - Modify: `src/dlw/ai/service.py:31-60` (add pre-turn gate), `:132-145` (post-turn tokens + recording)
 - Test: `tests/api/test_ai_chat.py`
 
-- [ ] **Step 1: Write the failing API tests.** In `tests/api/test_ai_chat.py`, add (match the file's existing app/principal/SSE-parse helpers — reuse them; do NOT invent new fixtures):
+- [ ] **Step 1: Write the failing API tests.** `tests/api/test_ai_chat.py` REAL surface (verified — use these exact names, do NOT invent fixtures): `client` fixture (httpx AsyncClient over the ASGI app), `auth` fixture (`principal_headers(secret=SECRET, role="tenant_admin", user_id=1, tenant_id=1)`), `_collect_events(client, headers, body, *, timeout=6.0)` SSE helper (returns a `list[dict]` of `{"event","data"}`; returns on `done` OR when the stream closes — so the over-budget stream that ends after `quota_exceeded` does NOT hang). DB access is via the `engine` fixture + a local `async_sessionmaker(engine, expire_on_commit=False)` (see `test_chat_persists_conversation_and_audit:120-130`). The bootstrap creates ONE `Tenant(id=1, ...)` with NO `quota_ai_tokens_month` arg → it relies on the new model default `1_000_000`. **Critical:** `_bootstrap` is `scope="module", autouse=True` and is NOT reset per test, so prior tests in the module have already created `ai_conversations` rows — the over-budget test MUST assert *no increase*, not zero. Add:
 
 ```python
-async def test_chat_over_budget_blocks(client, app_state, tenant_user_headers):
-    # Seed usage >= the tenant's quota.
+async def test_chat_over_budget_blocks(client, auth, engine):
+    # Seed month-to-date usage above the tenant's default quota (1_000_000).
     from dlw.db.models.ai import AITokenUsage, AIConversation
     from sqlalchemy import select, func
-    async with app_state.session_maker() as s:
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    async with f() as s:
+        before = await s.scalar(
+            select(func.count()).select_from(AIConversation))
         s.add(AITokenUsage(
-            tenant_id=TENANT_ID, user_id=USER_ID, conversation_id=None,
+            tenant_id=1, user_id=1, conversation_id=None,
             model_name="stub", tokens_input=10**9, tokens_output=0))
         await s.commit()
-    events = await sse_post(client, tenant_user_headers,
-                            {"message": "hello"})
-    assert events[0]["event"] == "quota_exceeded"
-    assert events[0]["data"]["metric"] == "ai_tokens"
-    # No conversation created, no assistant message.
-    async with app_state.session_maker() as s:
-        n = await s.scalar(select(func.count()).select_from(AIConversation))
-    assert n == 0
+    evs = await _collect_events(client, auth, {"message": "hello there"})
+    assert evs[0]["event"] == "quota_exceeded"
+    assert evs[0]["data"]["metric"] == "ai_tokens"
+    assert evs[0]["data"]["remaining"] == 0
+    # Blocked BEFORE conversation create: no new conversation row.
+    async with f() as s:
+        after = await s.scalar(
+            select(func.count()).select_from(AIConversation))
+    assert after == before
+    # Cleanup the seed so later tests in the module aren't over budget.
+    async with f() as s:
+        await s.execute(
+            __import__("sqlalchemy").delete(AITokenUsage).where(
+                AITokenUsage.tokens_input == 10**9))
+        await s.commit()
 
 
-async def test_chat_under_budget_records_usage(client, app_state,
-                                               tenant_user_headers):
+async def test_chat_under_budget_records_usage(client, auth, engine):
     from dlw.db.models.ai import AITokenUsage, AIMessage
-    from sqlalchemy import select, func
-    events = await sse_post(client, tenant_user_headers, {"message": "hello"})
-    assert events[-1]["event"] == "done"
-    async with app_state.session_maker() as s:
+    from sqlalchemy import select
+    evs = await _collect_events(client, auth, {"message": "just chatting"})
+    assert evs[-1]["event"] == "done"
+    assert evs[-1]["data"]["tokens_used"] > 0
+    conv_id = uuid.UUID(evs[-1]["data"]["conversation_id"])
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    async with f() as s:
+        # exactly one usage row for THIS conversation
         rows = (await s.execute(
             select(AITokenUsage).where(
-                AITokenUsage.tenant_id == TENANT_ID))).scalars().all()
+                AITokenUsage.conversation_id == conv_id))).scalars().all()
         assert len(rows) == 1
         assert rows[0].tokens_input > 0
-        # assistant message carries the same counts
+        # the assistant message for THIS conversation carries matching counts
         am = (await s.execute(
-            select(AIMessage).where(AIMessage.role == "assistant"))
-        ).scalars().first()
+            select(AIMessage).where(
+                AIMessage.conversation_id == conv_id,
+                AIMessage.role == "assistant"))).scalars().one()
         assert am.tokens_input == rows[0].tokens_input
         assert am.tokens_output == rows[0].tokens_output
 ```
 
-(Adapt the symbol names — `client`, `app_state`, `tenant_user_headers`, `sse_post`, `TENANT_ID`, `USER_ID` — to whatever `tests/api/test_ai_chat.py` already defines. Read that file first and reuse its real fixtures/helpers; the test BODIES above are the spec, the plumbing must match the file. Each test must run against a clean conversations table — follow the file's existing isolation approach.)
+(`async_sessionmaker`, `uuid`, `select`/`func` are already imported at the top of `test_ai_chat.py` — confirm and reuse; `delete` is imported inline above to avoid touching the import block. Both new tests scope every query by `conversation_id` so they are robust to the module-scoped, non-reset DB.)
 
 - [ ] **Step 2: Run to verify FAIL.**
 
@@ -432,9 +448,11 @@ Then INSERT, as the very first statements inside `run_chat` (before `# 1. Resolv
             return
 ```
 
-- [ ] **Step 4: Add post-turn token estimate + recording.** In `run_chat` section 4, replace the assistant-message persist block so it computes nominal tokens, stamps them on the `AIMessage`, and records usage. Change:
+- [ ] **Step 4: Add post-turn token estimate + recording.** In `run_chat` section 4, replace the assistant-message persist block so it computes nominal tokens, stamps them on the `AIMessage`, and records usage. **`tin`/`tout` are computed BEFORE the persist `try:` so they are always bound — even if the persist commit raises and control jumps to the `except persist_failed` handler** (pre-review I3). Replace this block (the `try:` line stays, only its body and the trailing `yield done` change):
 
 ```python
+    try:
+        async with session_maker() as s:
             am = AIMessage(
                 conversation_id=conv_id, role="assistant",
                 content={"text": "".join(assistant_text),
@@ -447,15 +465,18 @@ Then INSERT, as the very first statements inside `run_chat` (before `# 1. Resolv
                                   "tokens_used": 0})
 ```
 
-to:
+with:
 
 ```python
-            text_out = "".join(assistant_text)
-            # SP4d: nominal token estimate (≈ chars/4). A real backend would
-            # report actual counts here; the stub consumes no real tokens, so
-            # this keeps usage accumulating and the budget exercisable.
-            tin = max(1, len(message) // 4)
-            tout = max(0, len(text_out) // 4)
+    # SP4d: nominal token estimate (≈ chars/4), computed BEFORE the persist
+    # try so they're always bound. A real backend would report actual counts;
+    # the stub consumes no real tokens, so this keeps usage accumulating and
+    # the budget exercisable.
+    text_out = "".join(assistant_text)
+    tin = max(1, len(message) // 4)
+    tout = max(0, len(text_out) // 4)
+    try:
+        async with session_maker() as s:
             am = AIMessage(
                 conversation_id=conv_id, role="assistant",
                 content={"text": text_out, "tool_calls": tool_calls},
@@ -478,6 +499,8 @@ to:
                                   "ai_message_id": ai_message_id,
                                   "tokens_used": tin + tout})
 ```
+
+(The existing `except Exception as exc:` → `persist_failed` handler is left unchanged below this block.)
 
 - [ ] **Step 5: Run the budget tests to verify PASS.**
 
@@ -518,16 +541,16 @@ Expected: `b3c4d5e6f7a8 (head)`.
 
 **Files:**
 - Modify: `frontend/src/composables/useCopilot.ts:72-76` (event switch in `send`)
-- Modify: `frontend/src/locales/en-US.json`, `frontend/src/locales/zh-CN.json`
+- Modify: `frontend/src/locale/en-US.json`, `frontend/src/locale/zh-CN.json`
 - Test: `frontend/src/composables/__tests__/useCopilot.spec.ts`
 
-- [ ] **Step 1: Add i18n keys.** In `frontend/src/locales/en-US.json`, under the existing `copilot` object, add:
+- [ ] **Step 1: Add i18n keys.** In `frontend/src/locale/en-US.json`, under the existing `copilot` object, add:
 
 ```json
     "quotaExceeded": "AI token budget exhausted for this month. Chat is paused until your quota resets."
 ```
 
-In `frontend/src/locales/zh-CN.json`, the same key under `copilot`:
+In `frontend/src/locale/zh-CN.json`, the same key under `copilot`:
 
 ```json
     "quotaExceeded": "本月 AI token 配额已用尽，聊天暂停，等待配额重置。"
@@ -587,16 +610,20 @@ Expected: FAIL — `quotaExceeded` undefined / branch missing.
             assistant.quotaExceeded = true
 ```
 
-- [ ] **Step 5: Render the note in the drawer.** In `CopilotDrawer.vue` (the assistant bubble render), where the assistant `text` is shown, add — when `message.quotaExceeded` — a localized note element, e.g.:
+- [ ] **Step 5: Render the note in the drawer.** The assistant bubble (`CopilotDrawer.vue:74-76`) always renders `<div class="bubble">{{ m.text }}</div>`. On the gate path the runner is never invoked, so NO `assistant.message_delta` arrives and `m.text` stays `''` — the note must render even though text is empty. Inside the `.msg` `v-for` block (the loop var is `m`, NOT `message`), add an `el-alert` AFTER the `.bubble` div and before the `tool-card` loop:
 
 ```vue
-<el-alert
-  v-if="message.quotaExceeded"
-  :title="t('copilot.quotaExceeded')"
-  type="warning" :closable="false" show-icon />
+          <el-alert
+            v-if="m.quotaExceeded"
+            :title="t('copilot.quotaExceeded')"
+            type="warning"
+            :closable="false"
+            show-icon
+            data-test="copilot-quota-alert"
+          />
 ```
 
-(Match the component's existing i18n usage — it already calls `useI18n()`/`t`. Place the alert within the assistant message block. Verify `el-alert` is available via the global ElementPlus plugin — it is, same as other `el-*` already used.)
+(Use loop var `m` to match the existing template. The component already calls `useI18n()`/`t` and uses `el-tag`/`el-drawer`, so `el-alert` is available via the global ElementPlus plugin — no import needed. The empty `.bubble` above it is harmless; the alert is the visible content of this assistant message.)
 
 - [ ] **Step 6: Run to verify PASS + drawer spec regression.**
 
@@ -606,7 +633,7 @@ Expected: PASS. If `CopilotDrawer.spec` mocks `useCopilot` and the new `el-alert
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add frontend/src/composables/useCopilot.ts frontend/src/components frontend/src/locales/en-US.json frontend/src/locales/zh-CN.json frontend/src/composables/__tests__/useCopilot.spec.ts
+git add frontend/src/composables/useCopilot.ts frontend/src/components/copilot/CopilotDrawer.vue frontend/src/locale/en-US.json frontend/src/locale/zh-CN.json frontend/src/composables/__tests__/useCopilot.spec.ts
 git commit -m "feat(sp4d): copilot surfaces quota_exceeded budget note"
 ```
 
@@ -619,7 +646,7 @@ Expected: all green (eslint `--max-warnings=0`, vue-tsc clean, all vitest pass, 
 
 - [ ] **Step 2: Verify locale parity.**
 
-Run: `cd frontend; node -e "const a=require('./src/locales/en-US.json'),b=require('./src/locales/zh-CN.json');const ka=JSON.stringify(Object.keys(a.copilot).sort()),kb=JSON.stringify(Object.keys(b.copilot).sort());if(ka!==kb){console.error('PARITY MISMATCH',ka,kb);process.exit(1)}console.log('parity ok')"`
+Run: `cd frontend; node -e "const a=require('./src/locale/en-US.json'),b=require('./src/locale/zh-CN.json');const ka=JSON.stringify(Object.keys(a.copilot).sort()),kb=JSON.stringify(Object.keys(b.copilot).sort());if(ka!==kb){console.error('PARITY MISMATCH',ka,kb);process.exit(1)}console.log('parity ok')"`
 Expected: `parity ok`.
 
 ---
