@@ -23,7 +23,7 @@
 ## File Structure
 
 **Backend create:** `src/dlw/db/models/ai.py`, `src/dlw/alembic/versions/<rev>_p3sp4a_ai_copilot.py`, `src/dlw/ai/__init__.py`, `src/dlw/ai/tools.py`, `src/dlw/ai/runner.py`, `src/dlw/ai/service.py`, `src/dlw/api/ai.py`, `tests/ai/__init__.py`, `tests/ai/test_tools.py`, `tests/ai/test_stub_runner.py`, `tests/api/test_ai_chat.py`, `tests/api/test_ai_conversations.py`.
-**Backend modify:** `src/dlw/db/models/__init__.py`, `src/dlw/config.py`, `src/dlw/main.py`, `src/dlw/authz/policy.csv`, `api/openapi.yaml`.
+**Backend modify:** `src/dlw/db/models/__init__.py`, `src/dlw/alembic/env.py` (add new models to import list), `src/dlw/config.py`, `src/dlw/main.py`, `src/dlw/authz/policy.csv`. (`api/openapi.yaml` is NOT modified — the `/ai/*` paths already exist in the v2.0 contract.)
 **Frontend create:** `frontend/src/api/aiClient.ts`, `frontend/src/composables/useCopilot.ts`, `frontend/src/components/copilot/CopilotDrawer.vue` (+ small bubble components inline), `frontend/tests/unit/aiClient.spec.ts`, `frontend/tests/unit/useCopilot.spec.ts`, `frontend/tests/unit/CopilotDrawer.spec.ts`.
 **Frontend modify:** the AppShell (toggle button), CommandPalette (⌘K entry), `locale/en-US.json`, `locale/zh-CN.json`.
 **Docs modify:** `docs/operator/web-ui.md`.
@@ -109,6 +109,8 @@ from dlw.db.models.ai import AIConversation, AIMessage
 ```
 (add `"AIConversation", "AIMessage",` to `__all__`.)
 
+**ALSO** (pre-review B2) add `AIConversation, AIMessage` to the explicit model import list in `src/dlw/alembic/env.py` (the `from dlw.db.models import (...)` block, ~line 14) so `target_metadata` / `alembic check` see the new tables and don't report drift.
+
 - [ ] **Step 4**: Create the migration. Generate a revision id (any 12-hex; use `p3sp4a` mnemonic) — file `src/dlw/alembic/versions/9a1b2c3d4e5f_p3sp4a_ai_copilot.py`:
 
 ```python
@@ -185,9 +187,9 @@ def downgrade() -> None:
 
 ```bash
 cd /d/download_weights && uv run python -c "from dlw.db.models import AIConversation, AIMessage; print('ok')"
-DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw uv run alembic -c src/dlw/alembic.ini heads 2>&1 | tail -3 || uv run alembic heads 2>&1 | tail -3
+DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw uv run alembic -c alembic.ini heads 2>&1 | tail -3
 ```
-Expected: import ok; a single head `9a1b2c3d4e5f`. (If alembic.ini path differs, locate it: `find . -name alembic.ini`.)
+Expected: import ok; a single head `9a1b2c3d4e5f`. (alembic.ini is at the repo root — pre-review B1; `script_location = src/dlw/alembic`.)
 
 - [ ] **Step 6**: Commit.
 
@@ -361,10 +363,13 @@ class AgentRunner(ABC):
     model_name: str
 
     @abstractmethod
-    def run(self, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
-        """Yield the assistant turn's events. The chat service supplies a
-        `call_tool(name, input) -> dict` via run() kwargs in subclasses that
-        need it (the stub uses the injected callback)."""
+    def run(self, ctx: AgentContext, *, call_tool) -> AsyncIterator[AgentEvent]:
+        """Yield the assistant turn's events. `call_tool(name, input) -> dict`
+        is supplied by the chat service (tenant-scoped + audited). The stub
+        uses it; OpenCodeRunner accepts it but does not yet dispatch tools
+        (plain Q&A via subprocess stdout; MCP tool bridge is a follow-on).
+        Pre-review I1: call_tool is in the ABC signature so all backends share
+        one contract."""
         ...
 
 
@@ -471,6 +476,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -521,8 +527,9 @@ async def run_chat(
             .order_by(AIMessage.created_at))).scalars().all()]
         s.add(AIMessage(conversation_id=conv.id, role="user",
                         content={"text": message}))
-        from sqlalchemy import func as _f
-        conv.last_message_at = _f.now()
+        # Pre-review I2: plain Python datetime (assigning func.now() leaves a
+        # SQL-expression object on the attr post-commit under expire_on_commit=False).
+        conv.last_message_at = datetime.now(UTC)
         await s.commit()
         conv_id = conv.id
 
@@ -568,21 +575,31 @@ async def run_chat(
                         tc["output"] = ev.data.get("output")
             yield ev
     except Exception as exc:  # noqa: BLE001
+        # Pre-review I2 (rev#1): on runner failure, emit `error` and RETURN —
+        # do NOT persist an empty assistant message or emit `done`. `error` is
+        # a stream-terminal event the frontend treats like `done`.
         yield AgentEvent("error", {"code": "runner_failed",
                                    "message": str(exc)})
+        return
 
-    # 4. Persist the assistant message + close.
-    async with session_maker() as s:
-        am = AIMessage(
-            conversation_id=conv_id, role="assistant",
-            content={"text": "".join(assistant_text),
-                     "tool_calls": tool_calls})
-        s.add(am)
-        await s.commit()
-        ai_message_id = str(am.id)
-    yield AgentEvent("done", {"conversation_id": str(conv_id),
-                              "ai_message_id": ai_message_id,
-                              "tokens_used": 0})
+    # 4. Persist the assistant message + close. Pre-review #1 (rev#2): the
+    # persist + `done` are wrapped so a persistence failure still emits a
+    # terminal event (the frontend would otherwise hang waiting for `done`).
+    try:
+        async with session_maker() as s:
+            am = AIMessage(
+                conversation_id=conv_id, role="assistant",
+                content={"text": "".join(assistant_text),
+                         "tool_calls": tool_calls})
+            s.add(am)
+            await s.commit()
+            ai_message_id = str(am.id)
+        yield AgentEvent("done", {"conversation_id": str(conv_id),
+                                  "ai_message_id": ai_message_id,
+                                  "tokens_used": 0})
+    except Exception as exc:  # noqa: BLE001
+        yield AgentEvent("error", {"code": "persist_failed",
+                                   "message": str(exc)})
 ```
 
 - [ ] **Step 2**: Commit.
@@ -720,14 +737,14 @@ p, role:tenant_viewer, /api/v1/ai*, ^(GET|POST)$, tenant_match
 
 (viewer gets AI too — it is read-only in SP4a; revisit when write tools land.)
 
-- [ ] **Step 4**: `api/openapi.yaml` — add `/ai/chat` (POST, SSE 200) + `/ai/conversations` (GET) + `/ai/conversations/{conversationId}` (GET) under a new `# ===== AI Copilot =====` section near the end, mirroring the SSE doc style of `/tasks/{taskId}/events/stream`. (Lint-only artifact; keep `tags: [ai]`.)
+- [ ] **Step 4**: `api/openapi.yaml` — **NO CHANGE** (pre-review rev#2 #5). The static contract ALREADY documents `/ai/chat`, `/ai/conversations`, `/ai/conversations/{conversationId}` + `AIChatRequest` (lines ~1673-1790, from the v2.0 contract). The static openapi is the aspirational `/api/v2`-based contract (it carries the full v2.1 vision incl. `context`/`tool_confirmation`); the runtime `ChatRequest` is the SP4a subset — same static-ahead-of-runtime split as every prior SP. **Do NOT add or trim openapi paths** (trimming `AIChatRequest` could break other examples; adding would duplicate). Just confirm `swagger-cli`/spectral still pass unchanged.
 
-- [ ] **Step 5**: Import smoke + commit.
+- [ ] **Step 5**: Import smoke + commit (note: `api/openapi.yaml` NOT in the add — it is unchanged).
 
 ```bash
 cd /d/download_weights && uv run python -c "from dlw.api.ai import router; print([r.path for r in router.routes])"
-git add src/dlw/api/ai.py src/dlw/main.py src/dlw/authz/policy.csv api/openapi.yaml
-git commit -q -m "UI-SP4a M1: /api/v1/ai chat SSE + conversations endpoints + RBAC + openapi"
+git add src/dlw/api/ai.py src/dlw/main.py src/dlw/authz/policy.csv
+git commit -q -m "UI-SP4a M1: /api/v1/ai chat SSE + conversations endpoints + RBAC (openapi /ai/* already in v2.0 contract)"
 ```
 Expected: prints the 3 ai routes.
 
@@ -780,10 +797,9 @@ Expected: all pass.
 - [ ] **Step 1**: `cd /d/download_weights && uv run pytest -q 2>&1 | tail -3` — all green (2 known Windows-local failover flakes may appear; CI arbiter).
 - [ ] **Step 2**: Apply the migration to the dev DB so the ephemeral controller (M3 smoke) has the tables:
 ```bash
-cd /d/download_weights && find . -name alembic.ini -not -path "*/.venv/*"
-DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw uv run alembic -c <alembic.ini path> upgrade head 2>&1 | tail -5
+cd /d/download_weights && DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw uv run alembic -c alembic.ini upgrade head 2>&1 | tail -5
 ```
-Expected: upgrades to `9a1b2c3d4e5f`.
+Expected: upgrades to `9a1b2c3d4e5f`. (alembic.ini at repo root; `script_location = src/dlw/alembic`.)
 
 ---
 

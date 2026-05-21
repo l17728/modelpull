@@ -312,10 +312,17 @@ client).
   `Base.metadata.create_all` (picks up the new models). The dev PG
   (`:5433`) needs `alembic upgrade head` once; M1 runs it. CI's pytest
   uses `create_all`, so no alembic dependency in CI tests.
-- **`gen_random_uuid()`**: requires `pgcrypto`. Prior tables use
-  app-side UUIDs or `gen_random_uuid()`? — the model uses a Python
-  `default=uuid.uuid4` so inserts never depend on the DB default
-  (mirrors `DownloadTask.id`). The server_default is documentation.
+- **`gen_random_uuid()`**: available built-in in `pg_catalog` on PG 13+
+  (no `pgcrypto` extension needed; dev/prod is PG 18). Regardless, the
+  ORM model uses a Python `default=uuid.uuid4` so inserts never depend
+  on the DB default (mirrors `DownloadTask.id`); the `server_default`
+  is documentation / raw-SQL-insert safety.
+- **OpenAPI already documents `/ai/*`**: the static `api/openapi.yaml`
+  (v2.0 contract) already carries `/ai/chat`, `/ai/conversations[/{id}]`
+  + `AIChatRequest` (with the full v2.1 vision incl. `context` /
+  `tool_confirmation`). The runtime `ChatRequest` is the SP4a subset —
+  the same static-ahead-of-runtime split as every prior SP. SP4a does
+  NOT modify `api/openapi.yaml`.
 - **OpenCode CLI surface is evolving**: `OpenCodeRunner`'s exact flags
   are resolved at implementation against the installed version; if the
   binary/flags differ, the runner raises `AIBackendUnavailable` and the
