@@ -14,6 +14,7 @@ from dlw.db import Base
 from dlw.db.models import (  # noqa: F401  side-effect import
     AIConversation,
     AIMessage,
+    AITokenUsage,
     AIToolCall,
     AuditLog,
     CasbinRule,
