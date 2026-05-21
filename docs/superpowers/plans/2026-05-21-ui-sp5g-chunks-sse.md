@@ -151,7 +151,7 @@ async def stream_subtask_chunks(
     )
 ```
 
-- [ ] **Step 2**: Modify `src/dlw/main.py` — find the existing block:
+- [ ] **Step 2**: Modify `src/dlw/main.py`. The existing block (lines ~304-307) reads:
 
 ```python
     from dlw.api.tasks_events_stream import router as tasks_events_stream_router
@@ -160,7 +160,16 @@ async def stream_subtask_chunks(
     app.include_router(tasks_router)
 ```
 
-**REPLACE** with (insert the chunks-stream pair between events-stream and tasks; do NOT remove the existing lines, ADD the new pair before `tasks_router`):
+**INSERT** the following 4 lines BETWEEN `app.include_router(tasks_events_stream_router)` and `from dlw.api.tasks import router as tasks_router`. Do NOT remove or retype any existing line; only add these 4:
+
+```python
+    # SP5g: tasks-chunks stream router included BEFORE tasks_router for
+    # defensive consistency. Distinct depth from any /{task_id}/* route.
+    from dlw.api.tasks_chunks_stream import router as tasks_chunks_stream_router
+    app.include_router(tasks_chunks_stream_router)
+```
+
+After the edit, the block must read (events-stream pair → new chunks-stream pair → tasks pair):
 
 ```python
     from dlw.api.tasks_events_stream import router as tasks_events_stream_router
@@ -268,15 +277,22 @@ async def _bootstrap(engine):
                          status="running"),
         ])
         await session.flush()
-        # 2 subtasks on TASK_T1 (tenant 1). Adapt columns to the real
-        # FileSubTask schema (verified in Task 3 Step 1).
+        # 2 subtasks on TASK_T1 (tenant 1). Explicit values for the
+        # default-bearing non-nullable int/bool columns (chunks_completed,
+        # bytes_downloaded, is_chunked) so the seed is unambiguously valid
+        # regardless of ORM default-application behavior. Verify column
+        # names against the real FileSubTask model in Task 3 Step 1.
         session.add_all([
             FileSubTask(task_id=TASK_T1, tenant_id=1,
                         filename="a.bin", file_size=1000,
-                        status="downloading"),
+                        status="downloading",
+                        chunks_completed=0, bytes_downloaded=0,
+                        is_chunked=False),
             FileSubTask(task_id=TASK_T1, tenant_id=1,
                         filename="b.bin", file_size=2000,
-                        status="pending"),
+                        status="pending",
+                        chunks_completed=0, bytes_downloaded=0,
+                        is_chunked=False),
         ])
         await session.commit()
     yield
@@ -353,7 +369,8 @@ async def test_chunks_stream_single_snapshot(
     body = json.loads(received[0])
     assert "items" in body
     assert isinstance(body["items"], list)
-    assert len(body["items"]) >= 1
+    # Seed is deterministic: exactly 2 FileSubTask rows on TASK_T1.
+    assert len(body["items"]) == 2
 
 
 @pytest.mark.slow
