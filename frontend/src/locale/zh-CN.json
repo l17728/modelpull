@@ -23,6 +23,7 @@
     "title": "AI 助手", "newChat": "新对话", "history": "历史",
     "empty": "问我关于任务、配额或下载的问题。",
     "placeholder": "向助手提问…", "send": "发送",
+    "quotaExceeded": "本月 AI token 配额已用尽，聊天暂停，等待配额重置。",
     "confirm": {
       "title": "AI 想执行 {tool}", "approve": "确认",
       "reject": "取消", "modify": "修改", "modifyHint": "JSON 格式错误"

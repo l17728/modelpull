@@ -25,6 +25,7 @@ export interface ChatMessage {
   text: string
   toolCards: ToolCard[]
   pendingConfirm?: PendingConfirm
+  quotaExceeded?: boolean
 }
 
 export function useCopilot() {
@@ -69,6 +70,8 @@ export function useCopilot() {
               estimatedImpact:
                 (ev.data.estimated_quota_impact as Record<string, unknown>) ?? {},
             }
+          } else if (ev.event === 'quota_exceeded') {
+            assistant.quotaExceeded = true
           } else if (ev.event === 'done') {
             conversationId.value = String(ev.data.conversation_id ?? '') || null
           } else if (ev.event === 'error') {
