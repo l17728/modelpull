@@ -53,6 +53,7 @@ EXPECTED_TABLES = {
     "alembic_version",
     "ai_conversations",
     "ai_messages",
+    "ai_token_usage",
     "ai_tool_calls",
     "audit_log",
     "casbin_rule",
