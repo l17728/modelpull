@@ -15,9 +15,11 @@ from dlw.ai.tools import READONLY_TOOLS
 from dlw.ai.write_tools import WRITE_TOOLS
 from dlw.auth.principal import Principal
 from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall
-from dlw.services.ai_quota import (AITokenBudgetExceeded,
-                                   check_ai_token_budget,
-                                   record_ai_token_usage)
+from dlw.services.ai_quota import (
+    AITokenBudgetExceeded,
+    check_ai_token_budget,
+    record_ai_token_usage,
+)
 from dlw.services.audit import write_audit
 
 

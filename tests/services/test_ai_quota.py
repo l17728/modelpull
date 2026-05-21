@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.db.base import Base
 from dlw.db.models.ai import AITokenUsage
-from dlw.services.ai_quota import (AITokenBudgetExceeded,
-                                   check_ai_token_budget,
-                                   record_ai_token_usage)
+from dlw.services.ai_quota import (
+    AITokenBudgetExceeded,
+    check_ai_token_budget,
+    record_ai_token_usage,
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
