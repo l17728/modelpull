@@ -901,7 +901,6 @@ paths:
                   executor_id: host-12.local-worker-1
                   epoch: 14
                   host_id: host-12.local
-                  parent_executor_id: null
                   timestamp: "2026-05-07T10:30:00.000Z"
                   uptime_seconds: 3600
                   system:
@@ -916,8 +915,8 @@ paths:
                     running_subtasks: 5
                   source_health:
                     huggingface: {reachable: true, rtt_ms: 320, last_5xx_ago_s: 1200}
-                    modelscope: {reachable: true, rtt_ms: 18, last_5xx_ago_s: null}
-                    hf_mirror: {reachable: true, rtt_ms: 35, last_5xx_ago_s: null}
+                    modelscope: {reachable: true, rtt_ms: 18}
+                    hf_mirror: {reachable: true, rtt_ms: 35}
                   tasks:
                     - subtask_id: 11111111-2222-3333-4444-555555555555
                       task_id: 7e57a3f8-1234-4567-8901-abcdef012345
@@ -1699,7 +1698,6 @@ paths:
               newConversation:
                 summary: Start new conversation
                 value:
-                  conversation_id: null
                   message: 下载 DeepSeek 最新发布的 V3 模型
                   context:
                     current_view: /
@@ -1707,7 +1705,6 @@ paths:
                 summary: Reply with tool confirmation
                 value:
                   conversation_id: 11111111-2222-3333-4444-555555555555
-                  message: null
                   tool_confirmation:
                     call_id: call_ghi789
                     decision: approved
