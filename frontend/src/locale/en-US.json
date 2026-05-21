@@ -15,7 +15,13 @@
   "palette": {
     "placeholder": "Jump to or run an action…", "navGroup": "Navigate",
     "actionGroup": "Actions", "createTask": "New task",
-    "openTaskById": "Open task by ID", "openTaskPrompt": "Enter task ID"
+    "openTaskById": "Open task by ID", "openTaskPrompt": "Enter task ID",
+    "openCopilot": "Open AI Copilot"
+  },
+  "copilot": {
+    "title": "AI Copilot", "newChat": "New chat", "history": "History",
+    "empty": "Ask me about your tasks, quota, or downloads.",
+    "placeholder": "Ask the Copilot…", "send": "Send"
   },
   "dashboard": {
     "heading": "Overview", "inProgress": "In progress", "completed": "Completed",

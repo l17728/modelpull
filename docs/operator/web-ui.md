@@ -389,3 +389,45 @@ consumer (task-detail header, tasks-list, executors, audit, quota)
 streams via SSE through the single `useLiveResource` seam, with
 concurrency bounded to 2 per page and polling as the automatic
 fallback.
+
+## UI-SP4a — AI Copilot (read-only MVP)
+
+First slice of the v2.1 AI Copilot, and the **first migration-bearing
+UI sub-project** (`ai_conversations` / `ai_messages`; alembic head
+advances to `9a1b2c3d4e5f`). A right-side chat drawer (open via the
+topbar 🤖 button or the ⌘K palette "Open AI Copilot" entry) lets users
+ask read-only questions in natural language; the assistant answers by
+calling existing read-only services **in the caller's own JWT scope**.
+
+**Backend**: `POST /api/v1/ai/chat` streams SSE
+(`assistant.thinking` / `tool_call` / `tool_result` /
+`assistant.message_delta` / `error` / `done`); `GET
+/api/v1/ai/conversations[/{id}]` returns history. RBAC: `/api/v1/ai*`
+granted to tenant_admin/operator/viewer (read-only this slice).
+
+**Pluggable agent backend** via `DLW_AI_BACKEND`:
+- `stub` (default) — deterministic, scripted; drives CI/tests with no
+  secret and no subprocess. Exercises the full pipeline (persistence,
+  tool execution, audit, SSE framing).
+- `opencode` — the user-selected live backend: spawns the `opencode`
+  CLI subprocess (binary on PATH; `DLW_AI_OPENCODE_BIN` overrides).
+  Streams stdout as message deltas for plain Q&A; the MCP tool bridge
+  is a follow-on.
+- `claude_code` / `openai_compat` — recognized but not yet wired
+  (raise `AIBackendUnavailable` → 503); structural extension points.
+
+**Tools** (read-only, in-process, tenant-scoped, audited
+`ai.tool.*` with `payload.actor_kind="ai_copilot"`):
+`dlw_list_tasks`, `dlw_get_task`, `dlw_get_task_events`,
+`dlw_quota_current` — each reuses the same `tenant_filtered(...)`
+queries / services as the REST handlers, so **invariant 15** (AI runs
+within the caller's permissions, never a service credential) and
+**invariant 16** (all AI tool calls audited) hold automatically.
+
+**Deferred to later SP4 slices** (named with their owning invariants):
+SP4b write tools + `tool_call_pending_confirm` confirmation gate (inv
+17/40); SP4c sandboxed-MCP subprocess (inv 37 — the MVP calls tools
+in-process); SP4d token-budget quota (inv 18 — `tokens_input/output`
+columns exist but are not enforced); SP4e external-content tools +
+prompt-injection sanitization (inv 19/41 — the MVP's tools return only
+internal data, so no external content enters the LLM context).

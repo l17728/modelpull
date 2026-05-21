@@ -17,7 +17,12 @@
   "palette": {
     "placeholder": "跳转或执行操作…", "navGroup": "导航",
     "actionGroup": "操作", "createTask": "新建任务", "openTaskById": "按 ID 打开任务",
-    "openTaskPrompt": "输入任务 ID"
+    "openTaskPrompt": "输入任务 ID", "openCopilot": "打开 AI 助手"
+  },
+  "copilot": {
+    "title": "AI 助手", "newChat": "新对话", "history": "历史",
+    "empty": "问我关于任务、配额或下载的问题。",
+    "placeholder": "向助手提问…", "send": "发送"
   },
   "dashboard": {
     "heading": "概览", "inProgress": "进行中", "completed": "已完成",

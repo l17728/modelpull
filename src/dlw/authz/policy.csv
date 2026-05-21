@@ -11,6 +11,9 @@ p, role:tenant_operator, /api/v1/audit*, ^GET$, tenant_match
 p, role:tenant_operator, /api/v1/executors*, ^GET$, tenant_match
 p, role:tenant_viewer, /api/v1/audit*, ^GET$, tenant_match
 p, role:tenant_viewer, /api/v1/executors*, ^GET$, tenant_match
+p, role:tenant_admin, /api/v1/ai*, ^(GET|POST)$, tenant_match
+p, role:tenant_operator, /api/v1/ai*, ^(GET|POST)$, tenant_match
+p, role:tenant_viewer, /api/v1/ai*, ^(GET|POST)$, tenant_match
 g, role:system_admin, role:system_admin
 g, role:tenant_admin, role:tenant_admin
 g, role:tenant_operator, role:tenant_operator

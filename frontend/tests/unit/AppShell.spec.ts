@@ -9,7 +9,10 @@ import { useAuthStore } from '@/stores/auth'
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zh } })
 const push = vi.fn()
-vi.mock('vue-router', () => ({
+vi.mock('vue-router', async (importOriginal) => ({
+  // SP4a: AppShell now transitively imports @/api/client → @/router, which
+  // calls createRouter at module load — so keep the real router factories.
+  ...(await importOriginal<typeof import('vue-router')>()),
   useRouter: () => ({ push }),
   useRoute: () => ({ name: 'taskList' }),
   RouterView: { template: '<div class="rv" />' },

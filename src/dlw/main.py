@@ -345,6 +345,8 @@ def create_app() -> FastAPI:
     app.include_router(tasks_stream_router)
     from dlw.api.executors_stream import router as executors_stream_router
     app.include_router(executors_stream_router)
+    from dlw.api.ai import router as ai_router
+    app.include_router(ai_router)
 
     # DX only: advertise the Bearer-JWT scheme in the generated OpenAPI so
     # Swagger /docs shows an "Authorize" button and authenticated

@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { useSessionStore } from '@/stores/session'
 import { visibleNav } from '@/nav/registry'
+import CopilotDrawer from '@/components/copilot/CopilotDrawer.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -65,6 +66,13 @@ function toggleLocale() {
         </el-button>
         <span class="hint">{{ t('shell.commandHint') }}</span>
         <div class="spacer" />
+        <el-button
+          link
+          data-test="copilot-toggle"
+          @click="ui.toggleCopilot()"
+        >
+          🤖 {{ t('copilot.title') }}
+        </el-button>
         <el-tag
           v-if="session.principal"
           size="small"
@@ -98,6 +106,7 @@ function toggleLocale() {
         <slot />
       </el-main>
     </el-container>
+    <CopilotDrawer />
   </el-container>
 </template>
 
