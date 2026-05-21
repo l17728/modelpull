@@ -192,6 +192,17 @@ seam path, like SP5f's Events tab.)
   SP5h's Sources tab requires a click → exercises the SP5f "enabled
   flips true → lazy-open" seam path. This is already proven by SP5f;
   SP5h re-validates it for a 2nd gated consumer.
+- **Empty / under-counted allocation is valid, not a bug**:
+  `source_allocation_for_task` intentionally excludes subtasks whose
+  `source_id` is still `None` (dispatched but not yet source-assigned)
+  from `sources_used` (pre-existing SP2 service behavior, lines ~75-80
+  of `task_detail.py`). So a freshly-submitted task shows an empty
+  `SourceAllocation` until sources are assigned — both the SSE stream
+  and the prior one-shot endpoint behave identically. The SP5h tests
+  seed no `FileSubTask` rows precisely because an empty allocation is
+  a valid, expected payload. The headed smoke only asserts the SSE
+  request fires (not its content), so an empty allocation does not
+  fail the smoke.
 - **httpx ASGITransport buffering** — mitigated by `?max_ticks=N`.
 - **Route collision** — N/A (distinct depth).
 - **Pre-stream 404 timing** — proven by SP5/SP5e-g.
