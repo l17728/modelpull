@@ -15,7 +15,8 @@ vi.mock('@/composables/useCopilot', async () => {
   return {
     useCopilot: () => copilotState.value ?? {
       messages: ref([]), streaming: ref(false), conversationId: ref(null),
-      conversations: ref([]), send: vi.fn(), refreshConversations: vi.fn(),
+      conversations: ref([]), hasPendingConfirm: ref(false),
+      send: vi.fn(), confirm: vi.fn(), refreshConversations: vi.fn(),
       loadConversation: vi.fn(), newConversation: vi.fn(),
     },
   }
@@ -54,7 +55,8 @@ describe('CopilotDrawer (SP4a)', () => {
           { id: 'c1', tool: 'dlw_list_tasks', ok: true, output: { items: [] } }] },
       ]),
       streaming: ref(false), conversationId: ref('conv-1'),
-      conversations: ref([]), send: vi.fn(), refreshConversations: vi.fn(),
+      conversations: ref([]), hasPendingConfirm: ref(false),
+      send: vi.fn(), confirm: vi.fn(), refreshConversations: vi.fn(),
       loadConversation: vi.fn(), newConversation: vi.fn(),
     }
     const w = await mountDrawer()

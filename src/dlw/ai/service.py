@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.ai.runner import AgentContext, AgentEvent, AgentRunner
 from dlw.ai.tools import READONLY_TOOLS
+from dlw.ai.write_tools import WRITE_TOOLS
 from dlw.auth.principal import Principal
-from dlw.db.models.ai import AIConversation, AIMessage
+from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall
 from dlw.services.audit import write_audit
 
 
@@ -104,6 +105,22 @@ async def run_chat(
                     if tc.get("id") == ev.data.get("id"):
                         tc["ok"] = ev.data.get("ok")
                         tc["output"] = ev.data.get("output")
+            elif ev.event == "tool_call_pending_confirm":
+                # SP4b: persist a pending tool call (NO execution) and stamp
+                # the real call id into the event before forwarding it.
+                async with session_maker() as ps:
+                    call = AIToolCall(
+                        conversation_id=conv_id,
+                        tool_name=ev.data.get("tool"),
+                        proposed_input=ev.data.get("input") or {},
+                        requires_confirmation=True, status="pending")
+                    ps.add(call)
+                    await ps.commit()
+                    call_id = str(call.id)
+                ev.data["id"] = call_id
+                tool_calls.append({"id": call_id, "tool": ev.data.get("tool"),
+                                   "input": ev.data.get("input"),
+                                   "pending_confirm": True})
             yield ev
     except Exception as exc:  # noqa: BLE001
         # On runner failure: emit a terminal `error` and return — do NOT
@@ -129,3 +146,104 @@ async def run_chat(
     except Exception as exc:  # noqa: BLE001
         yield AgentEvent("error", {"code": "persist_failed",
                                    "message": str(exc)})
+
+
+async def run_confirmation(
+    *, session_maker: async_sessionmaker, principal: Principal,
+    conversation_id: uuid.UUID, call_id: uuid.UUID, decision: str,
+    modified_input: dict | None,
+) -> AsyncIterator[AgentEvent]:
+    """SP4b phase 2: resolve a pending write-tool call. Single transaction —
+    lock the call FOR UPDATE, check status, execute via the service layer
+    (inv 40: full re-validation of final_input), update the row + metadata,
+    one atomic commit. Audit is best-effort/isolated afterward (inv 16)."""
+    proposed: dict = {}
+    tool_name = ""
+    final_input: dict = {}
+    out: dict = {}
+    resolved_status = ""   # rejected | executed | error
+
+    async with session_maker() as s:
+        call = (await s.execute(
+            select(AIToolCall).join(
+                AIConversation, AIToolCall.conversation_id == AIConversation.id)
+            .where(AIToolCall.id == call_id,
+                   AIToolCall.conversation_id == conversation_id,
+                   AIConversation.tenant_id == principal.tenant_id,
+                   AIConversation.owner_user_id == principal.user_id)
+            .with_for_update(of=AIToolCall))
+        ).scalar_one_or_none()
+        if call is None:
+            yield AgentEvent("error", {"code": "not_found",
+                                       "message": "pending call not found"})
+            return
+        if call.status != "pending":
+            yield AgentEvent("error", {"code": "already_resolved",
+                                       "message": f"call is {call.status}"})
+            return
+        proposed = call.proposed_input
+        tool_name = call.tool_name
+        call.confirmation_decision = decision
+        call.confirmed_by_user_id = principal.user_id
+        call.confirmation_at = datetime.now(UTC)
+        if decision == "rejected":
+            call.status = resolved_status = "rejected"
+        elif decision == "modified" and not modified_input:
+            # Defense-in-depth (final-review HIGH): the API validator already
+            # requires modified_input for a 'modified' decision, but guard at
+            # the service layer too — executing with {} would falsely audit
+            # user_final_input={} (inv 40). Leave the call pending.
+            yield AgentEvent("error",
+                             {"code": "bad_request",
+                              "message": "modified_input required for "
+                                         "decision=modified"})
+            return
+        else:
+            final_input = proposed if decision == "approved" \
+                else dict(modified_input)
+            tool = WRITE_TOOLS.get(tool_name)
+            if tool is None:
+                out = {"error": f"unknown tool {tool_name}"}
+            else:
+                try:
+                    out = await tool.run(s, principal, **final_input)
+                except Exception as exc:  # noqa: BLE001
+                    out = {"error": str(exc)}
+            ok = "error" not in out
+            call.final_input = final_input
+            call.output = out
+            call.status = resolved_status = "executed" if ok else "error"
+            if not ok:
+                call.error_code = str(out.get("error"))[:64]
+        await s.commit()
+
+    # Best-effort isolated audit (inv 16 + proposed/final for inv 40).
+    try:
+        async with session_maker() as a:
+            payload: dict = {"actor_kind": "ai_copilot",
+                             "ai_proposed_input": proposed}
+            if resolved_status != "rejected":
+                payload["user_final_input"] = final_input
+            await write_audit(
+                a, action=f"ai.tool.{tool_name}", resource_type="ai_tool",
+                resource_id=str(call_id),
+                outcome="rejected" if resolved_status == "rejected"
+                else ("success" if resolved_status == "executed" else "error"),
+                tenant_id=principal.tenant_id, actor_user_id=principal.user_id,
+                payload=payload)
+            await a.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+    if resolved_status == "rejected":
+        yield AgentEvent("assistant.message_delta",
+                         {"text": "Operation cancelled."})
+    else:
+        ok = resolved_status == "executed"
+        yield AgentEvent("tool_result",
+                         {"id": str(call_id), "ok": ok, "output": out})
+        yield AgentEvent("assistant.message_delta",
+                         {"text": "Done." if ok
+                          else f"Failed: {out.get('error')}"})
+    yield AgentEvent("done", {"conversation_id": str(conversation_id),
+                              "ai_message_id": "", "tokens_used": 0})

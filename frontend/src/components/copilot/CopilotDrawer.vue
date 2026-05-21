@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useUiStore } from '@/stores/ui'
 import { useCopilot } from '@/composables/useCopilot'
+import CopilotConfirmCard from '@/components/copilot/CopilotConfirmCard.vue'
 
 const { t } = useI18n()
 const ui = useUiStore()
@@ -91,6 +92,13 @@ async function onSend() {
             </div>
             <pre class="tool-out">{{ JSON.stringify(card.output ?? card.input, null, 2) }}</pre>
           </div>
+          <CopilotConfirmCard
+            v-if="m.pendingConfirm"
+            :pending="m.pendingConfirm"
+            @approve="copilot.confirm('approved')"
+            @reject="copilot.confirm('rejected')"
+            @modify="(mi) => copilot.confirm('modified', mi)"
+          />
         </div>
       </div>
 
@@ -100,13 +108,14 @@ async function onSend() {
           type="textarea"
           :rows="2"
           :placeholder="t('copilot.placeholder')"
-          :disabled="copilot.streaming.value"
+          :disabled="copilot.streaming.value || copilot.hasPendingConfirm.value"
           data-test="copilot-input"
           @keydown.enter.exact.prevent="onSend"
         />
         <el-button
           type="primary"
           :loading="copilot.streaming.value"
+          :disabled="copilot.hasPendingConfirm.value"
           data-test="copilot-send"
           @click="onSend"
         >

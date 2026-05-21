@@ -45,7 +45,12 @@ class AgentRunner(ABC):
         ...
 
 
+import re
+
 _TASK_KEYWORDS = ("task", "任务", "download", "下载", "job", "失败", "fail")
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_REPO_RE = re.compile(r"[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+")
 
 
 class StubAgentRunner(AgentRunner):
@@ -59,6 +64,32 @@ class StubAgentRunner(AgentRunner):
     async def run(self, ctx: AgentContext, *,
                   call_tool: CallTool) -> AsyncIterator[AgentEvent]:
         msg = ctx.user_message
+        low = msg.lower()
+        # SP4b: write-tool PROPOSAL (never executes here — the chat service
+        # persists a pending call + the user confirms in phase 2).
+        m_uuid = _UUID_RE.search(msg)
+        if ("cancel" in low or "取消" in low) and m_uuid:
+            tid = m_uuid.group(0)
+            yield AgentEvent("tool_call_pending_confirm", {
+                "id": "", "tool": "dlw_cancel_task",
+                "input": {"task_id": tid},
+                "rationale": f"Cancel task {tid}.",
+                "estimated_quota_impact": {}})
+            yield AgentEvent("assistant.message_delta",
+                             {"text": "Please confirm the cancellation."})
+            return
+        m_repo = _REPO_RE.search(msg)
+        if ("create" in low or "download" in low or "下载" in low) and m_repo:
+            repo = m_repo.group(0)
+            yield AgentEvent("tool_call_pending_confirm", {
+                "id": "", "tool": "dlw_create_task",
+                "input": {"repo_id": repo, "revision": "0" * 40,
+                          "storage_id": 1},
+                "rationale": f"Create a download task for {repo}.",
+                "estimated_quota_impact": {"bytes": 0}})
+            yield AgentEvent("assistant.message_delta",
+                             {"text": "Please confirm the new task."})
+            return
         if any(k in msg.lower() for k in _TASK_KEYWORDS):
             yield AgentEvent("assistant.thinking",
                              {"text": "Looking up your tasks…"})
