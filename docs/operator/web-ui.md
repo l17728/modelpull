@@ -324,3 +324,35 @@ under the HTTP/1.1 6-per-origin cap. The remaining 2 SP2 tabs
 stream is added the worst case reaches 5, at which point a seam
 "close-on-disable" change (bounding concurrent streams to 2: header +
 active tab) becomes worthwhile. Deferred until then (YAGNI).
+
+### UI-SP5h — Source-allocation SSE follow-on
+
+Eighth application of the view-free SSE template, third SP2
+sub-resource to graduate to SSE. The Sources tab on TaskDetail
+(`useSourceAllocation`) now talks SSE via
+`GET /api/v1/tasks/{task_id}/source-allocation/stream` (2 s default
+tick; `DLW_TASK_SOURCE_ALLOC_STREAM_INTERVAL_SECONDS` overrides;
+clamped `[0.5, 60.0]`). The view-side consumers are unchanged.
+
+The stream reuses `source_allocation_for_task(session, task_id,
+tenant_id)` (SP2-introduced), which returns a `SourceAllocation`
+directly — emitted via `model_dump_json()` with no wrapper and no
+cursor (the simplest stream body yet). No seam change was needed.
+The Sources tab is NOT default-active, so the SSE opens on tab click
+(the SP5f "enabled flips true → lazy-open" path, re-validated for a
+2nd gated consumer). A freshly-submitted task may show an empty
+`SourceAllocation` until sources are assigned — subtasks with a null
+`source_id` are intentionally excluded from `sources_used` (pre-
+existing SP2 service behavior; both the stream and the one-shot
+endpoint behave identically). Same routing precaution as SP5c-SP5g:
+`tasks_source_alloc_stream_router` is registered after
+`tasks_chunks_stream_router` and BEFORE `tasks_router` in
+`src/dlw/main.py`.
+
+**Connection-cap status (monitored)**: a TaskDetail page where the
+user has visited Files + Events + Sources tabs now holds 4 concurrent
+SSE connections (header + 3 tab streams), still under the HTTP/1.1
+6-per-origin cap. **SP5i (the last SP2 tab, Executors) would reach 5
+— that SP must bundle the seam "close-on-disable" change** (bounding
+concurrent streams to 2: header + active tab). This is the trigger
+condition recorded in SP5g's YAGNI deferral.
