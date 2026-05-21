@@ -663,6 +663,28 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ParticipatingExecutors'}
 
+  /tasks/{taskId}/participating-executors/stream:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: Live participating-executors SSE stream (UI-SP5i)
+      operationId: streamParticipatingExecutors
+      responses:
+        '200':
+          description: SSE stream of ParticipatingExecutors snapshots
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each event is `data: <ParticipatingExecutors JSON>\n\n`
+                  ({items}). Stream terminates only on client disconnect
+                  or shutdown.
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404':
+          description: Task not found (or not in caller's tenant)
+
   # ========== Models ==========
   /models/search:
     get:

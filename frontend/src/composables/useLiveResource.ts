@@ -1,4 +1,4 @@
-import { onScopeDispose, ref, computed, toValue, watch, type MaybeRefOrGetter, type Ref, type WatchStopHandle } from 'vue'
+import { onScopeDispose, ref, computed, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 import { useQuery, useQueryClient, type QueryKey } from '@tanstack/vue-query'
 import { shouldStream, streamSse, type SseEvent } from '@/api/sse'
 import { useAuthStore } from '@/stores/auth'
@@ -74,23 +74,26 @@ export function useLiveResource<T>(
 
   if (opts.streamUrl && opts.applyEvent) {
     const qc = useQueryClient()
-    const ac = new AbortController()
     const auth = useAuthStore()
     const apply = opts.applyEvent
-    let started = false
-    let stopDataWatch: WatchStopHandle | undefined
-    let stopStreamingWatch: WatchStopHandle | undefined
+    // SP5i: open/close lifecycle (was a permanent `started` latch). The
+    // stream closes when `streaming` flips false (e.g. a tab-gated consumer
+    // deactivates) and reopens when it flips true again — bounding the
+    // concurrent SSE count to (always-on streams) + (1 per active gated
+    // tab). `ac` is non-null iff a stream is currently live.
+    let ac: AbortController | null = null
+    let gaveUp = false
 
-    const tryStart = () => {
-      if (started) return
+    const openStream = () => {
+      if (ac) return
+      if (gaveUp) return
       if (!streaming.value) return
       if (q.data.value === undefined) return
-      started = true
-      stopDataWatch?.()
-      stopStreamingWatch?.()
+      const controller = new AbortController()
+      ac = controller
       const url = toValue(opts.streamUrl as MaybeRefOrGetter<string>)
       void streamSse({
-        url, token: auth.accessToken, signal: ac.signal,
+        url, token: auth.accessToken, signal: controller.signal,
         onEvent: (ev) => {
           const prev = qc.getQueryData<T>(key)
           const next = apply(prev, ev)
@@ -100,26 +103,43 @@ export function useLiveResource<T>(
           auth.logout()
         },
       }).then(() => {
-        // streamSse resolved without abort → it gave up (3 consecutive
-        // failures). Fall back to polling.
-        pollingFallback.value = true
-        void q.refetch()
+        // streamSse RESOLVES on BOTH abort and giveup (sse.ts). Identity
+        // guard: if `ac` no longer references THIS controller, we aborted it
+        // ourselves (closeStream / reopen) — do nothing. Else it gave up
+        // after 3 consecutive failures → fall back to polling.
+        if (ac === controller) {
+          ac = null
+          gaveUp = true
+          pollingFallback.value = true
+          void q.refetch()
+        }
       }).catch(() => {
         // 401 path — onUnauthorized already invoked.
+        if (ac === controller) ac = null
       })
     }
 
-    stopDataWatch = watch(() => q.data.value, tryStart, { immediate: true })
-    stopStreamingWatch = watch(streaming, tryStart)
-    onScopeDispose(() => {
-      ac.abort()
-      // Explicit watcher cleanup. tryStart already stops both on first
-      // successful open; this catches the never-opened paths (e.g.
-      // enabled-permanent-false consumer) so Vue's scope-dispose isn't
-      // the only reaper. (Final-review MEDIUM; cosmetic but cheap.)
-      stopDataWatch?.()
-      stopStreamingWatch?.()
-    })
+    const closeStream = () => {
+      if (ac) { ac.abort(); ac = null }
+      // Reset the giveup latch so reactivating the tab retries SSE fresh —
+      // a transient outage on one visit must not permanently downgrade this
+      // consumer to polling. Always-on consumers never call closeStream
+      // (except on dispose), so their giveup fallback stays permanent.
+      gaveUp = false
+    }
+
+    // Watch handle intentionally not captured: useLiveResource always runs
+    // in a component setup scope, so Vue auto-stops this watcher on unmount;
+    // onScopeDispose→closeStream aborts any live stream first.
+    watch(
+      [streaming, () => q.data.value] as const,
+      ([isOn, data]) => {
+        if (isOn && data !== undefined) openStream()
+        else if (!isOn) closeStream()
+      },
+      { immediate: true },
+    )
+    onScopeDispose(closeStream)
   }
 
   return q

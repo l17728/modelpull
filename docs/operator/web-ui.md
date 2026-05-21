@@ -356,3 +356,36 @@ SSE connections (header + 3 tab streams), still under the HTTP/1.1
 — that SP must bundle the seam "close-on-disable" change** (bounding
 concurrent streams to 2: header + active tab). This is the trigger
 condition recorded in SP5g's YAGNI deferral.
+
+### UI-SP5i — Participating-executors SSE + seam close-on-disable (SP5* SSE conversion complete)
+
+Ninth and final application of the view-free SSE template — the last
+SP2 sub-resource. The Executors tab on TaskDetail
+(`useParticipatingExecutors`) now talks SSE via
+`GET /api/v1/tasks/{task_id}/participating-executors/stream` (2 s tick;
+`DLW_TASK_EXECUTORS_STREAM_INTERVAL_SECONDS`; clamped `[0.5, 60.0]`),
+reusing `executors_for_task` wrapped as `ParticipatingExecutors`.
+
+**Seam close-on-disable**: SP5i replaced `useLiveResource`'s permanent
+`started` latch with an open/close lifecycle keyed on the reactive
+`streaming` gate. When a tab-gated consumer deactivates (`streaming`
+flips false), its SSE is aborted; reactivating reopens it. This bounds
+the concurrent SSE count on TaskDetail to **2** (the always-on header
+stream + the one active tab's stream), regardless of how many tabs the
+user has visited — resolving the connection-cap concern tracked since
+SP5g. Because `streamSse` resolves on both abort and giveup, the seam
+uses an `if (ac === controller)` identity guard to distinguish "we
+aborted it" (reopen later) from "it gave up after 3 failures"
+(`gaveUp`). `gaveUp` resets on `closeStream`, so a transient outage on
+one tab visit does not permanently downgrade that tab to polling —
+reactivation retries SSE fresh. The 5 always-on consumers
+(SP5/SP5b/SP5c/SP5d/SP5e) are unaffected: their `streaming` never flips
+false, so they open once and stay open exactly as before (regression
+proven by the unchanged consumer specs + a 6-case seam lifecycle test).
+
+With SP5i merged, **the SP5* SSE conversion is complete**: every
+TaskDetail tab (chunks/sources/executors/events) and every global
+consumer (task-detail header, tasks-list, executors, audit, quota)
+streams via SSE through the single `useLiveResource` seam, with
+concurrency bounded to 2 per page and polling as the automatic
+fallback.
