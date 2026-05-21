@@ -34,13 +34,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-spectral6-swagger-cli
+          key: npm-${{ runner.os }}-spectral6111-swagger-cli
           restore-keys: |
             npm-${{ runner.os }}-
 
       - name: Install spectral + swagger-cli (cached if hit)
+        # Pin spectral-cli exactly: the unpinned `@6` range pulled a newer 6.x
+        # that crashes with "Cannot read properties of null (reading 'enum')"
+        # on our (unchanged) openapi.yaml. 6.11.1 predates that regression.
         run: |
-          npm install -g @stoplight/spectral-cli@6 @apidevtools/swagger-cli
+          npm install -g @stoplight/spectral-cli@6.11.1 @apidevtools/swagger-cli
 
       - name: Create spectral ruleset
         run: |
