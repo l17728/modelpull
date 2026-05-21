@@ -22,6 +22,7 @@
     "title": "AI Copilot", "newChat": "New chat", "history": "History",
     "empty": "Ask me about your tasks, quota, or downloads.",
     "placeholder": "Ask the Copilot…", "send": "Send",
+    "quotaExceeded": "AI token budget exhausted for this month. Chat is paused until your quota resets.",
     "confirm": {
       "title": "AI wants to run {tool}", "approve": "Confirm",
       "reject": "Cancel", "modify": "Modify", "modifyHint": "Invalid JSON"

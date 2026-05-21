@@ -85,4 +85,19 @@ describe('useCopilot (SP4a)', () => {
     expect(last.text).toBe('Done.')
     expect(last.toolCards[0]?.ok).toBe(true)
   })
+
+  test('surfaces quota_exceeded as a budget flag and stops streaming', async () => {
+    streamChatMock.mockImplementation(async ({ onEvent }: {
+      onEvent: (e: { event: string; data: Record<string, unknown> }) => void
+    }) => {
+      onEvent({ event: 'quota_exceeded',
+                data: { metric: 'ai_tokens', remaining: 0 } })
+    })
+    const c = useCopilot()
+    await c.send('hello')
+    const last = c.messages.value.at(-1)!
+    expect(last.role).toBe('assistant')
+    expect(last.quotaExceeded).toBe(true)
+    expect(c.streaming.value).toBe(false)
+  })
 })

@@ -74,6 +74,14 @@ async function onSend() {
           <div class="bubble">
             {{ m.text }}
           </div>
+          <el-alert
+            v-if="m.quotaExceeded"
+            :title="t('copilot.quotaExceeded')"
+            type="warning"
+            :closable="false"
+            show-icon
+            data-test="copilot-quota-alert"
+          />
           <div
             v-for="card in m.toolCards"
             :key="card.id"

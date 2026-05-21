@@ -1,6 +1,6 @@
 """ORM models. Importing this module also registers them with Base.metadata."""
 
-from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall
+from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall, AITokenUsage
 from dlw.db.models.audit import AuditLog
 from dlw.db.models.casbin_rule import CasbinRule
 from dlw.db.models.executor import Executor
@@ -13,7 +13,7 @@ from dlw.db.models.tenant import Project, Tenant, User
 from dlw.db.models.usage import QuotaSnapshot, UsageRecord
 
 __all__ = [
-    "AIConversation", "AIMessage", "AIToolCall",
+    "AIConversation", "AIMessage", "AIToolCall", "AITokenUsage",
     "AuditLog", "CasbinRule", "DownloadTask", "Executor", "ExecutorStatusHistory",
     "FileSubTask", "Project", "QuotaSnapshot", "SourceBlacklist", "SourceSpeedSample",
     "StorageBackend", "StorageObject", "SubtaskChunk", "SubtaskObjectRef",

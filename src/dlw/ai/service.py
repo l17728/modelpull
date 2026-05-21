@@ -15,6 +15,11 @@ from dlw.ai.tools import READONLY_TOOLS
 from dlw.ai.write_tools import WRITE_TOOLS
 from dlw.auth.principal import Principal
 from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall
+from dlw.services.ai_quota import (
+    AITokenBudgetExceeded,
+    check_ai_token_budget,
+    record_ai_token_usage,
+)
 from dlw.services.audit import write_audit
 
 
@@ -33,6 +38,17 @@ async def run_chat(
     runner: AgentRunner, conversation_id: uuid.UUID | None,
     message: str,
 ) -> AsyncIterator[AgentEvent]:
+    # SP4d: pre-turn budget gate (invariant 18). Over budget → block the AI
+    # call entirely: emit quota_exceeded and return WITHOUT creating a
+    # conversation, persisting a message, or invoking the runner.
+    async with session_maker() as q:
+        try:
+            await check_ai_token_budget(q, principal.tenant_id)
+        except AITokenBudgetExceeded as exc:
+            yield AgentEvent("quota_exceeded",
+                             {"metric": "ai_tokens", "remaining": exc.remaining})
+            return
+
     # 1. Resolve / create the conversation + persist the user message.
     async with session_maker() as s:
         if conversation_id is not None:
@@ -131,18 +147,36 @@ async def run_chat(
 
     # 4. Persist the assistant message + close. Wrapped so a persistence
     # failure still emits a terminal event (the client waits for error|done).
+    # SP4d: nominal token estimate (≈ chars/4), computed BEFORE the persist
+    # try so they're always bound. A real backend would report actual counts;
+    # the stub consumes no real tokens, so this keeps usage accumulating and
+    # the budget exercisable.
+    text_out = "".join(assistant_text)
+    tin = max(1, len(message) // 4)
+    tout = max(0, len(text_out) // 4)
     try:
         async with session_maker() as s:
             am = AIMessage(
                 conversation_id=conv_id, role="assistant",
-                content={"text": "".join(assistant_text),
-                         "tool_calls": tool_calls})
+                content={"text": text_out, "tool_calls": tool_calls},
+                tokens_input=tin, tokens_output=tout)
             s.add(am)
             await s.commit()
             ai_message_id = str(am.id)
+        # SP4d: best-effort/isolated usage recording (must not lose the turn).
+        try:
+            async with session_maker() as u:
+                await record_ai_token_usage(
+                    u, tenant_id=principal.tenant_id,
+                    user_id=principal.user_id, conversation_id=conv_id,
+                    model_name=runner.model_name,
+                    tokens_input=tin, tokens_output=tout)
+                await u.commit()
+        except Exception:  # noqa: BLE001 — usage recording is best-effort
+            pass
         yield AgentEvent("done", {"conversation_id": str(conv_id),
                                   "ai_message_id": ai_message_id,
-                                  "tokens_used": 0})
+                                  "tokens_used": tin + tout})
     except Exception as exc:  # noqa: BLE001
         yield AgentEvent("error", {"code": "persist_failed",
                                    "message": str(exc)})

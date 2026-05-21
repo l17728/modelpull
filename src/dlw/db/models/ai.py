@@ -82,3 +82,21 @@ class AIToolCall(Base):
         DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AITokenUsage(Base):
+    """UI-SP4d: per-turn LLM token ledger for invariant-18 budget enforcement."""
+    __tablename__ = "ai_token_usage"
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenants.id"), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True)  # soft-ref to users; no FK to avoid cascade issues
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tokens_input: Mapped[int] = mapped_column(Integer, nullable=False)
+    tokens_output: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False)

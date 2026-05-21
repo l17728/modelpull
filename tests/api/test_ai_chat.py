@@ -141,3 +141,52 @@ async def test_chat_persists_conversation_and_audit(
             select(AuditLog).where(
                 AuditLog.action == "ai.tool.dlw_list_tasks"))).scalars().first()
         assert row.payload.get("actor_kind") == "ai_copilot"
+
+
+async def test_chat_over_budget_blocks(client, auth, engine):
+    # Seed month-to-date usage above the tenant's default quota (1_000_000).
+    from dlw.db.models.ai import AITokenUsage, AIConversation
+    from sqlalchemy import delete, select, func
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    async with f() as s:
+        before = await s.scalar(
+            select(func.count()).select_from(AIConversation))
+        s.add(AITokenUsage(
+            tenant_id=1, user_id=1, conversation_id=None,
+            model_name="stub", tokens_input=10**9, tokens_output=0))
+        await s.commit()
+    evs = await _collect_events(client, auth, {"message": "hello there"})
+    assert evs[0]["event"] == "quota_exceeded"
+    assert evs[0]["data"]["metric"] == "ai_tokens"
+    assert evs[0]["data"]["remaining"] == 0
+    async with f() as s:
+        after = await s.scalar(
+            select(func.count()).select_from(AIConversation))
+    assert after == before
+    # Cleanup the seed so later tests in the module aren't over budget.
+    async with f() as s:
+        await s.execute(
+            delete(AITokenUsage).where(AITokenUsage.tokens_input == 10**9))
+        await s.commit()
+
+
+async def test_chat_under_budget_records_usage(client, auth, engine):
+    from dlw.db.models.ai import AITokenUsage, AIMessage
+    from sqlalchemy import select
+    evs = await _collect_events(client, auth, {"message": "just chatting"})
+    assert evs[-1]["event"] == "done"
+    assert evs[-1]["data"]["tokens_used"] > 0
+    conv_id = uuid.UUID(evs[-1]["data"]["conversation_id"])
+    f = async_sessionmaker(engine, expire_on_commit=False)
+    async with f() as s:
+        rows = (await s.execute(
+            select(AITokenUsage).where(
+                AITokenUsage.conversation_id == conv_id))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].tokens_input > 0
+        am = (await s.execute(
+            select(AIMessage).where(
+                AIMessage.conversation_id == conv_id,
+                AIMessage.role == "assistant"))).scalars().one()
+        assert am.tokens_input == rows[0].tokens_input
+        assert am.tokens_output == rows[0].tokens_output

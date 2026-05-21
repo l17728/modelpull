@@ -18,6 +18,8 @@ class Tenant(Base):
     quota_bytes_month: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     quota_concurrent: Mapped[int] = mapped_column(BigInteger, default=10, nullable=False)
     quota_storage_gb: Mapped[int] = mapped_column(BigInteger, default=1024, nullable=False)
+    quota_ai_tokens_month: Mapped[int] = mapped_column(
+        BigInteger, default=1_000_000, server_default="1000000", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
