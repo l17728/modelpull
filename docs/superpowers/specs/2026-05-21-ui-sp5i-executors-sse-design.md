@@ -125,8 +125,17 @@ if (opts.streamUrl && opts.applyEvent) {
 
   const closeStream = () => {
     if (ac) { ac.abort(); ac = null }
+    // Reset the giveup latch: a transient outage that exhausted the 3
+    // retries on one tab visit must NOT permanently lock the consumer into
+    // polling. Reactivating the tab (next openStream) gets a fresh attempt.
+    // (Always-on consumers never call closeStream except on dispose, so
+    // their giveup→polling-fallback remains effectively permanent.)
+    gaveUp = false
   }
 
+  // The watch handle is intentionally not captured: useLiveResource always
+  // runs in a component setup scope, so Vue auto-stops this watcher on
+  // unmount (and onScopeDispose→closeStream aborts any live stream first).
   watch(
     [streaming, () => q.data.value] as const,
     ([isOn, data]) => {
@@ -167,14 +176,21 @@ controller, skips).
   because vue-query keeps the last snapshot cached, shown instantly on
   return while the reopened stream refreshes it.
 
-### 2.5 `gaveUp` stays permanent (consistent with prior behavior)
+### 2.5 `gaveUp` resets on `closeStream` (fresh attempt per tab visit)
 
 After 3 consecutive stream failures, `gaveUp=true` + `pollingFallback`
-— the composable polls for the rest of its life, even across tab
-switches. This matches the pre-SP5i semantics (the old
-`pollingFallback` latch was also permanent). Resetting `gaveUp` on tab
-reactivation would be a behavior change; deferred (not needed for
-SP5i's goal).
+— the consumer polls for the *current* tab visit. **`closeStream`
+resets `gaveUp=false`** (pre-review fix), so deactivating and
+reactivating the tab retries SSE fresh. This is the right semantic for
+the new close/reopen lifecycle: a transient backend hiccup while the
+user happened to be on one tab must not permanently downgrade that tab
+to polling for the rest of the page session. While the user *stays* on
+a persistently-failing tab, `closeStream` is not called (streaming
+stays true), so `gaveUp` stays true and the consumer keeps polling —
+no reopen thrash. **Always-on consumers** (no `enabled` gate) never
+call `closeStream` except on scope dispose, so their giveup→polling
+fallback remains effectively permanent, exactly as before — no
+regression.
 
 ## 3. Backend Design
 

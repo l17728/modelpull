@@ -407,8 +407,16 @@ Expected: 4 passed.
 
     const closeStream = () => {
       if (ac) { ac.abort(); ac = null }
+      // Reset the giveup latch so reactivating the tab retries SSE fresh —
+      // a transient outage on one visit must not permanently downgrade this
+      // consumer to polling. Always-on consumers never call closeStream
+      // (except on dispose), so their giveup fallback stays permanent.
+      gaveUp = false
     }
 
+    // Watch handle intentionally not captured: useLiveResource always runs
+    // in a component setup scope, so Vue auto-stops this watcher on unmount;
+    // onScopeDispose→closeStream aborts any live stream first.
     watch(
       [streaming, () => q.data.value] as const,
       ([isOn, data]) => {
@@ -421,7 +429,7 @@ Expected: 4 passed.
   }
 ```
 
-Ensure the imports at the top still include `computed, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref` (the SP5f version already imports these; `WatchStopHandle` is no longer needed — remove it from the import if present and unused, or leave it harmlessly. Run lint to confirm no unused-import error).
+**Imports**: the top-of-file import must be exactly `import { onScopeDispose, ref, computed, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'`. **DELETE `WatchStopHandle`** from the import — it is unused after this rewrite (dead code regardless of whether lint flags it).
 
 - [ ] **Step 2**: Extend `frontend/tests/unit/useLiveResourceEnabledSse.spec.ts` to 5 cases. Full new file:
 
@@ -535,6 +543,32 @@ describe('useLiveResource seam — close-on-disable lifecycle (SP5i)', () => {
     expect(signals[1]?.aborted).toBe(false)  // reopened stream is live
     w.unmount()
   })
+  test('self-abort does NOT trigger giveup (identity guard): abort-resolving mock, reopen succeeds', async () => {
+    // The default mock never resolves, so the .then identity guard is never
+    // exercised. Here streamSse RESOLVES when its signal aborts (mirroring
+    // sse.ts:94). A correct `if (ac === controller)` guard skips the giveup
+    // branch on self-abort → gaveUp stays false → reopen succeeds (2 calls).
+    // A broken guard would set gaveUp=true after closeStream, blocking the
+    // reopen → only 1 call → this test fails.
+    streamSseMock.mockClear(); signals.length = 0
+    streamSseMock.mockImplementation(({ signal }) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      }))
+    const enabled = ref(true)
+    const w = mountWith(enabled)
+    await waitForStream(1)
+    enabled.value = false
+    await nextTick()
+    // Let the aborted stream's promise resolve and its .then microtask run.
+    await new Promise((r) => setTimeout(r, 40))
+    enabled.value = true
+    await waitForStream(2)
+    expect(streamSseMock).toHaveBeenCalledTimes(2)
+    streamSseMock.mockReset()
+    streamSseMock.mockImplementation(() => new Promise<void>(() => {}))
+    w.unmount()
+  })
 })
 ```
 
@@ -544,13 +578,13 @@ describe('useLiveResource seam — close-on-disable lifecycle (SP5i)', () => {
 cd /d/download_weights/frontend && pnpm vitest run tests/unit/useLiveResource tests/unit/useTaskEventsStream tests/unit/useSubtaskChunksStream tests/unit/useSourceAllocationStream 2>&1 | tail -12
 ```
 
-Expected: all pass (seam 5 + 2 pre-existing seam + 3 consumer specs). If the close-on-disable test fails because `q.data.value` resets to undefined when `enabled` flips false (vue-query may clear data on disable), adjust the watcher condition or the test — but the seam's `else if (!isOn) closeStream()` branch does NOT depend on data, so abort fires on `isOn=false` regardless.
+Expected: all pass (seam 6 cases + 3 consumer specs). Note: vue-query v5 **retains** cached `data` when a query is disabled (it does NOT clear to undefined), so on reactivation `q.data.value` is immediately the prior snapshot and `openStream` proceeds once `streaming` flips true. The `else if (!isOn) closeStream()` branch does not depend on data, so abort fires on `isOn=false` regardless. If case (f) is flaky on CI timing, increase its post-abort `setTimeout` from 40 ms.
 
 - [ ] **Step 4**: Commit.
 
 ```bash
 git add frontend/src/composables/useLiveResource.ts frontend/tests/unit/useLiveResourceEnabledSse.spec.ts
-git commit -q -m "UI-SP5i M2: seam close-on-disable (abort SSE when streaming flips false, reopen when true; identity-guard for abort-vs-giveup). 5-case regression test."
+git commit -q -m "UI-SP5i M2: seam close-on-disable (abort SSE when streaming flips false, reopen when true; identity-guard for abort-vs-giveup; gaveUp resets on close). 6-case regression test."
 ```
 
 ---
@@ -822,7 +856,7 @@ git commit -q -m "UI-SP5i M3: operator docs — executors SSE + close-on-disable
 - **Placeholder scan**: none.
 - **Type consistency**: `ParticipatingExecutors` reused; `executors_for_task` returns the list wrapped. Seam types: `ac: AbortController | null`, identity guard. ✓
 - **Naming**: env `DLW_TASK_EXECUTORS_STREAM_INTERVAL_SECONDS`, setting `task_executors_stream_interval_seconds`, router `tasks_executors_stream_router`. Consistent.
-- **Seam regression-proof**: 5-case lifecycle test + all 8 consumer specs unchanged. The abort/giveup identity guard is the one subtle correctness point — explicitly tested (case e asserts 2 calls + signal states).
+- **Seam regression-proof**: 6-case lifecycle test + all 8 consumer specs unchanged. The abort/giveup identity guard is the one subtle correctness point — explicitly tested by case (f), which uses an abort-resolving mock so the `.then` guard actually runs (a broken guard would set gaveUp and block the reopen → 1 call instead of 2). `gaveUp` resets on `closeStream` so a transient outage doesn't permanently downgrade a tab to polling.
 - **Behavior preservation**: always-on consumers analyzed (§2.4) — `streaming` never false → open-once-stay-open. Gated consumers gain close-on-disable.
 - **Route precedence**: `tasks_executors_stream_router` between source-alloc-stream and tasks.
 - **Smoke**: `#tab-executors` (stable id, SP5f #42); close-on-disable observed via 2nd request on revisit.
