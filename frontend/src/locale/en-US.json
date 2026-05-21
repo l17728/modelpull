@@ -21,7 +21,11 @@
   "copilot": {
     "title": "AI Copilot", "newChat": "New chat", "history": "History",
     "empty": "Ask me about your tasks, quota, or downloads.",
-    "placeholder": "Ask the Copilot…", "send": "Send"
+    "placeholder": "Ask the Copilot…", "send": "Send",
+    "confirm": {
+      "title": "AI wants to run {tool}", "approve": "Confirm",
+      "reject": "Cancel", "modify": "Modify", "modifyHint": "Invalid JSON"
+    }
   },
   "dashboard": {
     "heading": "Overview", "inProgress": "In progress", "completed": "Completed",
