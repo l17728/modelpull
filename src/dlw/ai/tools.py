@@ -58,7 +58,11 @@ async def _get_task(session: AsyncSession, principal: Principal, *,
         .options(selectinload(DownloadTask.subtasks)))).scalar_one_or_none()
     if row is None:
         return {"error": "task not found"}
-    return TaskRead.model_validate(row).model_dump(mode="json")
+    d = TaskRead.model_validate(row).model_dump(mode="json")
+    if d.get("error_message"):
+        d["error_message"] = sanitize_external(
+            d["error_message"], source="executor").text
+    return d
 
 
 async def _get_task_events(session: AsyncSession, principal: Principal, *,
@@ -73,8 +77,13 @@ async def _get_task_events(session: AsyncSession, principal: Principal, *,
     items, next_cursor = await events_for_task(
         session, tid, principal.tenant_id,
         max(1, min(int(limit), 50)), None)
-    return {"items": [it.model_dump(mode="json") for it in items],
-            "next_cursor": next_cursor}
+    out_items = []
+    for it in items:
+        m = it.model_dump(mode="json")
+        if m.get("message"):
+            m["message"] = sanitize_external(m["message"], source="event").text
+        out_items.append(m)
+    return {"items": out_items, "next_cursor": next_cursor}
 
 
 async def _quota_current(session: AsyncSession, principal: Principal) -> dict:
