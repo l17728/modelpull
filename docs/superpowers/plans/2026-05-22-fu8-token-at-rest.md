@@ -27,8 +27,15 @@
 ## Milestone M1 — crypto + config seams
 
 ### Task 1: `_crypto.py` + error + config encrypt/decrypt seams
-**Files:** new `src/dlw/sdk/_crypto.py`, `src/dlw/sdk/errors.py`, `src/dlw/sdk/_config.py`, new `tests/sdk/test_crypto.py`, new `tests/sdk/test_config_crypto.py`.
+**Files:** new `src/dlw/sdk/_crypto.py`, `src/dlw/sdk/errors.py`, `src/dlw/sdk/_config.py`, `tests/conftest.py`, new `tests/sdk/test_crypto.py`, new `tests/sdk/test_config_crypto.py`.
 
+- [ ] **Step 0 (env-bleed guard — reviewer-flagged IMPORTANT):** add an autouse fixture to `tests/conftest.py` that clears `DLW_CONFIG_KEY` for every test, so an ambient shell/CI export can't silently flip existing plaintext-asserting tests into encrypting (a real CI-vs-local divergence). Use the file's existing fixture idiom (read it); e.g.:
+```python
+@pytest.fixture(autouse=True)
+def _clear_dlw_config_key(monkeypatch):
+    monkeypatch.delenv("DLW_CONFIG_KEY", raising=False)
+```
+The FU8 crypto/config tests then `monkeypatch.setenv("DLW_CONFIG_KEY", "pw")` explicitly when they want encryption ON.
 - [ ] **Step 1 (failing crypto tests):** `tests/sdk/test_crypto.py`:
   - round-trip: `decrypt_token(encrypt_token("tok", "pw"), "pw") == "tok"`.
   - `is_encrypted(encrypt_token("tok","pw"))` True; `is_encrypted("plain")` False.
@@ -82,10 +89,10 @@ def decrypt_token(blob: str, passphrase: str) -> str:
         _, _, salt_b64, tok = blob.split(":", 3)
         salt = base64.urlsafe_b64decode(salt_b64.encode())
         return _fernet(passphrase, salt).decrypt(tok.encode()).decode()
-    except (InvalidToken, ValueError, Exception) as e:  # narrow below
+    except (InvalidToken, ValueError, base64.binascii.Error) as e:
         raise TokenDecryptError("cannot decrypt stored token") from e
 ```
-(Refine the except to `(InvalidToken, ValueError, base64.binascii.Error)` — do NOT catch bare `Exception`; the broad clause above is a placeholder, replace it.)
+**MANDATORY:** the except clause is EXACTLY `(InvalidToken, ValueError, base64.binascii.Error)` — do NOT catch bare `Exception` (it would mask real bugs / config corruption). This set covers: wrong key + tampered blob → `InvalidToken`; too-few-parts unpack → `ValueError`; bad base64 salt → `base64.binascii.Error` (a `ValueError` subclass). Reviewer-verified empirically against `cryptography 43`.
 - [ ] **Step 5 (failing config tests):** `tests/sdk/test_config_crypto.py` (use `monkeypatch.setenv("DLW_CONFIG_KEY", "pw")` + a `tmp_path` config; import `set_context`, `set_config_value`, `resolve`, `load_config`):
   - key set: `set_context("dev", server="http://h", token="T1", config_path=p)`; raw `load_config(p)["auth"]["dev"]["access_token"]` startswith `"enc:v1:"` and != `"T1"`; `resolve(server=None, token=None, config_path=p).token == "T1"`.
   - `set_config_value("auth.dev.access_token", "T2", config_path=p)` (key set) → stored encrypted; `resolve(...).token == "T2"`.
@@ -175,7 +182,7 @@ git add src/dlw/sdk/_crypto.py src/dlw/sdk/errors.py src/dlw/sdk/_config.py test
         return 0
 ```
 (`UsageError` propagates to `main()` → exit 2.)
-- [ ] **Step 5 (docs):** `docs/operator/cli-sdk.md`: document opt-in token encryption — set `DLW_CONFIG_KEY` (a passphrase) and tokens written by `login`/`context set`/`config set` are stored as `enc:v1:` blobs and transparently decrypted on read; `dlw config encrypt` migrates existing plaintext tokens. Document the threat model (real protection only when the key is kept out of the config file / env-supplied; without the key, behavior is unchanged plaintext; does not protect against an attacker with both file AND key). Update the deferral note: FU8 lifts token-at-rest (opt-in env-keyed); OS-keyring (no env needed) + per-context keys / rotation remain follow-ons.
+- [ ] **Step 5 (docs):** `docs/operator/cli-sdk.md`: document opt-in token encryption — set `DLW_CONFIG_KEY` (a passphrase) and tokens written by `login`/`context set`/`config set` are stored as `enc:v1:` blobs and transparently decrypted on read; `dlw config encrypt` migrates existing plaintext tokens. Document the threat model (real protection only when the key is kept out of the config file / env-supplied; without the key, behavior is unchanged plaintext; does not protect against an attacker with both file AND key). Add one sentence on the edge case: a literal plaintext token starting with `enc:v1:` would be mis-read as encrypted (real JWTs/opaque tokens never do — acceptable). Update the deferral note: FU8 lifts token-at-rest (opt-in env-keyed); OS-keyring (no env needed) + per-context keys / rotation remain follow-ons.
 - [ ] **Step 6: verify PASS** — `cd "D:/download_weights" && uv run pytest tests/cli/test_cli_config.py tests/sdk/test_crypto.py tests/sdk/test_config_crypto.py -v` all pass.
 - [ ] **Step 7: tidy + commit.**
 ```bash
