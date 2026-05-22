@@ -182,7 +182,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from dlw.db.models.storage import StorageBackend
         from dlw.services.audit import write_audit
         from dlw.services.storage_client import make_s3_client, storage_config_from_backend
-        from dlw.services.storage_objects import reclaim_physical_orphans
+        from dlw.services.storage_objects import pressured_tenant_ids, reclaim_physical_orphans
         while True:
             try:
                 await asyncio.sleep(_gs().gc_interval_seconds)
@@ -206,13 +206,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                                 cache[sid] = (client, cfg.bucket, b.backend_type)
                         return cache[sid]
 
+                    priority = await pressured_tenant_ids(
+                        session,
+                        threshold=_gs().gc_quota_pressure_threshold)
                     audited: list[dict] = []
                     res = await reclaim_physical_orphans(
                         session, grace_seconds=grace,
                         delete_enabled=_gs().gc_delete_physical_bytes,
                         make_client=_make_client,
                         audit=lambda **kw: audited.append(kw),
-                        max_objects_per_tick=_gs().gc_max_objects_per_tick)
+                        max_objects_per_tick=_gs().gc_max_objects_per_tick,
+                        priority_tenant_ids=priority)
                     for a in audited:
                         # resource_id is String(128); the (<=1024-char) key goes
                         # in payload — truncation here would abort the commit
