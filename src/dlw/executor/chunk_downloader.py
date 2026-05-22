@@ -54,6 +54,27 @@ def plan_chunks(file_size: int, chunk_size: int) -> list[ChunkPlan]:
     return out
 
 
+def _plans_from_chunks(chunks, file_size: int | None) -> list[ChunkPlan] | None:
+    """One ChunkPlan per subtask_chunks row, ordered by chunk_index, RENUMBERED
+    to dense positional indices 0..n-1 (pass2 uses ChunkPlan.index for
+    last-chunk detection / S3 PartNumber / <idx>.bin name). None if the rows
+    don't contiguously tile [0, file_size-1] (defensive → caller falls back)."""
+    ordered = sorted(chunks, key=lambda c: c.chunk_index)
+    plans: list[ChunkPlan] = []
+    expect = 0
+    for pos, c in enumerate(ordered):
+        if c.byte_start != expect or c.byte_end < c.byte_start:
+            return None
+        plans.append(ChunkPlan(index=pos, offset=c.byte_start,
+                               length=c.byte_end - c.byte_start + 1))
+        expect = c.byte_end + 1
+    if not plans:
+        return None
+    if file_size is not None and expect != file_size:
+        return None
+    return plans
+
+
 class DirectOffsetDownloader:
     def __init__(self, *, settings: ExecutorSettings,
                  client: ControllerClient) -> None:
@@ -93,9 +114,22 @@ class DirectOffsetDownloader:
         return dataclasses.replace(a, file_size=int(content_length))
 
     async def download(self, *, assignment: Assignment) -> DownloadResult:
-        if assignment.file_size is None:
-            assignment = await self._resolve_size(assignment)
-        plans = plan_chunks(assignment.file_size, self._s.chunk_size_bytes)
+        if assignment.chunks:
+            plans = _plans_from_chunks(assignment.chunks, assignment.file_size)
+            if plans is not None and assignment.file_size is None:
+                assignment = dataclasses.replace(
+                    assignment, file_size=plans[-1].offset + plans[-1].length)
+            if plans is None:
+                logger.warning(
+                    "subtask %s chunk rows don't tile file; falling back to "
+                    "local split", assignment.subtask_id)
+                if assignment.file_size is None:
+                    assignment = await self._resolve_size(assignment)
+                plans = plan_chunks(assignment.file_size, self._s.chunk_size_bytes)
+        else:
+            if assignment.file_size is None:
+                assignment = await self._resolve_size(assignment)
+            plans = plan_chunks(assignment.file_size, self._s.chunk_size_bytes)
         dest_dir = parts_dir_for(self._s.parts_dir_path, assignment.subtask_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:

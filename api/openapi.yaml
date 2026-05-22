@@ -2830,6 +2830,29 @@ components:
           type: string
           nullable: true
           maxLength: 1024
+        chunks:
+          type: array
+          description: Per-source chunk plan (SP2 chunk-Range alignment); empty unless the subtask is chunked across sources.
+          items:
+            $ref: '#/components/schemas/ChunkAssignment'
+
+    ChunkAssignment:
+      type: object
+      required: [chunk_index, byte_start, byte_end, source_id]
+      description: One subtask_chunks row — a byte range assigned to a source.
+      properties:
+        chunk_index:
+          type: integer
+        byte_start:
+          type: integer
+          format: int64
+        byte_end:
+          type: integer
+          format: int64
+          description: Inclusive end offset.
+        source_id:
+          type: string
+          maxLength: 32
 
     AssignmentResponse:
       type: object

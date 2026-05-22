@@ -7,6 +7,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ChunkAssignment(BaseModel):
+    """One subtask_chunks row in the poll payload (SP2 chunk-Range alignment)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    chunk_index: int
+    byte_start: int
+    byte_end: int          # inclusive
+    source_id: str
+
+
 class SubTaskRead(BaseModel):
     """Returned in assignment payload + GET subtask detail."""
     model_config = ConfigDict(from_attributes=True)
@@ -19,6 +29,7 @@ class SubTaskRead(BaseModel):
     status: str
     s3_key: str | None = Field(default=None, max_length=1024)
     inherit_from_key: str | None = Field(default=None, max_length=1024)
+    chunks: list[ChunkAssignment] = Field(default_factory=list)
 
 
 class SubTaskReport(BaseModel):

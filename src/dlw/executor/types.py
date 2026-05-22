@@ -12,6 +12,14 @@ from dlw.schemas.storage import StorageConfig
 
 
 @dataclass(frozen=True)
+class ChunkAssignment:
+    chunk_index: int
+    byte_start: int
+    byte_end: int
+    source_id: str
+
+
+@dataclass(frozen=True)
 class Assignment:
     """Slim payload passed from runner to downloader."""
     subtask_id: uuid.UUID
@@ -23,6 +31,7 @@ class Assignment:
     file_size: int | None
     expected_sha256: str | None
     storage_config: StorageConfig
+    chunks: tuple[ChunkAssignment, ...] = ()
 
 
 @dataclass(frozen=True)

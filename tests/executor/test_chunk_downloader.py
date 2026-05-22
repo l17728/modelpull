@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from dlw.executor.chunk_downloader import ChunkPlan, DiskFullError, plan_chunks
+from dlw.executor.types import ChunkAssignment
 
 
 def test_plan_chunks_splits_evenly() -> None:
@@ -55,7 +56,6 @@ from dlw.executor.config import ExecutorSettings
 from dlw.executor.types import Assignment
 from dlw.schemas.storage import StorageConfig
 from tests.conftest import make_fake_controller_client
-
 
 _FILE_SIZE = 200 * 1024 * 1024   # 200 MiB → 4 chunks at 64 MiB
 _CHUNK_SIZE = 64 * 1024 * 1024
@@ -256,3 +256,144 @@ async def test_resolve_size_raises_when_no_headers(chunk_settings) -> None:
     )
     with pytest.raises(RuntimeError, match="unresolvable"):
         await d._resolve_size(a)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: chunk-row-aligned Range headers
+# ---------------------------------------------------------------------------
+
+_TINY_BLOB = bytes((i * 7 + 3) % 256 for i in range(32))
+_TINY_SHA = hashlib.sha256(_TINY_BLOB).hexdigest()
+
+# For the aligned multi-chunk test: S3 multipart requires every part except the
+# last to be >= 5 MiB, so chunk 0 must be a full 5 MiB and chunk 1 the small
+# remainder. Cheap repeating pattern (sha computed from the same blob).
+_5MIB = 5 * 1024 * 1024
+_ALIGN_SIZE = _5MIB + 32
+_ALIGN_BLOB = (b"\xab\xcd\xef\x12" * (_ALIGN_SIZE // 4 + 1))[:_ALIGN_SIZE]
+_ALIGN_SHA = hashlib.sha256(_ALIGN_BLOB).hexdigest()
+
+
+def _recording_handler(blob: bytes, recorded_ranges: list[str]):
+    """httpx handler that records each Range header and serves bytes from blob."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        rng = request.headers.get("Range", "")
+        recorded_ranges.append(rng)
+        if rng.startswith("bytes="):
+            a, b = rng.removeprefix("bytes=").split("-")
+            start, end = int(a), int(b)
+            body = blob[start:end + 1]
+        else:
+            body = blob
+        return httpx.Response(
+            status_code=206,
+            content=body,
+            headers={"Content-Length": str(len(body))},
+        )
+    return handler
+
+
+@pytest.fixture
+def tiny_settings(tmp_path) -> ExecutorSettings:
+    return ExecutorSettings(
+        id="ex-tiny-test",
+        bearer_token="t",
+        chunk_size_bytes=5 * 1024 * 1024,   # 5 MiB — tiny blob is one chunk if split locally
+        chunk_concurrency=2,
+        parts_dir_path=str(tmp_path / "parts"),
+        s3_region="us-east-1",
+        s3_endpoint_url=None,
+    )
+
+
+async def test_chunked_assignment_aligns_ranges_to_rows(tiny_settings) -> None:
+    """When Assignment.chunks is set and tiles the file, download must issue
+    exactly one Range per chunk row (not the local plan_chunks split)."""
+    recorded: list[str] = []
+    storage_config = StorageConfig(
+        bucket="test-bucket", region="us-east-1", endpoint_url=None,
+        access_key_id="dummy", secret_access_key="dummy",
+        key_prefix="p",
+    )
+    sub_id = uuid.uuid4()
+    a = Assignment(
+        subtask_id=sub_id,
+        task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r",
+        revision="a" * 40,
+        filename="tiny.bin",
+        file_size=_ALIGN_SIZE,
+        expected_sha256=None,
+        storage_config=storage_config,
+        chunks=(
+            ChunkAssignment(0, 0, _5MIB - 1, "modelscope"),
+            ChunkAssignment(1, _5MIB, _ALIGN_SIZE - 1, "hf_mirror"),
+        ),
+    )
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+
+        d = DirectOffsetDownloader(
+            settings=tiny_settings,
+            client=make_fake_controller_client(_recording_handler(_ALIGN_BLOB, recorded)),
+        )
+        result = await d.download(assignment=a)
+
+    # Exactly one Range per chunk row (chunk-row boundaries), NOT the local
+    # plan_chunks 5-MiB split. Order-independent: the two chunks download
+    # concurrently (chunk_concurrency=2).
+    assert set(recorded) == {f"bytes=0-{_5MIB - 1}",
+                             f"bytes={_5MIB}-{_ALIGN_SIZE - 1}"}, (
+        f"expected chunk-row Ranges, got {recorded!r}"
+    )
+    assert len(recorded) == 2
+    assert result.actual_sha256 == _ALIGN_SHA
+    assert result.bytes_written == _ALIGN_SIZE
+
+
+async def test_malformed_chunks_fall_back_to_plan_chunks(tiny_settings) -> None:
+    """When chunk rows leave a gap (don't tile [0, file_size-1]), download must
+    fall back to the local plan_chunks split and still produce the correct SHA."""
+    recorded: list[str] = []
+    storage_config = StorageConfig(
+        bucket="test-bucket", region="us-east-1", endpoint_url=None,
+        access_key_id="dummy", secret_access_key="dummy",
+        key_prefix="p",
+    )
+    sub_id = uuid.uuid4()
+    # Gap at bytes 16-19: byte_start of chunk 1 is 20, not 16
+    a = Assignment(
+        subtask_id=sub_id,
+        task_id=uuid.uuid4(),
+        assignment_token=uuid.uuid4(),
+        repo_id="o/r",
+        revision="a" * 40,
+        filename="tiny.bin",
+        file_size=32,
+        expected_sha256=None,
+        storage_config=storage_config,
+        chunks=(
+            ChunkAssignment(0, 0, 15, "a"),
+            ChunkAssignment(1, 20, 31, "b"),   # gap 16..19
+        ),
+    )
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="test-bucket")
+
+        d = DirectOffsetDownloader(
+            settings=tiny_settings,
+            client=make_fake_controller_client(_recording_handler(_TINY_BLOB, recorded)),
+        )
+        result = await d.download(assignment=a)
+
+    # Fallback: 5 MiB chunk_size covers the whole 32-byte blob in one request
+    assert recorded == ["bytes=0-31"], (
+        f"expected single plan_chunks Range on fallback, got {recorded!r}"
+    )
+    assert result.actual_sha256 == _TINY_SHA
+    assert result.bytes_written == 32

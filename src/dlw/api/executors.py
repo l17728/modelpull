@@ -13,16 +13,18 @@ import json
 import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.api._recovery_barrier import require_not_recovering
 from dlw.api.tasks import _session
-from dlw.auth.ca import fingerprint_of, sign_csr
 from dlw.auth import jwt_signing
+from dlw.auth.ca import fingerprint_of, sign_csr
+from dlw.auth.executor_epoch import require_executor_epoch
 from dlw.auth.executor_jwt_dep import require_executor_jwt
 from dlw.auth.hmac_heartbeat_dep import require_hmac_heartbeat
-from dlw.auth.executor_epoch import require_executor_epoch
 from dlw.db.models.executor import Executor
+from dlw.db.models.source import SubtaskChunk
 from dlw.db.models.storage import StorageBackend
 from dlw.db.models.task import DownloadTask
 from dlw.schemas.executor import (
@@ -35,8 +37,8 @@ from dlw.schemas.executor import (
     RenewResponse,
 )
 from dlw.schemas.storage import StorageConfig
-from dlw.schemas.subtask import SubTaskRead
-from dlw.services.executor_service import upsert_executor_with_cert, record_heartbeat
+from dlw.schemas.subtask import ChunkAssignment, SubTaskRead
+from dlw.services.executor_service import record_heartbeat, upsert_executor_with_cert
 from dlw.services.scheduler import claim_one_subtask
 
 router = APIRouter(prefix="/api/v1/executors", tags=["executors"])
@@ -168,6 +170,12 @@ async def post_poll(
     storage_config = StorageConfig(**cfg_dict)
 
     sub_read = SubTaskRead.model_validate(sub)
+    if sub.is_chunked:
+        rows = (await session.execute(
+            select(SubtaskChunk).where(SubtaskChunk.subtask_id == sub.id)
+            .order_by(SubtaskChunk.chunk_index))).scalars().all()
+        sub_read = sub_read.model_copy(update={
+            "chunks": [ChunkAssignment.model_validate(c) for c in rows]})
     await session.commit()
     return AssignmentResponse(
         assigned=True,
