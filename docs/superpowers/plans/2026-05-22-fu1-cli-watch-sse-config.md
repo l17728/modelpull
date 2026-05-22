@@ -27,7 +27,7 @@
 - **Modify** `src/dlw/cli/main.py` — `context`/`config` subparsers; pass-through unchanged for watch.
 - **Modify** `src/dlw/cli/handlers.py` — `watch`→SSE; `context`/`config` branches (before make_client).
 - **Modify** `tests/sdk/_mock.py` — add `/tasks/{id}/stream` buffered SSE route.
-- **Create** `tests/sdk/test_config_write.py`, `tests/cli/test_cli_config.py`; **Modify** `tests/cli/test_cli_ops.py` (watch test → SSE).
+- **Create** `tests/sdk/test_config_write.py`, `tests/cli/test_cli_context.py`; **Modify** `tests/cli/test_cli_ops.py` (watch test → SSE).
 - **Modify** `docs/operator/cli-sdk.md`.
 
 ---
@@ -40,13 +40,14 @@
 - Modify: `src/dlw/sdk/client.py`, `src/dlw/sdk/aclient.py`, `tests/sdk/_mock.py`
 - Test: `tests/sdk/test_readonly.py` (extend) + `tests/sdk/test_client_async.py` (extend)
 
-- [ ] **Step 1: Add the `/tasks/{id}/stream` mock route** in `tests/sdk/_mock.py` (the handler uses `re.fullmatch` for parameterized paths — match `r"/api/v1/tasks/([^/]+)/stream"`). Return a buffered SSE body with ONE terminal TaskDetail snapshot:
+- [ ] **Step 1: Add the `/tasks/{id}/stream` mock route** in `tests/sdk/_mock.py`. **Placement (pre-review B1): insert it AFTER the auth gate (`_mock.py:30`, which returns 401 unless `Bearer good`) and BEFORE the catch-all `404` return — among the other GET routes.** Otherwise it's either bypassed by the auth gate or unreachable past the 404. The handler uses `re.fullmatch` for parameterized paths — match `r"/api/v1/tasks/([^/]+)/stream"`. Return a buffered SSE body with ONE terminal TaskDetail snapshot. To also support a `failed`-exit-1 test, key the status off the task-id (e.g. an id containing `"fail"` → status `failed`):
 ```python
     m = re.fullmatch(r"/api/v1/tasks/([^/]+)/stream", path)
     if m and request.method == "GET":
         tid = m.group(1)
+        status = "failed" if "fail" in tid else "succeeded"
         detail = {"id": tid, "repo_id": "o/r", "revision": "a"*40,
-                  "status": "succeeded", "priority": 1, "created_at": None,
+                  "status": status, "priority": 1, "created_at": None,
                   "completed_at": None, "error_message": None, "subtasks": []}
         body = f":open\n\ndata: {json.dumps(detail)}\n\n"
         return httpx.Response(200, text=body,
@@ -70,12 +71,17 @@ def test_task_stream_buffered(sync_client):
 
 - [ ] **Step 4: Implement `task_stream`.** In `src/dlw/sdk/client.py` `TasksAPI` (next to `events_stream`):
 ```python
-    def task_stream(self, task_id: str, *, max_ticks: int | None = None):
+    def task_stream(self, task_id: str, *, max_ticks: int | None = None,
+                    timeout=None):
         """SSE seam for `dlw watch`: streams TaskDetail from
-        /tasks/{id}/stream (self-terminates on terminal status)."""
+        /tasks/{id}/stream (self-terminates on terminal status). `timeout`
+        (httpx read-timeout) makes a STALLED stream raise rather than hang."""
         params = {"max_ticks": max_ticks} if max_ticks is not None else None
+        kw = {"params": params}
+        if timeout is not None:
+            kw["timeout"] = timeout
         return self._h.stream(
-            "GET", f"/api/v1/tasks/{task_id}/stream", params=params)
+            "GET", f"/api/v1/tasks/{task_id}/stream", **kw)
 ```
 And the async mirror in `aclient.py` `AsyncTasksAPI` (same body — `self._h.stream(...)`; async httpx stream CM).
 
@@ -149,7 +155,7 @@ def test_save_creates_parent_dir(tmp_path):
 
 - [ ] **Step 2: Verify FAIL** (helpers missing).
 
-- [ ] **Step 3: Implement** in `src/dlw/sdk/_config.py` (add `from pathlib import Path` is already imported; add the helpers per spec §2): `_resolve_write_path`, `save_config`, `set_context`, `use_context`. (Copy the spec's code verbatim. `_load_config` already exists — reuse for the read-merge in set/use.)
+- [ ] **Step 3: Implement** in `src/dlw/sdk/_config.py` (`Path` already imported; add the helpers per spec §2): `_resolve_write_path`, `save_config`, `set_context`, `use_context`, AND a public `def load_config(config_path=None): return _load_config(config_path)` alias (so the CLI reads via a public name, not the private `_load_config` — pre-review). (Copy the spec's code verbatim. `_load_config` already exists — reuse for the read-merge in set/use.)
 
 - [ ] **Step 4: Verify PASS** + config regression (`cd "D:/download_weights" && uv run pytest tests/sdk/test_config_write.py tests/sdk/test_config.py -v`) → all pass.
 
@@ -171,119 +177,121 @@ git add src/dlw/sdk/_config.py tests/sdk/test_config_write.py && git commit -m "
 
 **Files:**
 - Modify: `src/dlw/cli/main.py`, `src/dlw/cli/handlers.py`
-- Test: `tests/cli/test_cli_config.py` (new), `tests/cli/test_cli_ops.py` (watch test → SSE)
+- Test: `tests/cli/test_cli_context.py` (new), `tests/cli/test_cli_ops.py` (watch test → SSE)
 
-- [ ] **Step 1: Update the existing watch test + write the failing config tests.**
-  - In `tests/cli/test_cli_ops.py`, rewrite `test_watch_terminal_exit0` to the SSE path: the `_mock.py` `/tasks/{id}/stream` route now returns a terminal (`succeeded`) snapshot, so `cli.main(["watch", tid])` should consume the stream and exit 0 (no `TasksAPI.get` monkeypatch needed). If a `failed`-status variant is wanted, parametrize the mock or add a second test asserting exit 1 (the default mock returns `succeeded` → exit 0; for failed, you may submit with a repo id the mock maps to failed, OR keep just the exit-0 case + a unit test of the failed path in the handler). Keep it simple: assert `cli.main(["watch", tid]) == 0`.
-  - Create `tests/cli/test_cli_config.py` (uses a tmp config path; NO `_transport`/token needed — these are local-file commands):
+- [ ] **Step 1: Update the existing watch test + write the failing context tests.**
+  - In `tests/cli/test_cli_ops.py`, rewrite `test_watch_terminal_exit0` to the SSE path: REMOVE the `TasksAPI.get` monkeypatch (no longer used — watch streams). The `_mock.py` `/tasks/{id}/stream` route returns a terminal `succeeded` snapshot, so `cli.main(["watch", tid]) == 0`. ALSO add `test_watch_failed_exit1`: submit/use a task id containing `"fail"` (so the mock returns status `failed`) and assert `cli.main(["watch", <id-with-fail>]) == 1` — covers the exit-1 contract (pre-review N4). (If `_submit` returns a server-generated uuid you can't control, instead add a unit test calling the handler/`_watch_sse` with a fake client whose `task_stream` yields a `failed` snapshot; OR add a mock route variant. Pick the cleanest given `_submit`'s id source — the simplest is a direct `task_stream` mock returning failed.)
+  - Create `tests/cli/test_cli_context.py` (tmp config path; NO `_transport`/token — local-file commands):
 ```python
-"""FU1 config/context CLI commands (local file, no network)."""
+"""FU1 context CLI commands (local file, no network)."""
 from __future__ import annotations
 
 from dlw.cli import main as cli
 
 
-def test_set_context_and_list(capsys, tmp_path):
+def test_set_and_list(capsys, tmp_path):
     p = str(tmp_path / "c.yaml")
-    assert cli.main(["-c", p, "config", "set-context", "dev",
+    assert cli.main(["-c", p, "context", "set", "dev",
                      "--server", "http://h:8000", "--token", "TK"]) == 0
     assert cli.main(["-c", p, "context", "list"]) == 0
     out = capsys.readouterr().out
     assert "dev" in out and "current" in out.lower()
 
 
-def test_config_view_redacts_token(capsys, tmp_path):
+def test_current_redacts_token(capsys, tmp_path):
     p = str(tmp_path / "c.yaml")
-    cli.main(["-c", p, "config", "set-context", "dev",
+    cli.main(["-c", p, "context", "set", "dev",
               "--server", "http://h", "--token", "SECRET"])
     capsys.readouterr()
-    assert cli.main(["-c", p, "config", "view"]) == 0
+    assert cli.main(["-c", p, "context", "current"]) == 0
     out = capsys.readouterr().out
     assert "SECRET" not in out and "set" in out.lower()
 
 
-def test_context_use_switches(capsys, tmp_path):
+def test_use_switches(capsys, tmp_path):
     p = str(tmp_path / "c.yaml")
-    cli.main(["-c", p, "config", "set-context", "a", "--server", "http://a",
+    cli.main(["-c", p, "context", "set", "a", "--server", "http://a",
               "--token", "TA"])
-    cli.main(["-c", p, "config", "set-context", "b", "--server", "http://b",
+    cli.main(["-c", p, "context", "set", "b", "--server", "http://b",
               "--token", "TB"])
     assert cli.main(["-c", p, "context", "use", "a"]) == 0
+
+
+def test_use_missing_exit2(capsys, tmp_path):
+    p = str(tmp_path / "c.yaml")
+    cli.main(["-c", p, "context", "set", "a", "--server", "http://a",
+              "--token", "TA"])
+    assert cli.main(["-c", p, "context", "use", "nope"]) == 2   # UsageError
 ```
 
-- [ ] **Step 2: Verify FAIL** (`cd "D:/download_weights" && uv run pytest tests/cli/test_cli_config.py -v`) → unknown commands → exit 2.
+- [ ] **Step 2: Verify FAIL** (`cd "D:/download_weights" && uv run pytest tests/cli/test_cli_context.py -v`) → unknown commands → exit 2.
 
-- [ ] **Step 3: Add subparsers** in `main.py::_build_parser` (after the readonly commands, before `return p`):
+- [ ] **Step 3: Add subparsers** in `main.py::_build_parser` (after the readonly commands, before `return p`). ALL context management under the `context` noun (no separate `config` namespace — pre-review). ALSO update the `watch` parser help: change `help="poll a task until terminal"` → `help="stream a task until terminal"`, and the `--interval` help → `"(deprecated, ignored — server drives the 1 Hz stream tick)"`.
 ```python
     ctx = sub.add_parser("context", help="manage CLI contexts")
     ctx_sub = ctx.add_subparsers(dest="context_cmd")
-    ctx_sub.add_parser("list", help="list contexts")
+    ctx_sub.add_parser("list", help="list contexts (marks current)")
+    ctx_sub.add_parser("current", help="show the current context")
     ctx_use = ctx_sub.add_parser("use", help="switch current context")
     ctx_use.add_argument("name")
-
-    cfg = sub.add_parser("config", help="manage CLI config file")
-    cfg_sub = cfg.add_subparsers(dest="config_cmd")
-    cfg_set = cfg_sub.add_parser("set-context", help="create/update a context")
-    cfg_set.add_argument("name")
-    cfg_set.add_argument("--server", default=None)
-    cfg_set.add_argument("--token", default=None)
-    cfg_set.add_argument("--no-current", action="store_true",
+    ctx_set = ctx_sub.add_parser("set", help="create/update a context")
+    ctx_set.add_argument("name")
+    ctx_set.add_argument("--server", default=None)
+    ctx_set.add_argument("--token", default=None)
+    ctx_set.add_argument("--no-current", action="store_true",
                          help="do not switch current_context to this one")
-    cfg_sub.add_parser("view", help="show config path + current context")
 ```
 
-- [ ] **Step 4: Implement handlers** in `handlers.py`. FIRST, guard local-file commands before `make_client` (they need no token). At the top of `run`, before `client = make_client(args)`:
+- [ ] **Step 4: Implement handlers** in `handlers.py`. FIRST, guard the local-file `context` commands before `make_client` (they need no token). At the top of `run`, BEFORE `client = make_client(args)` (and before the try/finally that closes the client):
 ```python
-    if args.cmd in ("context", "config"):
-        return _config_cmd(args)
+    if args.cmd == "context":
+        return _context_cmd(args)
 ```
-Then add `_config_cmd(args)` + the SSE watch helper:
+Then add `_context_cmd(args)` (context-only; `use_context`'s `UsageError` propagates to `main()`'s `except DlwError` handler → exit 2 — no local try/except, per pre-review):
 ```python
-def _config_cmd(args) -> int:
+def _context_cmd(args) -> int:
     import sys
     from dlw.sdk import _config as cfgmod
     cfgpath = args.config
-    if args.cmd == "config" and args.config_cmd == "set-context":
+    sub = getattr(args, "context_cmd", None)
+    if sub == "set":
         p = cfgmod.set_context(args.name, server=args.server, token=args.token,
                                make_current=not args.no_current,
                                config_path=cfgpath)
         if not args.quiet:
             sys.stdout.write(f"wrote context '{args.name}' to {p}\n")
         return 0
-    if args.cmd == "config" and args.config_cmd == "view":
-        cfg = cfgmod._load_config(cfgpath)
-        cur = cfg.get("current_context")
-        sys.stdout.write(f"current_context: {cur}\n")
-        for name, c in (cfg.get("contexts") or {}).items():
-            tok = ((cfg.get("auth") or {}).get(name) or {}).get("access_token")
-            mark = " (current)" if name == cur else ""
-            sys.stdout.write(f"  {name}{mark}: server={c.get('server')} "
-                             f"token={'set' if tok else 'unset'}\n")
-        return 0
-    if args.cmd == "context" and args.context_cmd == "list":
-        cfg = cfgmod._load_config(cfgpath)
-        cur = cfg.get("current_context")
-        ctxs = cfg.get("contexts") or {}
-        if not ctxs:
-            sys.stdout.write("(no contexts)\n")
-        for name in ctxs:
-            sys.stdout.write(f"{name}{' (current)' if name == cur else ''}\n")
-        return 0
-    if args.cmd == "context" and args.context_cmd == "use":
-        from dlw.sdk.errors import exit_code_for, DlwError
-        try:
-            cfgmod.use_context(args.name, config_path=cfgpath)
-        except DlwError as exc:
-            sys.stderr.write(f"Error: {exc.message}\n")
-            return exit_code_for(exc)
+    if sub == "use":
+        cfgmod.use_context(args.name, config_path=cfgpath)   # UsageError→main()→exit 2
         if not args.quiet:
             sys.stdout.write(f"switched to context '{args.name}'\n")
         return 0
-    sys.stderr.write("usage: dlw context [list|use NAME] | "
-                     "dlw config [set-context NAME ...|view]\n")
+    cfg = cfgmod.load_config(cfgpath)
+    cur = cfg.get("current_context")
+    if sub == "list":
+        sys.stdout.write(f"# config: {cfgmod._resolve_write_path(cfgpath)}\n")
+        ctxs = cfg.get("contexts") or {}
+        if not ctxs:
+            sys.stdout.write("(no contexts)\n")
+        for name, c in ctxs.items():
+            tok = ((cfg.get("auth") or {}).get(name) or {}).get("access_token")
+            mark = " (current)" if name == cur else ""
+            sys.stdout.write(f"{name}{mark}: server={c.get('server')} "
+                             f"token={'set' if tok else 'unset'}\n")
+        return 0
+    if sub == "current":
+        if not cur:
+            sys.stdout.write("(no current context)\n")
+            return 0
+        c = (cfg.get("contexts") or {}).get(cur) or {}
+        tok = ((cfg.get("auth") or {}).get(cur) or {}).get("access_token")
+        sys.stdout.write(f"{cur}: server={c.get('server')} "
+                         f"token={'set' if tok else 'unset'}\n")
+        return 0
+    sys.stderr.write("usage: dlw context [list|current|use NAME|set NAME ...]\n")
     return 2
 ```
-(NOTE: `use_context` raises `UsageError` which is a `DlwError`; the outer `main()` already maps `DlwError`→exit code, but since `_config_cmd` returns before the `make_client` try, catch it here OR let it propagate — simplest: let it propagate to `main()`'s `except DlwError`. Actually `_config_cmd` is called inside `run()`'s body which is inside `main()`'s `try` — so a raised `UsageError` propagates to `main()`'s handler → correct exit code. So you can DROP the try/except in the `use` branch and just call `cfgmod.use_context(...)`; the `main()` handler maps it. Verify `run` doesn't swallow it — `run`'s try/finally only does `client.close()` in finally; but `client` isn't built for config cmds. Ensure the early `return _config_cmd(args)` is BEFORE the `client = make_client(args)` + its try/finally, so no client cleanup runs. Keep `_config_cmd` simple — let `UsageError` propagate.)
+(`load_config` is the public alias added in Task 2. `_resolve_write_path` shows the resolved file path. Token value is NEVER printed — only `set|unset`.)
 
 - [ ] **Step 5: Replace the `watch` handler branch** with SSE consumption:
 ```python
@@ -295,41 +303,51 @@ And add the helper (module level in handlers.py):
 def _watch_sse(client, args, emit) -> int:
     import json
     import time
+    import httpx
+    from dlw.sdk._http import raise_for_status
+    from dlw.sdk.errors import Timeout
+    # --interval is server-driven now: warn (don't silently ignore) if set.
+    if getattr(args, "interval", 5.0) != 5.0:
+        sys.stderr.write(
+            "warning: --interval is deprecated and ignored "
+            "(the server drives the 1 Hz stream tick)\n")
     deadline = (time.monotonic() + args.timeout) if args.timeout else None
     last = None
     terminal = {"succeeded", "failed", "cancelled"}
-    with client.tasks.task_stream(args.task_id) as r:
-        if r.status_code != 200:
-            r.read()
-            from dlw.sdk._http import raise_for_status
-            raise_for_status(r)
-        for line in r.iter_lines():
-            if deadline and time.monotonic() > deadline:
-                from dlw.sdk.errors import Timeout
-                raise Timeout("watch timed out")
-            if not line.startswith("data: "):
-                continue
-            detail = json.loads(line[len("data: "):])
-            last = detail
-            subs = detail.get("subtasks") or []
-            done = sum(1 for s in subs if s.get("status") == "succeeded")
-            sys.stdout.write(f"{detail.get('status')} {done}/{len(subs)}\n")
-            sys.stdout.flush()
-            if detail.get("status") in terminal:
-                break
+    try:
+        with client.tasks.task_stream(args.task_id, timeout=args.timeout) as r:
+            if r.status_code != 200:
+                r.read()
+                raise_for_status(r)        # 404→NotFound→exit 3, etc.
+            for line in r.iter_lines():
+                if deadline and time.monotonic() > deadline:
+                    raise Timeout("watch timed out")
+                if not line.startswith("data: "):
+                    continue
+                detail = json.loads(line[len("data: "):])
+                last = detail
+                subs = detail.get("subtasks") or []
+                done = sum(1 for s in subs if s.get("status") == "succeeded")
+                sys.stdout.write(f"{detail.get('status')} {done}/{len(subs)}\n")
+                sys.stdout.flush()
+                if detail.get("status") in terminal:
+                    break
+    except httpx.TimeoutException as e:        # stalled stream → exit 9
+        raise Timeout("watch stream timed out") from e
+    # Normalize the emit shape: both paths emit a raw TaskDetail-shaped dict.
     if last is None or last.get("status") not in terminal:
-        last = _task_dict(client.tasks.get(args.task_id))   # safety net
+        last = client.tasks.get(args.task_id).raw   # safety net (same shape)
     emit(last, args)
     return 1 if last.get("status") == "failed" else 0
 ```
-(`Timeout` is in `dlw.sdk.errors` — verify the name; if it's `TimeoutError`-aliased differently, match it. The safety-net `_task_dict(client.tasks.get(...))` returns a dict shaped like the emit expects. `emit` here is the `_emit` passed into `run`.)
+(`Timeout` confirmed in `dlw.sdk.errors` (exit 9). `DownloadTask.raw` is the raw API dict — same shape as the SSE `data:` TaskDetail dict, so `emit` (the `_emit` passed to `run`) renders identical columns on both paths. `args.timeout` is passed BOTH as the client deadline AND the httpx read-timeout so a stalled stream raises rather than hangs.)
 
 - [ ] **Step 6: Verify PASS + full CLI regression:** `cd "D:/download_weights" && uv run pytest tests/cli/ -v` → all pass (the rewritten watch test + new config tests + the untouched submit/list/cancel/delete/readonly tests).
 
 - [ ] **Step 7: Tidy + commit.**
 ```bash
-cd "D:/download_weights" && uv run ruff check --select I001 --fix src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_config.py tests/cli/test_cli_ops.py
-git add src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_config.py tests/cli/test_cli_ops.py && git commit -m "feat(fu1): watch->SSE + dlw context/config commands"
+cd "D:/download_weights" && uv run ruff check --select I001 --fix src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_context.py tests/cli/test_cli_ops.py
+git add src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_context.py tests/cli/test_cli_ops.py && git commit -m "feat(fu1): watch->SSE + dlw context/config commands"
 ```
 
 ### Task 5: M2 backend gate
@@ -345,7 +363,7 @@ git add src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_config.py
 **Files:**
 - Modify: `docs/operator/cli-sdk.md`
 
-- [ ] **Step 1:** Document: `dlw watch` now STREAMS the task SSE (richer per-snapshot progress, self-terminating on terminal; `--interval` accepted-but-ignored, `--timeout` still bounds); the new `dlw context list/use` + `dlw config set-context/view` commands + the `~/.dlw/config.yaml` schema (`current_context`, `contexts.<name>.server`, `auth.<name>.access_token`, written with mode 600, plaintext token). Update §5/§6: move "polling watch" out of limitations (now streams); keep `login` device-flow + token-at-rest-encryption + config beyond-basic deferred. Note `config view` redacts tokens.
+- [ ] **Step 1:** Document: `dlw watch` now STREAMS the task SSE (richer per-snapshot progress, self-terminating on terminal; `--interval` **deprecated** — passing it prints a stderr note and is ignored; `--timeout` bounds the deadline AND the stream read-timeout); the new `dlw context list/current/use/set` commands + the `~/.dlw/config.yaml` schema (`current_context`, `contexts.<name>.server`, `auth.<name>.access_token`). Note: the file is written **plaintext** with **best-effort `chmod 600`** — and explicitly state `chmod 600` is a **no-op on Windows** (only toggles the read-only bit; ACLs not restricted), so on Windows the token's protection is the user-profile ACL, not 600. `context current`/`list` print `token=set|unset`, never the value. Also note `context set` rewrites the YAML and **does not preserve comments** (PyYAML). Update §5/§6: move "polling watch" out of limitations (now streams); keep `login` device-flow + token-at-rest-encryption deferred.
 
 - [ ] **Step 2: Commit.**
 ```bash

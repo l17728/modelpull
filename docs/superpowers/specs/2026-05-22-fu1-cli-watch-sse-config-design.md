@@ -20,25 +20,40 @@
 2. **`dlw watch` upgraded to SSE.** Consume `task_stream`, parse each
    `data: <TaskDetail JSON>` snapshot, print a progress line per snapshot
    (`status files_done/total`), and stop when a snapshot's status is terminal
-   (the stream closes itself). Exit `1` on `failed`, else `0`. Flags kept for
-   compat: `--timeout` wraps a client-side deadline; `--interval` is **accepted
-   but ignored** (the server drives the 1 Hz tick) — documented. Safety net: if
+   (the stream closes itself). Exit `1` on `failed`, else `0`. `--timeout` wraps
+   a client-side deadline AND is passed as the stream's httpx read-timeout (so a
+   STALLED stream — e.g. a buffering proxy — raises `Timeout`→exit 9 rather than
+   hanging past the deadline; pre-review). `--interval` is now driven by the
+   server (1 Hz); it is **deprecated**: a non-default `--interval` emits a one-
+   line stderr deprecation note (matching the repo's deprecation policy) and is
+   otherwise ignored; `--help` marks it "(deprecated, ignored)". Both emit paths
+   (the terminal SSE snapshot and the disconnect safety-net) normalize to the
+   SAME dict shape — use the raw TaskDetail dict: SSE path keeps the parsed
+   `data:` dict; the safety-net uses `client.tasks.get(...).raw` (the raw API
+   dict), so `emit` renders identical columns regardless of path. Safety net: if
    the stream closes without a terminal snapshot (rare mid-stream disconnect),
-   do ONE final `tasks.get` to resolve the terminal state. A non-200 stream open
-   surfaces the mapped error (404→NotFound→exit 3, etc.).
-3. **Config write-back** (`src/dlw/sdk/_config.py` + new CLI commands):
+   one final `tasks.get(...).raw` resolves it. A non-200 stream open surfaces the
+   mapped error (404→NotFound→exit 3).
+3. **Context write-back** (`src/dlw/sdk/_config.py` + new `dlw context` commands
+   — kept under the vision's `context` noun, NOT a straddling `config
+   set-context`, per pre-review):
    - `save_config(cfg: dict, *, config_path=None) -> Path` — write YAML to the
      resolved path (`--config`/`DLW_CONFIG` > `$XDG_CONFIG_HOME/dlw/config.yaml`
-     > `~/.dlw/config.yaml`), creating the parent dir.
+     > `~/.dlw/config.yaml`), creating the parent dir, `chmod 600` best-effort
+     (no-op on Windows — documented).
+   - `load_config(config_path=None) -> dict` — public read alias of the existing
+     `_load_config` (so the CLI doesn't reach into the private name).
    - `set_context(name, *, server=None, token=None, make_current=True,
      config_path=None)` — merge `contexts.<name>.server` +
      `auth.<name>.access_token`, optionally set `current_context`; load-merge-save.
    - `use_context(name, *, config_path=None)` — set `current_context` (error if
      the context doesn't exist).
-   - CLI: `dlw context list` (show contexts, mark current), `dlw context use
-     <name>`, `dlw config set-context <name> [--server URL] [--token JWT]
-     [--no-current]`, `dlw config view` (show the resolved config path + current
-     context + a redacted summary — never print full tokens).
+   - CLI (all under `context`, matching v2.0 §2.1 `context [list|use|current]`
+     + an additive `set`): `dlw context list` (resolved path header + contexts,
+     mark current, `token=set|unset` — never the value), `dlw context use
+     <name>`, `dlw context current` (current name + server, token redacted),
+     `dlw context set <name> [--server URL] [--token JWT] [--no-current]`
+     (create/update + write).
 
 **Out of scope (named, deferred):**
 - `dlw login`/`logout` — OIDC device-code flow endpoint (`POST /auth/device`)
