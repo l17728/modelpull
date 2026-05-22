@@ -27,7 +27,6 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
 )
 
-
 _METADATA_ROOT_FILES: frozenset[str] = frozenset({
     ".gitattributes", ".gitignore",
     "README.md", "LICENSE", "USAGE.md",
@@ -118,3 +117,81 @@ async def list_repo_tree(
         _list_sync, repo_id, revision,
         hf_endpoint=hf_endpoint, hf_token=hf_token,
     )
+
+
+def _model_metadata_sync(
+    repo_id: str, revision: str | None, *, hf_endpoint: str, hf_token: str | None,
+) -> dict:
+    api = HfApi(endpoint=hf_endpoint)
+    try:
+        info = api.model_info(repo_id, revision=revision, token=hf_token,
+                              files_metadata=True)
+        siblings = [
+            {"path": s.rfilename, "size": getattr(s, "size", None)}
+            for s in (info.siblings or [])
+        ]
+        last_mod = getattr(info, "last_modified", None)
+        return {"sha": getattr(info, "sha", None),
+                "last_modified": last_mod.isoformat() if last_mod else None,
+                "siblings": siblings}
+    except GatedRepoError as e:
+        raise HfPrivateOrAuthRequired(str(e)) from e
+    except RepositoryNotFoundError as e:
+        raise RepoNotFound(str(e)) from e
+    except HfHubHTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        if status in (401, 403):
+            raise HfPrivateOrAuthRequired(str(e)) from e
+        if status == 404:
+            raise RepoNotFound(str(e)) from e
+        raise HfNetworkError(str(e)) from e
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout) as e:
+        raise HfNetworkError(str(e)) from e
+
+
+def _model_card_sync(
+    repo_id: str, *, hf_endpoint: str, hf_token: str | None,
+) -> str:
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(
+            repo_id, "README.md", revision=None, token=hf_token,
+            endpoint=hf_endpoint, repo_type="model")
+    except GatedRepoError as e:
+        raise HfPrivateOrAuthRequired(str(e)) from e
+    except RepositoryNotFoundError as e:
+        raise RepoNotFound(str(e)) from e
+    except HfHubHTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        if status in (401, 403):
+            raise HfPrivateOrAuthRequired(str(e)) from e
+        if status == 404:
+            return ""   # no model card published — not an error
+        raise HfNetworkError(str(e)) from e
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout) as e:
+        raise HfNetworkError(str(e)) from e
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError as e:
+        raise HfNetworkError(str(e)) from e
+
+
+async def fetch_model_metadata(
+    repo_id: str, revision: str | None = None, *,
+    hf_endpoint: str, hf_token: str | None,
+) -> dict:
+    """T1 structured HF metadata: sha + file list + last_modified. No readme."""
+    return await asyncio.to_thread(
+        _model_metadata_sync, repo_id, revision,
+        hf_endpoint=hf_endpoint, hf_token=hf_token)
+
+
+async def fetch_model_card(
+    repo_id: str, *, hf_endpoint: str, hf_token: str | None,
+) -> str:
+    """T2 user content: the model-card / README markdown ('' if none)."""
+    return await asyncio.to_thread(
+        _model_card_sync, repo_id, hf_endpoint=hf_endpoint, hf_token=hf_token)
