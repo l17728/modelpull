@@ -115,6 +115,7 @@ dlw config get <key>                # print a dotted config key (access_token re
 dlw config set <key> <value>        # set a dotted key (value parsed as YAML scalar)
 dlw config unset <key>              # remove a dotted config key
 dlw config list                     # list all config keys (tokens redacted)
+dlw config encrypt                  # encrypt plaintext stored tokens (needs DLW_CONFIG_KEY)
 ```
 
 ### 3.3 `dlw config` — config key management (FU7)
@@ -156,6 +157,54 @@ Notes:
   is not implemented). `color`/`yaml`-output/`config edit` remain deferred.
 - Arbitrary dotted keys can be stored/read, but only the four `defaults.*` keys
   above change CLI behavior.
+
+### 3.4 `dlw config encrypt` — opt-in token encryption at rest (FU8)
+
+```bash
+export DLW_CONFIG_KEY="my-passphrase"   # keep this out of ~/.dlw/config.yaml
+dlw login --token "$JWT"                # stored as enc:v1:... blob automatically
+dlw config encrypt                      # one-shot: migrate any pre-existing plaintext tokens
+```
+
+**How it works:** when `DLW_CONFIG_KEY` is set, `dlw login` / `dlw context set
+--token` / `dlw config set auth.<ctx>.access_token` store the bearer token as an
+authenticated-encrypted blob (`enc:v1:<b64-salt>:<fernet>` — Fernet AES-128-CBC
++ HMAC-SHA256, with a PBKDF2HMAC-SHA256 key derived at 200 000 iterations from
+the passphrase and a 16-byte random per-value salt). On the next command that
+needs the token (e.g. `dlw list`), the blob is transparently decrypted. When
+`DLW_CONFIG_KEY` is unset, behavior is **exactly today's plaintext** — the
+feature is fully opt-in and backward compatible.
+
+**`dlw config encrypt`** re-encrypts any existing plaintext
+`auth.*.access_token` values in the config file. It is idempotent (already
+encrypted blobs are skipped) and requires `DLW_CONFIG_KEY` (else exit 2).
+Use it once after setting the key if you already have plaintext tokens on disk.
+
+**Error cases:**
+- encrypted token on disk + `DLW_CONFIG_KEY` unset → exit 2:
+  `stored token is encrypted but DLW_CONFIG_KEY is not set`
+- encrypted token + wrong key → exit 2:
+  `cannot decrypt stored token: wrong DLW_CONFIG_KEY?`
+
+**Threat model (honest):**
+- WITH `DLW_CONFIG_KEY` kept out of the config file (e.g. set in a shell
+  profile or from a secrets manager): the token is AES-encrypted at rest —
+  protects against casual disk inspection, accidental commit of
+  `~/.dlw/config.yaml`, backups, and (on Windows, where chmod is a no-op)
+  other-user reads. The key's secrecy is the operator's responsibility.
+- WITHOUT the key: identical to today (plaintext). FU8 adds opt-in capability;
+  it does NOT change the default.
+- Does NOT protect against an attacker who has BOTH the config file AND the
+  env/process holding `DLW_CONFIG_KEY`.
+- Edge case: a literal plaintext token starting with `enc:v1:` would be
+  mis-read as encrypted. Real JWTs and opaque tokens never have this prefix —
+  this is acceptable.
+
+**Documented follow-ons (not in FU8):**
+- OS keyring integration (key in the OS keychain, no env var needed) — needs
+  the `keyring` dependency; named follow-on.
+- Per-context keys / key rotation — one `DLW_CONFIG_KEY` for all contexts;
+  rotation requires the old key to decrypt first (not automatic).
 
 ### 3.1 `dlw login` — device-code flow
 
@@ -339,8 +388,10 @@ Still deferred:
    (`storage_id`/`priority`/`source_strategy`/`output`) are wired into the CLI
    with `flag > env > config > hardcoded` precedence. Still deferred: `color`
    wiring, `defaults.output: yaml`, `dlw config edit` (open `$EDITOR`).
-   **Secure token-at-rest** (FU8) is deferred — tokens remain plaintext,
-   chmod-600 best-effort (no-op on Windows).
+   **Secure token-at-rest (FU8 — now available)**: set `DLW_CONFIG_KEY` and
+   tokens are stored as `enc:v1:` blobs and transparently decrypted on read;
+   `dlw config encrypt` migrates existing plaintext tokens. See §3.4.
+   Follow-ons (OS keyring, per-context keys / rotation) remain deferred.
 4. **`cancel --reason` not persisted** — reserved (no API field).
 
 Also deferred to later sub-projects / Phase 4: `materialize`, `search`,
