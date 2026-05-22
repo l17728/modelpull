@@ -66,13 +66,21 @@ irreversible. This design is **safe-by-default**:
    already deletes refcount<=0 rows past `gc_grace_seconds`; Part C is the
    *physical* policy: `reclaim_physical_orphans`'s grace is
    `max(gc_grace_seconds, archive_after_days)` for the time-trigger.
-9. Quota-trigger LRU: when a tenant's `storage_gb_used >= 90% * quota_storage_gb`,
-   prioritize reclaiming that tenant's dereferenced physical keys ordered by the
-   object's `last_referenced_at` (oldest first). (Refcount>0 objects are never
-   touched — LRU only reorders *already-dereferenced* candidates; it does not
-   evict live data. True "evict live LRU data to free quota" is NOT in scope —
-   that would delete referenced content, which violates the refcount invariant;
-   §3.2's "LRU evict refcount=0 objects" is what we implement.)
+9. Reclamation orders candidates **oldest-first** (`created_at`) and is capped at
+   `gc_max_objects_per_tick` (default 1000) — a blast-radius valve for the
+   destructive loop. Since every fully-dereferenced key past grace IS reclaimed
+   (the time-trigger), the ordering only matters under the per-tick cap; oldest-
+   first is a sane default.
+   **Quota-trigger LRU ordering is explicitly DEFERRED** (named follow-on, pre-
+   review I2): §3.2's "≥90% quota → LRU on `last_referenced_at`" only changes the
+   *order* in which already-dereferenced candidates are reclaimed (refcount>0 live
+   data is never evicted — that would violate the refcount invariant and is out
+   of scope per §3.2 itself, which evicts refcount=0 objects). Because the
+   time-trigger already reclaims all dereferenced keys, the quota-priority
+   ordering is a pure optimization; wiring per-tenant 90% detection +
+   `last_referenced_at` priority into the loop is deferred to keep this
+   destructive slice minimal. The `_physical_gc_loop` does NOT compute per-tenant
+   usage; it runs the time-trigger reclamation only.
 
 **Out of scope (named, deferred):**
 - **Local-fs physical deletion** — needs an executor-side reclaim RPC (controller
@@ -227,7 +235,23 @@ cancelled in `_on_step_down` (same boilerplate as `_gc_loop`).
 ## 8. Risks & Contingencies
 
 - **Destructive**: mitigated by default-off, S3-only, refcount-derived candidates,
-  grace, audit, mock-only tests, delete-bytes-before-row ordering. See §0.
+  grace, audit, mock-only tests, delete-bytes-before-row ordering, and a
+  `gc_max_objects_per_tick` cap. See §0.
+- **Grace-window ordering dependency (pre-review I1)**: reclamation keys off the
+  *existence* of a `storage_objects` row for the sha (`~exists`), NOT off
+  refcount. So a refcount=0 dedup row still in ITS OWN grace window is still
+  present → `~exists` is false → its physical keys are correctly NOT reclaimed.
+  Reclamation only fires after `gc_orphans` has actually deleted the dedup row.
+  This is safe **provided** the physical grace ≥ `gc_grace_seconds` — guaranteed
+  by `grace = max(gc_grace_seconds, archive_after_days*86400)`. Load-bearing
+  invariant: if `gc_orphans` ever becomes a soft-delete (keeps the row), the
+  `~exists` signal must change accordingly.
+- **Re-reference TOCTOU is safe (pre-review I3)**: if a new task references sha X
+  AFTER reclaim selects X's stale key but the dedup row was already GC'd,
+  `diff_and_dedup` finds no dedup row → schedules a fresh DOWNLOAD to a NEW key
+  (not an inherit from the stale key) → creates its own dedup row at its own key.
+  The reclaimed stale key is genuinely unreferenced; deleting its bytes loses no
+  live data. Grace further protects fresh writes.
 - **`sub.s3_key` for inherit**: the orphan-close depends on it being the dst key
   — implementer verifies; BLOCKER if not (fallback: record from the executor
   report or `compose_key` at completion).

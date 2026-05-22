@@ -311,6 +311,29 @@ async def test_two_revisions_same_sha_two_keys(session):
     assert {r.storage_key for r in rows} == {"repo/rev1/g", "repo/rev2/g"}
 ```
 
+Also add a refcount-safety test (pre-review N4) — recording a physical key must NOT touch the dedup refcount (guards against a future refactor double-counting inherit). Add to this file:
+
+```python
+async def test_record_physical_key_does_not_bump_refcount(session):
+    from dlw.db.models.storage_object import StorageObject
+    from dlw.services.storage_objects import record_object
+    # establish a dedup row at refcount 1
+    import uuid as _uuid
+    await record_object(session, tenant_id=1, storage_id=1,
+                        storage_key="repo/rev1/z", sha256="f" * 64, size=7,
+                        subtask_id=_uuid.uuid4())
+    await session.commit()
+    before = await session.scalar(select(StorageObject.refcount).where(
+        StorageObject.sha256 == "f" * 64))
+    # recording a physical key (the inherit path) must not change refcount
+    await record_physical_key(session, tenant_id=1, storage_id=1,
+                              sha256="f" * 64, storage_key="repo/rev2/z", size=7)
+    await session.commit()
+    after = await session.scalar(select(StorageObject.refcount).where(
+        StorageObject.sha256 == "f" * 64))
+    assert before == after == 1
+```
+
 - [ ] **Step 3: Verify FAIL** (`record_physical_key` missing).
 
 - [ ] **Step 4: Implement `record_physical_key`** in `src/dlw/services/storage_objects.py`:
@@ -334,7 +357,7 @@ async def record_physical_key(
             sha256=sub.actual_sha256, storage_key=sub.s3_key,
             size=sub.bytes_downloaded or 0)
 ```
-(Import `record_physical_key` alongside the existing `record_object` import. This runs for inherit successes too — `record_object` no-ops the refcount for inherit, but `record_physical_key` still records the new-rev key. NOTE: an inherit success may have `sub.bytes_downloaded == 0` (server-side copy, no bytes transferred) — size 0 in the ledger is acceptable; the byte accounting comes from `storage_objects.size`. If the inherit dst size is needed, derive from the matching `storage_objects.size`; size-0 is fine for reclamation which only needs the key.)
+(Import `record_physical_key` alongside the existing `record_object` import. This runs for inherit successes too — `record_object` no-ops the refcount for inherit, but `record_physical_key` still records the new-rev key. CORRECTION (pre-review B1): a successful inherit reports `bytes_downloaded == file_size` (the executor's `materialize_inherit` returns `bytes_written=size`, runner.py reports it), NOT 0 — so `sub.bytes_downloaded` is the correct full size for the ledger. PRE-EXISTING BEHAVIOR to be aware of (NOT changed by Phase 4): `complete_subtask` already calls `record_usage(metric="bytes_month", value=sub.bytes_downloaded)` for inherit successes too, so incremental inherit copies already count against the monthly *egress* quota despite transferring no source bytes — that is existing semantics; Phase 4 only adds *storage* accounting and does not touch egress billing. Flagged, not fixed here.)
 
 - [ ] **Step 6: Verify PASS** + run `tests/services/test_physical_keys.py` and the existing scheduler/record tests (`tests/services/test_record_object_on_complete.py`) to confirm no regression in `complete_subtask`:
   `cd "D:/download_weights" && uv run pytest tests/services/test_physical_keys.py tests/services/test_record_object_on_complete.py -v` → all pass.
@@ -540,13 +563,17 @@ from sqlalchemy import exists  # add to imports
 
 async def reclaim_physical_orphans(
     session: AsyncSession, *, grace_seconds: int, delete_enabled: bool,
-    make_client, audit,
+    make_client, audit, max_objects_per_tick: int = 1000,
 ) -> dict:
     """Reclaim physical keys whose content sha has NO surviving storage_objects
     row (fully dereferenced) and are past grace. S3 backends only; bytes deleted
     only when delete_enabled. Deletes bytes BEFORE the ledger row (crash-safe).
-    `make_client(storage_id) -> (client, bucket, backend_type)`. Caller commits."""
+    Caps the candidate set at max_objects_per_tick (blast-radius valve, oldest
+    first). `make_client(storage_id) -> (client, bucket, backend_type)`.
+    Returns {"candidates","deleted"}. Caller commits."""
     from datetime import timedelta
+
+    from dlw.services.storage_client import delete_object_silently
     cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
     live = (exists().where(
         StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
@@ -556,6 +583,7 @@ async def reclaim_physical_orphans(
         select(StoragePhysicalKey)
         .where(StoragePhysicalKey.created_at < cutoff, ~live)
         .order_by(StoragePhysicalKey.created_at)
+        .limit(max(1, max_objects_per_tick))
         .with_for_update(skip_locked=True))).scalars().all()
     deleted = 0
     clients: dict[int, tuple] = {}
@@ -565,19 +593,21 @@ async def reclaim_physical_orphans(
         if row.storage_id not in clients:
             clients[row.storage_id] = make_client(row.storage_id)
         client, bucket, backend_type = clients[row.storage_id]
-        if backend_type != "s3":
-            continue   # local-fs: executor-side reclaim is a follow-on
-        from dlw.services.storage_client import delete_object_silently
+        if backend_type != "s3" or client is None:
+            continue   # local-fs / missing backend: executor-side reclaim follow-on
         ok = await delete_object_silently(client, bucket, row.storage_key)
         if not ok:
             continue
-        audit(action="storage.gc.physical", tenant_id=row.tenant_id,
+        # B1: resource_id must fit AuditLog.resource_id String(128) — use the
+        # row id; the (up-to-1024-char) key goes in payload. Truncation here
+        # would abort the commit AFTER S3 bytes are gone.
+        audit(action="storage.gc.physical", id=row.id, tenant_id=row.tenant_id,
               storage_key=row.storage_key, size=row.size)
         await session.delete(row)   # row removed AFTER bytes deleted
         deleted += 1
     return {"candidates": len(rows), "deleted": deleted}
 ```
-(`StoragePhysicalKey`, `StorageObject` already imported in this module.)
+(`StoragePhysicalKey`, `StorageObject` already imported; add `from sqlalchemy import exists` to the module imports.)
 
 - [ ] **Step 5: Verify PASS:** `cd "D:/download_weights" && uv run pytest tests/services/test_physical_reclaim.py -v` → all 4 pass. Fix the impl (not tests) if needed.
 
@@ -596,6 +626,7 @@ git add src/dlw/services/storage_client.py src/dlw/services/storage_objects.py t
 ```python
     gc_delete_physical_bytes: bool = Field(default=False)
     gc_archive_after_days: int = Field(default=90, ge=0)
+    gc_max_objects_per_tick: int = Field(default=1000, ge=1, le=100000)
 ```
 
 - [ ] **Step 2: Wire the loop** in `src/dlw/main.py`. Mirror `_gc_loop` exactly. Add a `physical_gc_task_holder = {"t": None}` near the other holders, and define inside `lifespan`:
@@ -666,16 +697,28 @@ PROBLEM: `make_client` must load the `StorageBackend` (async DB read) but `recla
                         session, grace_seconds=grace,
                         delete_enabled=_gs().gc_delete_physical_bytes,
                         make_client=_make_client,
-                        audit=lambda **kw: audited.append(kw))
+                        audit=lambda **kw: audited.append(kw),
+                        max_objects_per_tick=_gs().gc_max_objects_per_tick)
                     for a in audited:
+                        # B1: resource_id is String(128); storage_key (≤1024)
+                        # goes in payload — a long key here would truncate and
+                        # abort the commit after the S3 bytes are already gone.
                         await write_audit(session, action=a["action"],
                             resource_type="storage_physical_keys",
-                            resource_id=a["storage_key"], outcome="success",
+                            resource_id=str(a["id"]), outcome="success",
                             tenant_id=a["tenant_id"], actor_user_id=None,
-                            payload={"size": a["size"]})
+                            payload={"storage_key": a["storage_key"],
+                                     "size": a["size"]})
                     await session.commit()
+                    # I4: surface candidates EVERY tick (incl. dry-run/disabled),
+                    # so an operator sees what *would* be reclaimed before enabling.
+                    if res["candidates"]:
+                        logger.info(
+                            "physical gc: %d candidate(s), %d deleted "
+                            "(delete_enabled=%s)", res["candidates"],
+                            res["deleted"], _gs().gc_delete_physical_bytes)
 ```
-(Use this second, correct version. `reclaim_physical_orphans` treats `backend_type` not in `("s3",)` as skip, so a `"missing"`/`"local"` backend is safely skipped.)
+(Use this second, correct version. `reclaim_physical_orphans` treats `backend_type` not in `("s3",)` (or a None client) as skip, so a `"missing"`/`"local"` backend is safely skipped.)
 
 - [ ] **Step 3: Register in `_on_active` / `_on_step_down`.** In `_on_active`, add `physical_gc_task_holder["t"] = asyncio.create_task(_physical_gc_loop())` (next to `gc_task_holder`). In `_on_step_down`, cancel it with the same boilerplate as the other holders (gather/timeout).
 
