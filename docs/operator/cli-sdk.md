@@ -84,14 +84,33 @@ dlw list [--status STATUS]
 dlw show <task_id>
 dlw cancel <task_id> [--reason TEXT]
 dlw delete <task_id>            # terminal tasks only (else exit 6)
-dlw watch <task_id> [--interval S] [--timeout S]
+dlw watch <task_id> [--timeout S]   # STREAMS the task SSE until terminal
 dlw whoami                          # the current principal (GET /auth/me)
 dlw quota                           # current tenant quota usage
 dlw exec list [--status STATUS]     # registered executors
 dlw events <task_id> [--limit N] [--cursor C] [--follow]
 dlw audit [--action PREFIX] [--actor USER_ID] [--from DATE] [--to DATE] \
     [--limit N] [--cursor C]
+dlw context list                    # contexts in ~/.dlw/config.yaml (marks current)
+dlw context current                 # the active context (token redacted)
+dlw context use <name>              # switch current_context
+dlw context set <name> [--server URL] [--token JWT] [--no-current]
 ```
+
+`dlw watch` now **streams** the task SSE (`GET /tasks/{id}/stream`): it prints a
+`status done/total` line per snapshot and exits when the task is terminal (exit
+`1` on `failed`). `--timeout` bounds both the client deadline and the stream
+read-timeout (a stalled stream raises rather than hangs). `--interval` is
+**deprecated** — passing it prints a stderr note and is ignored (the server
+drives the 1 Hz tick).
+
+`dlw context` manages `~/.dlw/config.yaml` locally (no token/network needed).
+`context set` writes `contexts.<name>.server` + `auth.<name>.access_token` +
+(unless `--no-current`) `current_context`. The token is stored **plaintext**;
+the file is written with best-effort `chmod 600` — note this is a **no-op on
+Windows** (it only toggles the read-only bit; the OS profile ACL is the actual
+protection there). `context list`/`current` print `token=set|unset`, never the
+value. `context set` rewrites the YAML and does not preserve comments.
 
 `whoami`/`quota`/`exec list`/`events`/`audit` are read-only wraps of existing
 endpoints (added in the SP4-CLI read-only slice). Two notes:
@@ -101,9 +120,10 @@ endpoints (added in the SP4-CLI read-only slice). Two notes:
   while `quota`/`exec`/`audit` use `require_perm` (tenant roles). So with the
   admin service token `whoami` works but `quota`/`audit` may return `403`; use a
   tenant-user JWT (§2.1) for those.
-- **`watch` vs `events --follow`**: `watch` polls task *status* until terminal;
-  `events --follow` streams the raw event log via SSE until Ctrl-C / disconnect
-  (it does not self-terminate on a terminal task). `events` (no `--follow`) is a
+- **`watch` vs `events --follow`**: `watch` streams task *status* snapshots
+  (`/tasks/{id}/stream`) and self-terminates when the task reaches a terminal
+  state; `events --follow` streams the raw event log (`/events/stream`) until
+  Ctrl-C / disconnect (it does NOT self-terminate). `events` (no `--follow`) is a
   one-shot paginated list.
 
 Global: `-o/--output {table,json}` (json is the stable machine contract),
@@ -115,7 +135,8 @@ Examples:
 dlw -o json submit deepseek-ai/DeepSeek-V3 -r 0000…40hex -s 1
 dlw list --status downloading
 dlw show 7e57a3f8-…
-dlw watch 7e57a3f8-… --interval 10
+dlw watch 7e57a3f8-… --timeout 3600
+dlw context set prod --server https://dlw.example.com --token "$JWT"
 dlw cancel 7e57a3f8-… --reason "wrong revision"
 dlw delete 7e57a3f8-…            # only if succeeded/failed/cancelled
 ```
@@ -167,9 +188,12 @@ Read-only resource methods (return the parsed JSON dict — read-only metadata,
 not the typed `DownloadTask`): `c.me()`, `c.quota.current()`,
 `c.executors.list(status=None)`, `c.tasks.events(task_id, limit=50, cursor=None)`,
 `c.audit.search(action=None, actor_user_id=None, from_=None, to=None,
-cursor=None, limit=50)`, and the SSE seam `c.tasks.events_stream(task_id,
-max_ticks=None)` (a streaming context manager — `with … as r: for line in
-r.iter_lines(): …`). All mirrored on `AsyncClient`.
+cursor=None, limit=50)`, and the SSE seams `c.tasks.events_stream(task_id,
+max_ticks=None)` + `c.tasks.task_stream(task_id, max_ticks=None, timeout=None)`
+(streaming context managers — `with … as r: for line in r.iter_lines(): …`).
+All mirrored on `AsyncClient`. Local config helpers: `dlw.sdk._config`
+exposes `load_config`/`save_config`/`set_context`/`use_context` (used by
+`dlw context`).
 
 Errors are typed (`dlw.sdk.errors`): `NotFound`, `AuthError`,
 `QuotaExceeded`, `Conflict`, `Timeout`, `UsageError`, `ApiError` (all
@@ -180,9 +204,10 @@ subclass `DlwError`), each mapped to the CLI exit code above.
 - `submit` requires `storage_id` (the controller's `TaskCreate` requires it).
 - `list(status=…)` filters **client-side** (the implemented `GET
   /api/v1/tasks` has no query filter yet — see §6).
-- `watch`/`wait` **poll** `GET /api/v1/tasks/{id}` until terminal
-  (`succeeded`/`failed`/`cancelled`) or timeout. On an *already-terminal*
-  task they emit only the final record (no progress line) — by design.
+- `watch` **streams** `GET /api/v1/tasks/{id}/stream` (self-terminating on
+  terminal status); the SDK `DownloadTask.wait()` still **polls** `GET
+  /api/v1/tasks/{id}`. Both stop on `succeeded`/`failed`/`cancelled` or timeout;
+  an *already-terminal* task yields the final record immediately.
 - `cancel --reason` / `cancel(reason=)` is **accepted but not persisted**
   (the cancel endpoint has no reason field yet) — reserved, no-op for now.
 
@@ -192,9 +217,10 @@ subclass `DlwError`), each mapped to the CLI exit code above.
 `whoami`, `quota` (the `usage` subcommand is still deferred — bare `dlw quota`
 is the `show` view), `exec list`, `events [--follow]`, `audit` — and the SDK
 methods `me`/`quota.current`/`executors.list`/`tasks.events`/
-`tasks.events_stream`/`audit.search`. So the earlier "no events endpoint" and
-"no `quota`/`exec`/`audit`" limitations are lifted; `events --follow` provides
-live streaming (the polling `watch` is unchanged).
+`tasks.events_stream`/`audit.search`/`task_stream`. So the earlier "no events
+endpoint", "no `quota`/`exec`/`audit`", and "polling `watch`" limitations are
+lifted: `watch` now streams the task SSE, `events --follow` streams the event
+log, and `dlw context list/current/use/set` manage `~/.dlw/config.yaml`.
 
 Still deferred:
 
@@ -202,11 +228,12 @@ Still deferred:
    is a future additive controller change.
 2. **OIDC `login`/`logout`** — the controller's OIDC is a browser
    authorization-code redirect flow; a CLI needs a **device-code flow**
-   endpoint (`POST /auth/device`) that does not exist. `whoami` works today
-   (token auth); `login` does not.
-3. **Config write (`config set`/`edit`, context switching)** — the config
-   *read* path works; the write-back path (storing a token, switching context)
-   pairs with `login` and is deferred.
+   endpoint (`POST /auth/device`) that does not exist. `whoami`/`context set`
+   (persisting a token you already have) work today; `login` does not.
+3. **Arbitrary config keys (`config get/set`, defaults) + secure token-at-rest**
+   — `dlw context` manages server/token contexts (plaintext, chmod-600
+   best-effort; no-op on Windows). General config-key get/set and encrypted token
+   storage are deferred.
 4. **`cancel --reason` not persisted** — reserved (no API field).
 
 Also deferred to later sub-projects / Phase 4: `materialize`, `search`,
