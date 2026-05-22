@@ -9,7 +9,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dlw.db.models.storage_object import StorageObject, SubtaskObjectRef
+from dlw.db.models.storage_object import StorageObject, StoragePhysicalKey, SubtaskObjectRef
 
 
 async def _ref_exists(session: AsyncSession, subtask_id: uuid.UUID) -> bool:
@@ -83,6 +83,18 @@ async def deref_subtask(
     await session.execute(
         delete(SubtaskObjectRef)
         .where(SubtaskObjectRef.subtask_id == subtask_id))
+
+
+async def record_physical_key(
+    session: AsyncSession, *, tenant_id: int, storage_id: int,
+    sha256: str, storage_key: str, size: int,
+) -> None:
+    """Phase 4: durable ledger of a physical object key (download + inherit).
+    Idempotent on (tenant, storage, key). Caller commits."""
+    await session.execute(pg_insert(StoragePhysicalKey).values(
+        tenant_id=tenant_id, storage_id=storage_id, sha256=sha256,
+        storage_key=storage_key, size=size).on_conflict_do_nothing(
+            index_elements=["tenant_id", "storage_id", "storage_key"]))
 
 
 async def gc_orphans(

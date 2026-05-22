@@ -21,7 +21,7 @@ from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.services.quota import record_usage
 from dlw.services.source_blacklist import blacklist_file
-from dlw.services.storage_objects import deref_subtask, record_object
+from dlw.services.storage_objects import deref_subtask, record_object, record_physical_key
 
 
 async def claim_one_subtask(
@@ -219,6 +219,10 @@ async def complete_subtask(
             session, tenant_id=sub.tenant_id, storage_id=parent.storage_id,
             storage_key=sub.s3_key, sha256=sub.actual_sha256,
             size=sub.bytes_downloaded or 0, subtask_id=sub.id)
+        await record_physical_key(
+            session, tenant_id=sub.tenant_id, storage_id=parent.storage_id,
+            sha256=sub.actual_sha256, storage_key=sub.s3_key,
+            size=sub.bytes_downloaded or 0)
     elif final_status == "failed" and sub.inherit_from_key:
         # banner 7f: an inherit copy failed. diff_and_dedup already did
         # refcount++ + a SubtaskObjectRef — undo it and re-queue the file as
