@@ -51,7 +51,9 @@ class ExecutorRunner:
         self._auth = auth_state
         self._shutdown = asyncio.Event()
 
-    def _choose_downloader(self, file_size: int | None):
+    def _choose_downloader(self, file_size: int | None, *, has_chunks: bool = False):
+        if has_chunks:
+            return self._chunk_downloader
         threshold = self._s.chunk_level_threshold_bytes
         if file_size is None or file_size >= threshold:
             return self._chunk_downloader
@@ -195,11 +197,19 @@ class ExecutorRunner:
         repo_id: str, revision: str, storage_config: dict,
     ) -> None:
         import httpx as _httpx
+
         from dlw.executor.downloader import Assignment
+        from dlw.executor.types import ChunkAssignment
         from dlw.schemas.storage import StorageConfig
 
         sub_id = uuid.UUID(subtask["id"])
         try:
+            raw_chunks = subtask.get("chunks") or []
+            chunks = tuple(
+                ChunkAssignment(
+                    chunk_index=c["chunk_index"], byte_start=c["byte_start"],
+                    byte_end=c["byte_end"], source_id=c["source_id"])
+                for c in raw_chunks)
             assignment = Assignment(
                 subtask_id=sub_id,
                 task_id=uuid.UUID(subtask["task_id"]),
@@ -210,6 +220,7 @@ class ExecutorRunner:
                 file_size=subtask.get("file_size"),
                 expected_sha256=subtask.get("expected_sha256"),
                 storage_config=StorageConfig(**storage_config),
+                chunks=chunks,
             )
             inherit_key = subtask.get("inherit_from_key")
             if inherit_key:
@@ -229,7 +240,7 @@ class ExecutorRunner:
                     bytes_downloaded=result.bytes_written,
                     s3_key=result.s3_key)
                 return
-            downloader = self._choose_downloader(assignment.file_size)
+            downloader = self._choose_downloader(assignment.file_size, has_chunks=bool(assignment.chunks))
             try:
                 result = await downloader.download(assignment=assignment)
             except DiskFullError as e:
