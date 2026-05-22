@@ -112,7 +112,13 @@ def _context_cmd(args) -> int:
 
 
 def _redact(key: str, value):
-    return "***" if key.split(".")[-1] == "access_token" else value
+    if key.split(".")[-1] == "access_token":
+        return "***"
+    # Recursively scrub access_token leaves when a parent dict is printed
+    # (e.g. `config get auth.prod` → don't leak the token inside the dict).
+    if isinstance(value, dict):
+        return {k: _redact(k, v) for k, v in value.items()}
+    return value
 
 
 def _config_cmd(args) -> int:

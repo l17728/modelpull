@@ -91,6 +91,10 @@ def test_token_redacted(capsys, tmp_path):
     assert cli.main(["-c", p, "config", "list"]) == 0
     out = capsys.readouterr().out
     assert "SECRET" not in out
+    # getting the PARENT dict must not leak the token either (recursive redact)
+    assert cli.main(["-c", p, "config", "get", "auth.prod"]) == 0
+    out = capsys.readouterr().out
+    assert "SECRET" not in out
 
 
 # ---------------------------------------------------------------------------
