@@ -58,9 +58,8 @@ before enabling deletion.
 
 It runs only for S3-type backends. The controller builds an S3 client from
 the backend configuration (the same pattern the recovery routine uses).
-Local-filesystem backends are skipped — the controller has no access to an
-executor's disk in a distributed deployment — and their reclamation is a
-named follow-on (an executor-side reclaim path).
+Local-filesystem backends are handled separately via the executor heartbeat
+path described below.
 
 Each tick is capped at `gc_max_objects_per_tick` (default 1000) so that
 enabling the feature on a large backlog does not attempt to delete an
@@ -104,3 +103,48 @@ does not do:
 
 Cold-storage tiering and reclamation of physical objects written before the
 ledger shipped (which have no ledger row) are also follow-ons.
+
+## Local-filesystem reclamation (FU3)
+
+The S3 reclamation loop runs entirely inside the controller process, which
+has no access to an executor's local disk. Local-filesystem orphan reclamation
+therefore runs via the executor that originally wrote each file — the WRITER
+executor — over the existing heartbeat channel.
+
+**How it works.** The controller's heartbeat handler checks for orphaned
+local-fs physical keys assigned to the calling executor (same `~live`,
+grace window, and `gc_delete_physical_bytes` gate as the S3 loop; capped
+at `gc_max_objects_per_tick` per heartbeat). Eligible keys are returned in
+the heartbeat response as `reclaim: [{id, base_path, storage_key}]`. The
+executor calls `unlink` on each file (using `missing_ok=True` so an already
+absent file is treated as success) and reports the completed ids back via
+`reclaimed_key_ids` in the next heartbeat. The controller then removes the
+confirmed ledger rows and audits them as `storage.gc.physical.local`. The
+confirm-then-delete-ledger ordering means a crash between unlink and confirm
+leaves the row intact and the key is re-dispatched on the next heartbeat
+(re-unlinking an absent file is a no-op).
+
+**Path-traversal guard.** Before unlinking, the executor resolves the full
+path of `base_path / storage_key` and rejects it if the result escapes
+`base_path` (for example a key containing `../../etc/passwd`), if
+`base_path` is empty, or if `base_path` is not an absolute path. Refused
+keys are logged as warnings and are never confirmed, so the ledger row
+persists and surfaces in the un-reclaimable count rather than disappearing
+silently.
+
+**Scope and deferrals.** This path is correct for the documented
+single-executor-local deployment model, where a given local key was written
+by exactly one executor on exactly one host. Two cases are deferred:
+
+- *NFS-shared backend, writer offline.* If the executor that wrote a file is
+  currently down but another executor shares the same NFS mount, the key
+  waits until the writer comes back online (or remains un-reclaimed). A
+  base-path-capability advertisement letting any mount-holder delete is a
+  named follow-on.
+- *Keys recorded before FU3 shipped.* Physical keys that were written before
+  the `executor_id` column was added carry `NULL` for the writer and are
+  never dispatched. A back-fill reconciliation is a named follow-on.
+
+Both deferred cases are reported by the periodic un-reclaimable count logged
+by the heartbeat handler so operators can observe accruing bytes rather than
+silent growth.
