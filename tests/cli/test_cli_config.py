@@ -182,3 +182,59 @@ def test_resolve_output_all_none_gives_table(monkeypatch, tmp_path):
     monkeypatch.delenv("DLW_OUTPUT", raising=False)
     p = str(tmp_path / "c.yaml")
     assert _resolve_output(None, p) == "table"
+
+
+# ---------------------------------------------------------------------------
+# M3: FU8 dlw config encrypt
+# ---------------------------------------------------------------------------
+
+def test_config_encrypt_migrates_plaintext(monkeypatch, capsys, tmp_path):
+    """config encrypt migrates a plaintext token to enc:v1: and resolve works."""
+    import yaml
+
+    from dlw.sdk._config import load_config, resolve
+
+    p = str(tmp_path / "c.yaml")
+    # Seed plaintext token with key UNSET (autouse fixture already deletes it)
+    assert cli.main(["-c", p, "config", "set", "auth.prod.access_token", "PLAINTOK"]) == 0
+    # Also set a current context so resolve() knows where to look
+    assert cli.main(["-c", p, "context", "set", "prod", "--server", "http://h"]) == 0
+    capsys.readouterr()
+
+    # Now set the key and run config encrypt
+    monkeypatch.setenv("DLW_CONFIG_KEY", "pw")
+    rc = cli.main(["-c", p, "config", "encrypt"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1" in out  # at least one token migrated
+
+    # Raw on-disk value is now encrypted
+    raw = load_config(p)["auth"]["prod"]["access_token"]
+    assert raw.startswith("enc:v1:")
+
+    # resolve() with key set returns original plaintext
+    r = resolve(server=None, token=None, config_path=p)
+    assert r.token == "PLAINTOK"
+
+
+def test_config_encrypt_requires_key(monkeypatch, capsys, tmp_path):
+    """config encrypt without DLW_CONFIG_KEY exits 2."""
+    p = str(tmp_path / "c.yaml")
+    monkeypatch.delenv("DLW_CONFIG_KEY", raising=False)
+    rc = cli.main(["-c", p, "config", "encrypt"])
+    assert rc == 2
+
+
+def test_config_encrypt_skips_already_encrypted(monkeypatch, capsys, tmp_path):
+    """config encrypt is idempotent: running twice reports 0 migrated on second run."""
+    p = str(tmp_path / "c.yaml")
+    # Write an encrypted token directly (key set)
+    monkeypatch.setenv("DLW_CONFIG_KEY", "pw")
+    assert cli.main(["-c", p, "config", "set", "auth.prod.access_token", "PLAINTOK"]) == 0
+    capsys.readouterr()
+
+    # First encrypt — nothing to migrate (already encrypted by config set)
+    rc = cli.main(["-c", p, "config", "encrypt"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0" in out  # zero migrated

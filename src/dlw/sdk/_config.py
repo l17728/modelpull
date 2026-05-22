@@ -12,6 +12,10 @@ from dlw.sdk.errors import UsageError
 _DEFAULT_SERVER = "http://localhost:8000"
 
 
+def _config_key() -> str | None:
+    return os.environ.get("DLW_CONFIG_KEY") or None
+
+
 @dataclass(frozen=True)
 class Resolved:
     server: str
@@ -75,7 +79,10 @@ def set_context(name: str, *, server: str | None = None, token: str | None = Non
     if server is not None:
         cfg["contexts"][name]["server"] = server.rstrip("/")
     if token is not None:
-        cfg.setdefault("auth", {}).setdefault(name, {})["access_token"] = token
+        from dlw.sdk._crypto import encrypt_token
+        key = _config_key()
+        stored = encrypt_token(token, key) if key else token
+        cfg.setdefault("auth", {}).setdefault(name, {})["access_token"] = stored
     if make_current:
         cfg["current_context"] = name
     return save_config(cfg, config_path=config_path)
@@ -130,6 +137,11 @@ def set_config_value(key: str, value, *, config_path: str | None = None) -> Path
             nxt = {}
             cur[p] = nxt
         cur = nxt
+    if parts[-1] == "access_token" and value is not None:
+        from dlw.sdk._crypto import encrypt_token
+        key = _config_key()
+        if key and not str(value).startswith("enc:v1:"):
+            value = encrypt_token(str(value), key)
     cur[parts[-1]] = value
     return save_config(cfg, config_path=config_path)
 
@@ -179,6 +191,20 @@ def resolve(*, server: str | None, token: str | None,
     tok = (token or os.environ.get("DLW_TOKEN")
            or os.environ.get("DLW_SYSTEM_ADMIN_TOKEN")
            or auth.get("access_token"))
+    if tok and token is None and os.environ.get("DLW_TOKEN") is None \
+            and os.environ.get("DLW_SYSTEM_ADMIN_TOKEN") is None:
+        from dlw.sdk._crypto import decrypt_token, is_encrypted
+        from dlw.sdk.errors import TokenDecryptError
+        if is_encrypted(tok):
+            key = _config_key()
+            if not key:
+                raise UsageError("stored token is encrypted but "
+                                 "DLW_CONFIG_KEY is not set")
+            try:
+                tok = decrypt_token(tok, key)
+            except TokenDecryptError as e:
+                raise UsageError("cannot decrypt stored token: wrong "
+                                 "DLW_CONFIG_KEY?") from e
     if not tok:
         raise UsageError(
             "no API token: pass --token or set DLW_TOKEN / "

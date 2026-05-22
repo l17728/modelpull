@@ -153,7 +153,27 @@ def _config_cmd(args) -> int:
         for k in sorted(flat):
             sys.stdout.write(f"{k} = {_redact(k, flat[k])}\n")
         return 0
-    sys.stderr.write("usage: dlw config [get KEY|set KEY VALUE|unset KEY|list]\n")
+    if sub == "encrypt":
+        import os
+
+        from dlw.sdk._crypto import encrypt_token, is_encrypted
+        from dlw.sdk.errors import UsageError
+        key = os.environ.get("DLW_CONFIG_KEY") or None
+        if not key:
+            raise UsageError("config encrypt needs DLW_CONFIG_KEY set")
+        cfg = cfgmod.load_config(cp)
+        n = 0
+        for ctx, entry in (cfg.get("auth") or {}).items():
+            tok = entry.get("access_token")
+            if isinstance(tok, str) and tok and not is_encrypted(tok):
+                entry["access_token"] = encrypt_token(tok, key)
+                n += 1
+        if n:
+            cfgmod.save_config(cfg, config_path=cp)
+        if not args.quiet:
+            sys.stdout.write(f"encrypted {n} token(s)\n")
+        return 0
+    sys.stderr.write("usage: dlw config [get KEY|set KEY VALUE|unset KEY|list|encrypt]\n")
     return 2
 
 

@@ -105,6 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cfg_unset = cfg_sub.add_parser("unset", help="remove a dotted config key")
     cfg_unset.add_argument("key")
     cfg_sub.add_parser("list", help="list all config keys (tokens redacted)")
+    cfg_sub.add_parser("encrypt", help="encrypt plaintext stored tokens (needs DLW_CONFIG_KEY)")
 
     login = sub.add_parser("login", help="authenticate and store a token")
     login.add_argument("--device-code", action="store_true",
