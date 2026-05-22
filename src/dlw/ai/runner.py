@@ -79,6 +79,33 @@ class StubAgentRunner(AgentRunner):
                              {"text": "Please confirm the cancellation."})
             return
         m_repo = _REPO_RE.search(msg)
+        if m_repo and any(k in low for k in ("card", "模型卡", "readme")):
+            repo = m_repo.group(0)
+            yield AgentEvent("tool_call",
+                             {"id": "call_card", "tool": "hf_model_card",
+                              "input": {"repo_id": repo},
+                              "requires_confirmation": False})
+            result = await call_tool("hf_model_card", {"repo_id": repo})
+            yield AgentEvent("tool_result",
+                             {"id": "call_card", "ok": "error" not in result,
+                              "output": result})
+            yield AgentEvent("assistant.message_delta",
+                             {"text": f"Fetched & sanitized the model card "
+                                      f"for {repo}."})
+            return
+        if m_repo and any(k in low for k in ("metadata", "元数据", "model info")):
+            repo = m_repo.group(0)
+            yield AgentEvent("tool_call",
+                             {"id": "call_meta", "tool": "hf_api_metadata",
+                              "input": {"repo_id": repo},
+                              "requires_confirmation": False})
+            result = await call_tool("hf_api_metadata", {"repo_id": repo})
+            yield AgentEvent("tool_result",
+                             {"id": "call_meta", "ok": "error" not in result,
+                              "output": result})
+            yield AgentEvent("assistant.message_delta",
+                             {"text": f"Fetched HF metadata for {repo}."})
+            return
         if ("create" in low or "download" in low or "下载" in low) and m_repo:
             repo = m_repo.group(0)
             yield AgentEvent("tool_call_pending_confirm", {

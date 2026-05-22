@@ -145,8 +145,9 @@ async def test_chat_persists_conversation_and_audit(
 
 async def test_chat_over_budget_blocks(client, auth, engine):
     # Seed month-to-date usage above the tenant's default quota (1_000_000).
-    from dlw.db.models.ai import AITokenUsage, AIConversation
-    from sqlalchemy import delete, select, func
+    from sqlalchemy import delete, func, select
+
+    from dlw.db.models.ai import AIConversation, AITokenUsage
     f = async_sessionmaker(engine, expire_on_commit=False)
     async with f() as s:
         before = await s.scalar(
@@ -170,9 +171,23 @@ async def test_chat_over_budget_blocks(client, auth, engine):
         await s.commit()
 
 
+async def test_chat_model_card_sse_returns_t2_wrapped(client, auth, monkeypatch):
+    async def fake_card(repo_id, *, hf_endpoint, hf_token):
+        return "# Card\nhello"
+    monkeypatch.setattr("dlw.ai.tools.fetch_model_card", fake_card)
+    evs = await _collect_events(
+        client, auth, {"message": "show the model card for org/m"})
+    kinds = [e["event"] for e in evs]
+    assert "tool_call" in kinds
+    tr = next(e for e in evs if e["event"] == "tool_result")
+    assert 'external_user_content trust_level="t2"' in tr["data"]["output"]["sanitized"]
+    assert kinds[-1] == "done"
+
+
 async def test_chat_under_budget_records_usage(client, auth, engine):
-    from dlw.db.models.ai import AITokenUsage, AIMessage
     from sqlalchemy import select
+
+    from dlw.db.models.ai import AIMessage, AITokenUsage
     evs = await _collect_events(client, auth, {"message": "just chatting"})
     assert evs[-1]["event"] == "done"
     assert evs[-1]["data"]["tokens_used"] > 0
