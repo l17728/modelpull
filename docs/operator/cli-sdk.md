@@ -23,8 +23,13 @@ What works **now**:
 
 ## 2. Auth & configuration
 
-Token-only (no OIDC login in the MVP — that is deferred). The CLI/SDK
-consume a pre-existing system-JWT (e.g. `DLW_SYSTEM_ADMIN_TOKEN` from SP1).
+The CLI supports two authentication paths:
+
+1. **Device-code flow (`dlw login`)** — RFC 8628 interactive login. The CLI
+   obtains a short code, you approve it in a browser session that is already
+   logged in to the org IdP, and the CLI stores the resulting JWT automatically.
+2. **Direct token** — paste a pre-minted system-JWT via `--token` /
+   `DLW_TOKEN` / `DLW_SYSTEM_ADMIN_TOKEN` / `~/.dlw/config.yaml`.
 
 **Token precedence:** `--token` flag > `DLW_TOKEN` > `DLW_SYSTEM_ADMIN_TOKEN`
 > `~/.dlw/config.yaml` (`auth.<current_context>.access_token`).
@@ -78,6 +83,16 @@ suffice — the non-interactive/CI path). A missing token → exit code 2.
 ## 3. CLI commands
 
 ```bash
+# Authentication
+dlw login [--server URL] [--context NAME] [--timeout S] [--no-browser]
+    # starts RFC 8628 device-code flow: prints a URL + code,
+    # opens the browser (unless --no-browser), polls until approved,
+    # then writes the access token into the named context.
+dlw login --token JWT [--server URL] [--context NAME]
+    # token shortcut: skips device flow, stores the token directly.
+dlw logout [--context NAME]
+    # clears the stored access_token for the named context.
+
 dlw submit <repo> -r <revision> -s <storage_id> [--priority N] \
     [--strategy auto_balance] [--upgrade-from REV] [--wait] [--timeout S]
 dlw list [--status STATUS]
@@ -96,6 +111,46 @@ dlw context current                 # the active context (token redacted)
 dlw context use <name>              # switch current_context
 dlw context set <name> [--server URL] [--token JWT] [--no-current]
 ```
+
+### 3.1 `dlw login` — device-code flow
+
+```bash
+dlw login [--server URL] [--context NAME] [--timeout S] [--no-browser]
+```
+
+1. The CLI calls `POST /api/v1/auth/device` and prints a URL + short code:
+   ```
+   Visit: /device
+   Enter code: BCDF-GHJK
+   ```
+2. Open the URL in a browser where you are already logged in to the org IdP,
+   enter the code, and click **Approve**.
+3. The CLI polls `POST /api/v1/auth/device/token` until approved (or until
+   `--timeout` seconds elapse, default = `expires_in` from the server).
+4. On approval the access token is written to
+   `auth.<context>.access_token` in `~/.dlw/config.yaml` and that context is
+   made current.
+
+**Honest deferrals:**
+
+- The browser approval page (`GET /device`) is a **follow-on feature** —
+  it does not exist yet. Until it ships, approval must be performed via an
+  authenticated `POST /api/v1/auth/device/approve` request (e.g. with `curl`
+  or a test script) by a user who already holds a valid bearer token.
+- There is **no browser-authcode (OIDC redirect) mode** — `dlw login` uses
+  device-code only (RFC 8628).
+- There is **no refresh token** — the issued JWT has a 1-hour TTL. Re-run
+  `dlw login` after expiry.
+
+### 3.2 `dlw logout`
+
+```bash
+dlw logout [--context NAME]
+```
+
+Removes `auth.<context>.access_token` from `~/.dlw/config.yaml`. The context
+entry itself (server URL, etc.) is preserved. The context name defaults to the
+current context, or `"default"` if none is set.
 
 `dlw watch` now **streams** the task SSE (`GET /tasks/{id}/stream`): it prints a
 `status done/total` line per snapshot and exits when the task is terminal (exit
@@ -213,23 +268,25 @@ subclass `DlwError`), each mapped to the CLI exit code above.
 
 ## 6. MVP limitations (authoritative — deferred on purpose)
 
-**Now available** (read-only slice, added after the original SP4 MVP):
+**Now available** (read-only slice + FU6, added after the original SP4 MVP):
 `whoami`, `quota` (the `usage` subcommand is still deferred — bare `dlw quota`
-is the `show` view), `exec list`, `events [--follow]`, `audit` — and the SDK
-methods `me`/`quota.current`/`executors.list`/`tasks.events`/
-`tasks.events_stream`/`audit.search`/`task_stream`. So the earlier "no events
-endpoint", "no `quota`/`exec`/`audit`", and "polling `watch`" limitations are
-lifted: `watch` now streams the task SSE, `events --follow` streams the event
-log, and `dlw context list/current/use/set` manage `~/.dlw/config.yaml`.
+is the `show` view), `exec list`, `events [--follow]`, `audit`, `login`
+(device-code flow — see §3.1 for deferrals), `logout` — and the SDK methods
+`me`/`quota.current`/`executors.list`/`tasks.events`/`tasks.events_stream`/
+`audit.search`/`task_stream`/`device_authorize`/`device_token`/`poll_for_token`.
+So the earlier "no events endpoint", "no `quota`/`exec`/`audit`", and "polling
+`watch`" limitations are lifted: `watch` now streams the task SSE, `events
+--follow` streams the event log, `dlw context list/current/use/set` manage
+`~/.dlw/config.yaml`, and `dlw login`/`dlw logout` handle device-code auth.
 
 Still deferred:
 
 1. **Client-side `list` filtering** — server-side `?status=&limit=&cursor=`
    is a future additive controller change.
-2. **OIDC `login`/`logout`** — the controller's OIDC is a browser
-   authorization-code redirect flow; a CLI needs a **device-code flow**
-   endpoint (`POST /auth/device`) that does not exist. `whoami`/`context set`
-   (persisting a token you already have) work today; `login` does not.
+2. **Full browser approval page** — `dlw login` (device-code flow, RFC 8628)
+   is now implemented; the browser approval UI page (`GET /device`) is a
+   follow-on. See §3.1 for honest deferrals. `whoami`/`context set`/`logout`
+   all work. No browser-authcode (OIDC redirect) mode; no refresh token.
 3. **Arbitrary config keys (`config get/set`, defaults) + secure token-at-rest**
    — `dlw context` manages server/token contexts (plaintext, chmod-600
    best-effort; no-op on Windows). General config-key get/set and encrypted token

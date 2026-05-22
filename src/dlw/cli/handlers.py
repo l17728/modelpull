@@ -5,6 +5,9 @@ import argparse
 import sys
 from typing import Callable
 
+from dlw.sdk._config import clear_token, load_config, resolve_server, set_context
+from dlw.sdk.device import device_authorize, poll_for_token
+
 
 def _task_dict(t) -> dict:
     return {"id": t.id, "repo_id": t.repo_id, "revision": t.revision,
@@ -24,6 +27,45 @@ def _follow_events(client, args) -> int:
             if line.startswith("data: "):
                 sys.stdout.write(line[len("data: "):] + "\n")
                 sys.stdout.flush()
+    return 0
+
+
+def _login_cmd(args) -> int:
+    cfg = load_config(args.config)
+    ctx = args.context or cfg.get("current_context") or "default"
+    if args.token:
+        set_context(ctx, server=args.server, token=args.token,
+                    make_current=True, config_path=args.config)
+        sys.stdout.write(f"Token stored in context '{ctx}'\n")
+        return 0
+    # Device-code flow.
+    server = resolve_server(server=args.server, config_path=args.config)
+    r = device_authorize(server)
+    sys.stdout.write(f"Visit: {r['verification_uri']}\nEnter code: {r['user_code']}\n")
+    sys.stdout.flush()
+    if not getattr(args, "no_browser", False):
+        try:
+            import webbrowser
+            webbrowser.open(r["verification_uri_complete"])
+        except Exception:
+            pass
+    import time
+    deadline = time.monotonic() + (args.timeout or r["expires_in"])
+    tok = poll_for_token(server, r["device_code"],
+                         interval=r["interval"], deadline=deadline)
+    set_context(ctx, server=server, token=tok["access_token"],
+                make_current=True, config_path=args.config)
+    sys.stdout.write(
+        f"Logged in (context '{ctx}', tenant {tok.get('tenant_id')}, "
+        f"role {tok.get('role')})\n")
+    return 0
+
+
+def _logout_cmd(args) -> int:
+    cfg = load_config(args.config)
+    ctx = args.context or cfg.get("current_context") or "default"
+    clear_token(ctx, config_path=args.config)
+    sys.stdout.write(f"Logged out of context '{ctx}'\n")
     return 0
 
 
@@ -115,6 +157,10 @@ def _watch_sse(client, args, emit) -> int:
 
 def run(args: argparse.Namespace, make_client: Callable,
         emit: Callable, emit_obj: Callable) -> int:
+    if args.cmd == "login":
+        return _login_cmd(args)
+    if args.cmd == "logout":
+        return _logout_cmd(args)
     if args.cmd == "context":
         return _context_cmd(args)
     client = make_client(args)
