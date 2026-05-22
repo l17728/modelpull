@@ -107,6 +107,66 @@ def clear_token(name: str, *, config_path: str | None = None) -> Path:
     return save_config(cfg, config_path=config_path)
 
 
+def _split(key: str) -> list[str]:
+    return [p for p in key.split(".") if p]
+
+
+def get_config_value(key: str, *, config_path: str | None = None):
+    cur = _load_config(config_path) or {}
+    for p in _split(key):
+        if not isinstance(cur, dict) or p not in cur:
+            return None
+        cur = cur[p]
+    return cur
+
+
+def set_config_value(key: str, value, *, config_path: str | None = None) -> Path:
+    cfg = _load_config(config_path) or {}
+    parts = _split(key)
+    cur = cfg
+    for p in parts[:-1]:
+        nxt = cur.get(p)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[p] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+    return save_config(cfg, config_path=config_path)
+
+
+def unset_config_value(key: str, *, config_path: str | None = None) -> bool:
+    cfg = _load_config(config_path) or {}
+    parts = _split(key)
+    cur = cfg
+    for p in parts[:-1]:
+        cur = cur.get(p) if isinstance(cur, dict) else None
+        if not isinstance(cur, dict):
+            return False
+    existed = isinstance(cur, dict) and parts[-1] in cur
+    if existed:
+        del cur[parts[-1]]
+        save_config(cfg, config_path=config_path)
+    return existed
+
+
+def flatten_config(cfg: dict) -> dict:
+    out: dict = {}
+
+    def _walk(prefix: str, node) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(f"{prefix}.{k}" if prefix else k, v)
+        else:
+            out[prefix] = node
+
+    _walk("", cfg)
+    return out
+
+
+def get_default(name: str, *, config_path: str | None = None):
+    return get_config_value(f"defaults.{name}", config_path=config_path)
+
+
 def resolve(*, server: str | None, token: str | None,
             config_path: str | None = None) -> Resolved:
     cfg = _load_config(config_path)
