@@ -165,13 +165,52 @@ async def reclaim_physical_orphans(
     return {"candidates": len(rows), "deleted": deleted}
 
 
+async def resolve_accessible_storage_ids(
+    session: AsyncSession, base_paths,
+) -> set[int]:
+    """Return local storage_ids whose decrypted base_path is in `base_paths`.
+
+    NOTE: base_path MUST be unique per local backend (operator constraint);
+    a shared string resolves to MULTIPLE ids (tenant scope below bounds it).
+    """
+    if not base_paths:
+        return set()
+    from dlw.db.models.storage import StorageBackend
+    from dlw.services.storage_client import storage_config_from_backend
+
+    out: set[int] = set()
+    for b in (await session.execute(
+            select(StorageBackend).where(StorageBackend.backend_type == "local"))
+              ).scalars().all():
+        bp = storage_config_from_backend(b).base_path
+        if bp and bp in base_paths:
+            out.add(b.id)
+    return out
+
+
 async def confirm_local_reclaim(
-    session: AsyncSession, executor_id: str, key_ids: list[int], *, audit,
+    session: AsyncSession,
+    executor_id: str,
+    key_ids: list[int],
+    *,
+    audit,
+    accessible_storage_ids: frozenset[int] = frozenset(),
+    tenant_id: int | None = None,
 ) -> int:
+    """Delete ledger rows authorized for executor_id.
+
+    Authorization: executor_id == row.executor_id OR row.storage_id in
+    accessible_storage_ids (FU4 sibling-confirm widening).
+    Optional tenant_id scope (control 4).
+    """
+    auth = StoragePhysicalKey.executor_id == executor_id
+    if accessible_storage_ids:
+        auth = auth | StoragePhysicalKey.storage_id.in_(accessible_storage_ids)
+    where = [StoragePhysicalKey.id.in_(key_ids), auth]
+    if tenant_id is not None:
+        where.append(StoragePhysicalKey.tenant_id == tenant_id)
     rows = (await session.execute(
-        select(StoragePhysicalKey).where(
-            StoragePhysicalKey.id.in_(key_ids),
-            StoragePhysicalKey.executor_id == executor_id))).scalars().all()
+        select(StoragePhysicalKey).where(*where))).scalars().all()
     for r in rows:
         await audit(action="storage.gc.physical.local", id=r.id,
                     tenant_id=r.tenant_id, storage_key=r.storage_key, size=r.size)
@@ -180,12 +219,23 @@ async def confirm_local_reclaim(
 
 
 async def dispatch_local_reclaim(
-    session: AsyncSession, executor_id: str, *, grace_seconds: int, limit: int,
+    session: AsyncSession,
+    executor_id: str,
+    *,
+    grace_seconds: int,
+    limit: int,
+    accessible_storage_ids: frozenset[int] = frozenset(),
+    tenant_id: int | None = None,
 ) -> list:
-    """Local-fs orphan keys written by this executor, past grace. Returns
+    """Local-fs orphan keys authorized for this executor, past grace. Returns
     list[ReclaimItem] — base_path resolved from the backend config (a backend
     whose config lacks base_path is SKIPPED, not dispatched — local backends
-    MUST carry base_path in config_encrypted)."""
+    MUST carry base_path in config_encrypted).
+
+    Authorization: executor_id == row.executor_id OR row.storage_id in
+    accessible_storage_ids (FU4 sibling-dispatch widening).
+    Optional tenant_id scope (control 4).
+    """
     from datetime import timedelta
 
     from dlw.db.models.storage import StorageBackend
@@ -197,12 +247,17 @@ async def dispatch_local_reclaim(
         StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
         StorageObject.storage_id == StoragePhysicalKey.storage_id,
         StorageObject.sha256 == StoragePhysicalKey.sha256)
+    auth = StoragePhysicalKey.executor_id == executor_id
+    if accessible_storage_ids:
+        auth = auth | StoragePhysicalKey.storage_id.in_(accessible_storage_ids)
+    where = [auth, StoragePhysicalKey.created_at < cutoff, ~live,
+             StorageBackend.backend_type == "local"]
+    if tenant_id is not None:
+        where.append(StoragePhysicalKey.tenant_id == tenant_id)
     rows = (await session.execute(
         select(StoragePhysicalKey)
         .join(StorageBackend, StorageBackend.id == StoragePhysicalKey.storage_id)
-        .where(StoragePhysicalKey.executor_id == executor_id,
-               StoragePhysicalKey.created_at < cutoff, ~live,
-               StorageBackend.backend_type == "local")
+        .where(*where)
         .order_by(StoragePhysicalKey.created_at)
         .limit(max(1, limit))
         .with_for_update(skip_locked=True, of=StoragePhysicalKey))).scalars().all()
@@ -216,7 +271,7 @@ async def dispatch_local_reclaim(
         base = cache[r.storage_id]
         if base:
             out.append(ReclaimItem(id=r.id, base_path=base,
-                                   storage_key=r.storage_key))
+                                   storage_key=r.storage_key, size=r.size))
     return out
 
 

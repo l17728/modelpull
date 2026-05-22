@@ -134,17 +134,45 @@ silently.
 
 **Scope and deferrals.** This path is correct for the documented
 single-executor-local deployment model, where a given local key was written
-by exactly one executor on exactly one host. Two cases are deferred:
+by exactly one executor on exactly one host.
 
-- *NFS-shared backend, writer offline.* If the executor that wrote a file is
-  currently down but another executor shares the same NFS mount, the key
-  waits until the writer comes back online (or remains un-reclaimed). A
-  base-path-capability advertisement letting any mount-holder delete is a
-  named follow-on.
-- *Keys recorded before FU3 shipped.* Physical keys that were written before
-  the `executor_id` column was added carry `NULL` for the writer and are
-  never dispatched. A back-fill reconciliation is a named follow-on.
+### NFS-shared backends (FU4)
 
-Both deferred cases are reported by the periodic un-reclaimable count logged
-by the heartbeat handler so operators can observe accruing bytes rather than
-silent growth.
+For an NFS-shared local backend whose writing executor is offline, reclamation
+is no longer blocked: **any healthy executor that advertises the backend's
+`base_path` can reclaim its keys**, not just the writer. An executor advertises
+its accessible base paths by setting `DLW_EXECUTOR_LOCAL_BASE_PATHS` (a JSON
+list, e.g. `["/srv/dlw"]`); at each heartbeat it sends only the paths that
+actually exist as directories on its host (`is_dir`-verified), and the
+controller records them. Dispatch and confirmation both authorize a key for an
+executor when it is the writer **or** the key's backend is among the executor's
+advertised paths.
+
+The safety envelope (this is destructive — it deletes bytes on executor disks):
+
+- The executor advertises only `is_dir`-verified paths — it claims access only
+  to mounts it actually has.
+- Before deleting, the executor verifies the file's **size** matches the ledger;
+  a present file of the wrong size is refused (and not confirmed), guarding the
+  same-named-but-different-mount misconfiguration.
+- The path-traversal guard still bounds every delete strictly under `base_path`.
+- Dispatch and confirmation are tenant-scoped (a no-op today, since executors are
+  system-scoped, but it future-proofs against tenant-pinned executors).
+- **Hard operator constraint:** each local backend's `base_path` must be unique
+  — two backends sharing a `base_path` string would be conflated.
+
+Honest note: local-filesystem is a minor backend (written only by incremental
+inherit copies today), so this NFS-shared, writer-offline path is a narrow case
+shipped for parity. A residual: if an executor's advertised set shrinks between
+the dispatch and confirm heartbeats, a row may linger one extra cycle before any
+remaining mount-holder re-clears it (self-healing; surfaced by the gauge below).
+
+### Still deferred
+
+- *Keys recorded before FU3 shipped.* Physical keys written before the
+  `executor_id` column was added carry `NULL` for the writer; they are dispatched
+  only if a live executor advertises their backend's base path (FU4 helps some),
+  otherwise a back-fill reconciliation is a named follow-on.
+
+Un-reclaimable keys are reported by the periodic count logged by the heartbeat
+handler so operators can observe accruing bytes rather than silent growth.

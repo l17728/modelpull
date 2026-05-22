@@ -59,6 +59,12 @@ class ExecutorSettings(BaseSettings):
         description="Local staging dir for chunk-level downloads. Configure to a writable PV in prod.",
     )
 
+    # Phase 2 FU4 — NFS shared-storage reclaim
+    local_base_paths: list[str] = Field(
+        default_factory=list,
+        description="Local/NFS base_paths this executor can access for reclaim (JSON list env).",
+    )
+
     # Phase 2 W3a — mTLS + JWT auth
     enrollment_token: str = Field(
         default="",
