@@ -135,3 +135,30 @@ async def test_per_tick_cap(session):
         make_client=lambda sid: (fake, "bkt", "s3"), audit=lambda **k: None,
         max_objects_per_tick=2)
     assert res["candidates"] == 2   # capped
+
+
+async def test_priority_tenant_reclaimed_first_under_cap(session):
+    from sqlalchemy import select
+
+    from dlw.db.models.storage_object import StoragePhysicalKey
+    from dlw.db.models.tenant import Tenant
+    fake = _FakeS3()
+    session.add(Tenant(id=42, slug="t42p", display_name="T42P"))
+    await session.flush()
+    session.add(StoragePhysicalKey(tenant_id=42, storage_id=1, sha256="p" * 64,
+                                   storage_key="repo/prio/new", size=1,
+                                   created_at=_old(1)))    # newer, priority
+    session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="q" * 64,
+                                   storage_key="repo/other/old", size=1,
+                                   created_at=_old(5)))    # older, non-priority
+    await session.commit()
+    res = await reclaim_physical_orphans(
+        session, grace_seconds=3600, delete_enabled=True,
+        make_client=lambda sid: (fake, "bkt", "s3"), audit=lambda **k: None,
+        max_objects_per_tick=1, priority_tenant_ids=frozenset({42}))
+    await session.commit()
+    assert ("bkt", "repo/prio/new") in fake.deleted
+    assert res["deleted"] == 1
+    remaining = (await session.execute(
+        select(StoragePhysicalKey.storage_key))).scalars().all()
+    assert "repo/prio/new" not in remaining and "repo/other/old" in remaining

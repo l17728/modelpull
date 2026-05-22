@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     gc_delete_physical_bytes: bool = Field(default=False)
     gc_archive_after_days: int = Field(default=90, ge=0)
     gc_max_objects_per_tick: int = Field(default=1000, ge=1, le=100000)
+    gc_quota_pressure_threshold: float = Field(default=0.9, gt=0.0, le=1.0)
 
     # UI-SP4a — AI Copilot
     ai_backend: str = Field(default="stub")   # stub | opencode | claude_code | openai_compat

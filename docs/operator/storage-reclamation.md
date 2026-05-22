@@ -75,11 +75,32 @@ retried on the next tick (re-deleting an already-absent key is a no-op).
 ## What is intentionally not reclaimed
 
 Content with a live reference (refcount greater than zero) is never
-touched; only fully dereferenced content is eligible. The quota-trigger
-LRU ordering described in the platform design (reclaim a tenant's oldest
-dereferenced objects first once it crosses ninety percent of quota) is a
-deferred optimization — because the time-trigger already reclaims every
-eligible object, the ordering only matters under the per-tick cap, and the
-loop currently reclaims oldest-first. Cold-storage tiering and reclamation
-of physical objects written before this feature shipped (which have no
-ledger row) are also follow-ons.
+touched; only fully dereferenced content is eligible.
+
+## Quota-pressure prioritization
+
+The reclaim loop orders candidates so that tenants at or over a storage
+pressure threshold (`gc_quota_pressure_threshold`, default 0.9 — i.e. ≥90%
+of `quota_storage_gb`) have their dereferenced keys reclaimed first; within
+a group, oldest-first by ledger `created_at`. Be aware of what this does and
+does not do:
+
+- It only changes behavior **when the per-tick cap binds** — a reclaim
+  backlog larger than `gc_max_objects_per_tick`. In normal operation (backlog
+  ≤ cap) every eligible key is reclaimed each tick regardless of order, so the
+  prioritization has no observable effect.
+- It prioritizes freeing a pressured tenant's already-**orphaned disk bytes**;
+  it does NOT lower that tenant's `storage_gb_used`, because a key is only
+  eligible once its content's `storage_objects` row is already gone (those
+  bytes are no longer counted in the quota). It is a disk-relief priority
+  heuristic, not a quota-number reducer.
+- The platform design's eviction of *tracked* refcount-0 `storage_objects`
+  rows remains **time-only** (the row-level GC); this prioritization does not
+  make that quota-aware.
+- The pressure check uses integer-GiB `storage_gb_used` vs `quota_storage_gb`,
+  so it is coarse and effectively inert below roughly 10-GiB quotas.
+- `created_at` (ledger-write time) is the available proxy for the design's
+  `last_referenced_at`; a true per-key last-access column is a follow-on.
+
+Cold-storage tiering and reclamation of physical objects written before the
+ledger shipped (which have no ledger row) are also follow-ons.
