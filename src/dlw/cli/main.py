@@ -76,10 +76,24 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("delete", help="delete a terminal task").add_argument(
         "task_id")
 
-    w = sub.add_parser("watch", help="poll a task until terminal")
+    w = sub.add_parser("watch", help="stream a task until terminal")
     w.add_argument("task_id")
-    w.add_argument("--interval", type=float, default=5.0)
+    w.add_argument("--interval", type=float, default=5.0,
+                   help="(deprecated, ignored — server drives the 1 Hz stream tick)")
     w.add_argument("--timeout", type=float, default=None)
+
+    ctx = sub.add_parser("context", help="manage CLI contexts")
+    ctx_sub = ctx.add_subparsers(dest="context_cmd")
+    ctx_sub.add_parser("list", help="list contexts (marks current)")
+    ctx_sub.add_parser("current", help="show the current context")
+    ctx_use = ctx_sub.add_parser("use", help="switch current context")
+    ctx_use.add_argument("name")
+    ctx_set = ctx_sub.add_parser("set", help="create/update a context")
+    ctx_set.add_argument("name")
+    ctx_set.add_argument("--server", default=None)
+    ctx_set.add_argument("--token", default=None)
+    ctx_set.add_argument("--no-current", action="store_true",
+                         help="do not switch current_context to this one")
 
     sub.add_parser("whoami", help="show the current principal")
     sub.add_parser("quota", help="show current tenant quota usage")

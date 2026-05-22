@@ -49,17 +49,55 @@ def test_delete_non_terminal_exit6(capsys):
     assert cli.main(["delete", tid]) == 6
 
 
-def test_watch_terminal_exit0(capsys, monkeypatch):
+def test_watch_terminal_exit0(capsys):
     tid = _submit(capsys, "o/ww", "4" * 40)
-    # MockTransport keeps a task "pending"; stub TasksAPI.get to flip the
-    # status to terminal so watch's poll loop exits. `real` is captured
-    # BEFORE monkeypatch so it's the unpatched method.
-    from dlw.sdk.client import TasksAPI
-    real = TasksAPI.get
+    # MockTransport /tasks/{id}/stream returns a terminal "succeeded" snapshot.
+    assert cli.main(["watch", tid]) == 0
 
-    def fake_get(self, task_id):
-        t = real(self, task_id)        # real HTTP via MockTransport
-        t.status = "cancelled"
-        return t
-    monkeypatch.setattr(TasksAPI, "get", fake_get)
-    assert cli.main(["watch", tid, "--interval", "0"]) == 0
+
+def test_watch_failed_exit1():
+    """Unit-test _watch_sse with a fake client whose task_stream yields failed."""
+    import argparse
+    import contextlib
+
+    from dlw.cli.handlers import _watch_sse
+
+    class _FakeStreamCM:
+        def __init__(self):
+            self.status_code = 200
+
+        def iter_lines(self):
+            import json
+            detail = {"id": "fail-task", "repo_id": "o/r",
+                      "revision": "a" * 40, "status": "failed",
+                      "priority": 1, "created_at": None,
+                      "completed_at": None, "error_message": None,
+                      "subtasks": []}
+            yield ":open"
+            yield ""
+            yield f"data: {json.dumps(detail)}"
+            yield ""
+
+        def read(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    class _FakeTasks:
+        def task_stream(self, task_id, *, timeout=None):
+            return _FakeStreamCM()
+
+        def get(self, task_id):
+            raise AssertionError("should not be called")
+
+    class _FakeClient:
+        tasks = _FakeTasks()
+
+    ns = argparse.Namespace(task_id="fail-task", timeout=None, interval=5.0,
+                            output="table", quiet=False)
+    result = _watch_sse(_FakeClient(), ns, lambda obj, args: None)
+    assert result == 1

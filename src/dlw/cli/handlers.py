@@ -27,8 +27,96 @@ def _follow_events(client, args) -> int:
     return 0
 
 
+def _context_cmd(args) -> int:
+    from dlw.sdk import _config as cfgmod
+    cfgpath = args.config
+    sub = getattr(args, "context_cmd", None)
+    if sub == "set":
+        p = cfgmod.set_context(args.name, server=args.server, token=args.token,
+                               make_current=not args.no_current,
+                               config_path=cfgpath)
+        if not args.quiet:
+            sys.stdout.write(f"wrote context '{args.name}' to {p}\n")
+        return 0
+    if sub == "use":
+        cfgmod.use_context(args.name, config_path=cfgpath)   # UsageError→main()→exit 2
+        if not args.quiet:
+            sys.stdout.write(f"switched to context '{args.name}'\n")
+        return 0
+    cfg = cfgmod.load_config(cfgpath)
+    cur = cfg.get("current_context")
+    if sub == "list":
+        sys.stdout.write(f"# config: {cfgmod._resolve_write_path(cfgpath)}\n")
+        ctxs = cfg.get("contexts") or {}
+        if not ctxs:
+            sys.stdout.write("(no contexts)\n")
+        for name, c in ctxs.items():
+            tok = ((cfg.get("auth") or {}).get(name) or {}).get("access_token")
+            mark = " (current)" if name == cur else ""
+            sys.stdout.write(f"{name}{mark}: server={c.get('server')} "
+                             f"token={'set' if tok else 'unset'}\n")
+        return 0
+    if sub == "current":
+        if not cur:
+            sys.stdout.write("(no current context)\n")
+            return 0
+        c = (cfg.get("contexts") or {}).get(cur) or {}
+        tok = ((cfg.get("auth") or {}).get(cur) or {}).get("access_token")
+        sys.stdout.write(f"{cur}: server={c.get('server')} "
+                         f"token={'set' if tok else 'unset'}\n")
+        return 0
+    sys.stderr.write("usage: dlw context [list|current|use NAME|set NAME ...]\n")
+    return 2
+
+
+def _watch_sse(client, args, emit) -> int:
+    import json
+    import time
+
+    import httpx
+
+    from dlw.sdk._http import raise_for_status
+    from dlw.sdk.errors import Timeout
+
+    # --interval is server-driven now: warn if non-default.
+    if getattr(args, "interval", 5.0) != 5.0:
+        sys.stderr.write(
+            "warning: --interval is deprecated and ignored "
+            "(the server drives the 1 Hz stream tick)\n")
+    deadline = (time.monotonic() + args.timeout) if args.timeout else None
+    last = None
+    terminal = {"succeeded", "failed", "cancelled"}
+    try:
+        with client.tasks.task_stream(args.task_id, timeout=args.timeout) as r:
+            if r.status_code != 200:
+                r.read()
+                raise_for_status(r)        # 404→NotFound→exit 3, etc.
+            for line in r.iter_lines():
+                if deadline and time.monotonic() > deadline:
+                    raise Timeout("watch timed out")
+                if not line.startswith("data: "):
+                    continue
+                detail = json.loads(line[len("data: "):])
+                last = detail
+                subs = detail.get("subtasks") or []
+                done = sum(1 for s in subs if s.get("status") == "succeeded")
+                sys.stdout.write(f"{detail.get('status')} {done}/{len(subs)}\n")
+                sys.stdout.flush()
+                if detail.get("status") in terminal:
+                    break
+    except httpx.TimeoutException as exc:        # stalled stream → exit 9
+        raise Timeout("watch stream timed out") from exc
+    # Normalize the emit shape: fall back to GET if no terminal snapshot received.
+    if last is None or last.get("status") not in terminal:
+        last = client.tasks.get(args.task_id).raw   # safety net
+    emit(last, args)
+    return 1 if last.get("status") == "failed" else 0
+
+
 def run(args: argparse.Namespace, make_client: Callable,
         emit: Callable, emit_obj: Callable) -> int:
+    if args.cmd == "context":
+        return _context_cmd(args)
     client = make_client(args)
     try:
         if args.cmd == "submit":
@@ -64,13 +152,7 @@ def run(args: argparse.Namespace, make_client: Callable,
                 sys.stdout.write(f"deleted {args.task_id}\n")
             return 0
         if args.cmd == "watch":
-            t = client.tasks.get(args.task_id)
-            t = t.wait(timeout=args.timeout, poll_interval=args.interval,
-                       on_progress=lambda x: sys.stdout.write(
-                           f"{x.status} "
-                           f"{x.files_done()[0]}/{x.files_done()[1]}\n"))
-            emit(_task_dict(t), args)
-            return 1 if t.status == "failed" else 0
+            return _watch_sse(client, args, emit)
         if args.cmd == "whoami":
             emit_obj(client.me(), args)
             return 0

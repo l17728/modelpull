@@ -40,6 +40,55 @@ def _load_config(config_path: str | None) -> dict:
     return {}
 
 
+def load_config(config_path: str | None = None) -> dict:
+    """Public read alias of _load_config (so the CLI doesn't use the private name)."""
+    return _load_config(config_path)
+
+
+def _resolve_write_path(config_path: str | None) -> Path:
+    if config_path:
+        return Path(config_path)
+    env = os.environ.get("DLW_CONFIG")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "dlw" / "config.yaml"
+    return Path.home() / ".dlw" / "config.yaml"
+
+
+def save_config(cfg: dict, *, config_path: str | None = None) -> Path:
+    p = _resolve_write_path(config_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.safe_dump(cfg, sort_keys=True), encoding="utf-8")
+    try:
+        p.chmod(0o600)        # best-effort; no-op on Windows
+    except OSError:
+        pass
+    return p
+
+
+def set_context(name: str, *, server: str | None = None, token: str | None = None,
+                make_current: bool = True, config_path: str | None = None) -> Path:
+    cfg = _load_config(config_path) or {}
+    cfg.setdefault("contexts", {}).setdefault(name, {})
+    if server is not None:
+        cfg["contexts"][name]["server"] = server.rstrip("/")
+    if token is not None:
+        cfg.setdefault("auth", {}).setdefault(name, {})["access_token"] = token
+    if make_current:
+        cfg["current_context"] = name
+    return save_config(cfg, config_path=config_path)
+
+
+def use_context(name: str, *, config_path: str | None = None) -> Path:
+    cfg = _load_config(config_path) or {}
+    if name not in (cfg.get("contexts") or {}):
+        raise UsageError(f"no such context: {name}")
+    cfg["current_context"] = name
+    return save_config(cfg, config_path=config_path)
+
+
 def resolve(*, server: str | None, token: str | None,
             config_path: str | None = None) -> Resolved:
     cfg = _load_config(config_path)

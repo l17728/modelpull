@@ -121,6 +121,17 @@ class TasksAPI:
         return self._h.stream(
             "GET", f"/api/v1/tasks/{task_id}/events/stream", params=params)
 
+    def task_stream(self, task_id: str, *, max_ticks: int | None = None,
+                    timeout=None):
+        """SSE seam for `dlw watch`: streams TaskDetail from /tasks/{id}/stream
+        (self-terminates on terminal status). `timeout` (httpx read-timeout)
+        makes a STALLED stream raise rather than hang."""
+        params = {"max_ticks": max_ticks} if max_ticks is not None else None
+        kw = {"params": params}
+        if timeout is not None:
+            kw["timeout"] = timeout
+        return self._h.stream("GET", f"/api/v1/tasks/{task_id}/stream", **kw)
+
 
 class Client:
     def __init__(self, server: str | None = None, token: str | None = None,
