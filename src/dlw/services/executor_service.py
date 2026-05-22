@@ -68,7 +68,7 @@ async def record_heartbeat(
     retains responsibility for the non-status fields posted in the heartbeat
     body (health_score, parts_dir_bytes).
     """
-    from dlw.services.state_machine import transition_executor   # local import: avoids cycle
+    from dlw.services.state_machine import transition_executor  # local import: avoids cycle
 
     ex = await session.get(Executor, executor_id)
     if ex is None:
@@ -77,6 +77,9 @@ async def record_heartbeat(
     ex.parts_dir_bytes = body.parts_dir_bytes
     if body.disk_free_gb is not None:
         ex.disk_free_gb = body.disk_free_gb
+    if body.accessible_base_paths is not None:
+        ex.capabilities = {**(ex.capabilities or {}),
+                           "base_paths": list(body.accessible_base_paths)}
     await transition_executor(
         session, ex,
         event="heartbeat_ok",

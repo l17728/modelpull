@@ -469,3 +469,59 @@ async def test_heartbeat_dispatch_disabled_returns_empty_reclaim(
     assert body.get("reclaim") == []
 
     get_settings.cache_clear()
+
+
+# ── FU4: accessible_base_paths stored on capabilities ─────────────────────────
+
+@pytest.mark.slow
+async def test_heartbeat_stores_accessible_base_paths(
+    client: AsyncClient, engine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat with accessible_base_paths=["/srv/dlw"] stores it on
+    ex.capabilities["base_paths"]; a subsequent heartbeat omitting the field
+    leaves capabilities unchanged (None = no update)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from dlw.db.models.executor import Executor
+
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="ex-basepaths-1", host_id="host-basepaths",
+    )
+    ex_id = reg["executor_id"]
+
+    # Heartbeat WITH accessible_base_paths
+    hb_body = json.dumps({
+        "health_score": 100, "parts_dir_bytes": 0,
+        "accessible_base_paths": ["/srv/dlw"],
+    }).encode()
+    r = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body,
+        headers=signed_heartbeat_headers(reg, hb_body),
+    )
+    assert r.status_code == 200, r.text
+
+    # Verify stored in capabilities
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        ex = await s.get(Executor, ex_id)
+        assert ex is not None
+        assert ex.capabilities.get("base_paths") == ["/srv/dlw"]
+
+    # Heartbeat WITHOUT accessible_base_paths → capabilities unchanged
+    hb_body2 = json.dumps({
+        "health_score": 95, "parts_dir_bytes": 0,
+    }).encode()
+    r2 = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body2,
+        headers=signed_heartbeat_headers(reg, hb_body2),
+    )
+    assert r2.status_code == 200, r2.text
+
+    async with factory() as s:
+        ex = await s.get(Executor, ex_id)
+        assert ex is not None
+        # Still the same base_paths from the first heartbeat
+        assert ex.capabilities.get("base_paths") == ["/srv/dlw"]

@@ -44,7 +44,11 @@ from dlw.schemas.subtask import ChunkAssignment, SubTaskRead
 from dlw.services.audit import write_audit
 from dlw.services.executor_service import record_heartbeat, upsert_executor_with_cert
 from dlw.services.scheduler import claim_one_subtask
-from dlw.services.storage_objects import confirm_local_reclaim, dispatch_local_reclaim
+from dlw.services.storage_objects import (
+    confirm_local_reclaim,
+    dispatch_local_reclaim,
+    resolve_accessible_storage_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +160,15 @@ async def post_heartbeat(
             payload={"storage_key": storage_key, "size": size},
         )
 
+    # FU4: resolve accessible storage_ids from advertised base_paths (computed once,
+    # passed to both confirm and dispatch so they widen in lockstep — §0 control 1).
+    paths = frozenset((ex.capabilities or {}).get("base_paths") or [])
+    acc_ids = frozenset(await resolve_accessible_storage_ids(session, paths))
+
     if body.reclaimed_key_ids:
         await confirm_local_reclaim(
-            session, executor.id, body.reclaimed_key_ids, audit=_audit)
+            session, executor.id, body.reclaimed_key_ids, audit=_audit,
+            accessible_storage_ids=acc_ids, tenant_id=executor.tenant_id)
 
     reclaim: list[ReclaimItem] = []
     if s.gc_delete_physical_bytes:
@@ -166,6 +176,7 @@ async def post_heartbeat(
             session, executor.id,
             grace_seconds=max(s.gc_grace_seconds, s.gc_archive_after_days * 86400),
             limit=s.gc_max_objects_per_tick,
+            accessible_storage_ids=acc_ids, tenant_id=executor.tenant_id,
         )
         # Observability: count local orphan keys not dispatchable to any executor.
         try:

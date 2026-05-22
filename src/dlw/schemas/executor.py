@@ -47,12 +47,15 @@ class ExecutorHeartbeat(BaseModel):
     disk_free_gb: int | None = Field(default=None, ge=0)
     # FU3: ledger row ids the executor deleted (or found absent) since last beat.
     reclaimed_key_ids: list[int] = Field(default_factory=list)
+    # FU4: verified local/NFS base_paths this executor can access. None = no update.
+    accessible_base_paths: list[str] | None = None
 
 
 class ReclaimItem(BaseModel):
     id: int
     base_path: str
     storage_key: str
+    size: int
 
 
 class ExecutorRead(BaseModel):
