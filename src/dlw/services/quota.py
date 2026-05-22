@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dlw.db.models.storage_object import StorageObject
 from dlw.db.models.task import DownloadTask
 from dlw.db.models.tenant import Tenant
 from dlw.db.models.usage import QuotaSnapshot, UsageRecord
@@ -54,6 +55,8 @@ async def check_quota_for_new_task(
             DownloadTask.status.not_in(_TERMINAL))) or 0
     if tenant.quota_concurrent and live_concurrent >= tenant.quota_concurrent:
         raise QuotaExceeded("concurrent_tasks")
+    if tenant.quota_storage_gb and snap.storage_gb_used >= tenant.quota_storage_gb:
+        raise QuotaExceeded("storage")
 
 
 async def record_usage(
@@ -85,6 +88,10 @@ async def aggregate_snapshots(session: AsyncSession) -> None:
         if snap is None:
             snap = QuotaSnapshot(tenant_id=tid)
             session.add(snap)
+        storage_bytes = await session.scalar(
+            select(func.coalesce(func.sum(StorageObject.size), 0)).where(
+                StorageObject.tenant_id == tid)) or 0
         snap.bytes_used_month = int(bytes_used)
         snap.concurrent_tasks = int(concurrent)
+        snap.storage_gb_used = int(storage_bytes) // (1024 ** 3)
         snap.last_recomputed_at = datetime.now(UTC)
