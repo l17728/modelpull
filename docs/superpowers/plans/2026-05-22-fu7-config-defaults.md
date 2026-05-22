@@ -166,11 +166,24 @@ git add src/dlw/sdk/_config.py src/dlw/cli/main.py src/dlw/cli/handlers.py tests
 ### Task 3: defaults resolution + `-o` resolution + docs
 **Files:** `src/dlw/cli/main.py`, `src/dlw/cli/handlers.py`, `tests/cli/test_cli_config.py`, `docs/operator/cli-sdk.md`.
 
-- [ ] **Step 1 (failing tests):** extend `tests/cli/test_cli_config.py`, reusing the mock-transport harness from `tests/cli/test_cli_submit_show.py` (read it: it sets `monkeypatch.setattr(cli, "_transport", <mock>)` + `monkeypatch.setenv("DLW_TOKEN", <tok>)`; the mock must capture the POSTed body for `/api/v1/tasks`). Tests:
-  - `test_submit_uses_default_storage`: `config set defaults.storage_id 7` (via cli.main with the same `-c` tmp), then `cli.main(["-c", tmp, "submit", "repo/x", "-r", "main"])` (NO `--storage`) → exit 0 and the captured POST body has `storage_id == 7`.
-  - `test_submit_flag_beats_default`: with `defaults.storage_id 7`, `submit repo/x -r main -s 9` → body `storage_id == 9`.
+- [ ] **Step 1 (failing tests):** extend `tests/cli/test_cli_config.py`. **CRITICAL (reviewer-flagged):** the SHARED mock (`tests/sdk/_mock.py`) does NOT echo/capture the submitted `storage_id` — its POST handler only reads `repo_id`/`revision` into a fresh task and discards the rest. So the submit-default tests CANNOT assert on the response or reuse `make_mock_transport()`. Instead, write a LOCAL body-capturing transport in this test file and install it via `monkeypatch.setattr(cli, "_transport", <it>)` + `monkeypatch.setenv("DLW_TOKEN", "x")`:
+```python
+import json as _json
+import httpx
+def _capture_transport(captured: list):
+    def _h(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST" and req.url.path == "/api/v1/tasks":
+            captured.append(_json.loads(req.content))
+            return httpx.Response(201, json={
+                "id": "t1", "repo_id": "repo/x", "revision": "main",
+                "status": "queued", "priority": 1})
+        return httpx.Response(200, json={"items": []})
+    return httpx.MockTransport(_h)
+```
+  - `test_submit_uses_default_storage`: `config set defaults.storage_id 7` (cli.main with the same `-c` tmp); install a capture transport; `cli.main(["-c", tmp, "submit", "repo/x", "-r", "main"])` (NO `--storage`) → exit 0 and `captured[0]["storage_id"] == 7`.
+  - `test_submit_flag_beats_default`: with `defaults.storage_id 7`, `submit repo/x -r main -s 9` → `captured[0]["storage_id"] == 9`.
   - `test_submit_missing_storage_errors`: no default, no `--storage` → exit 2.
-  - `test_output_default_json`: `config set defaults.output json`, then a mock-backed `list` → stdout is JSON (starts with `[` or `{`). Also a direct unit test of `_resolve_output`: flag `"table"` beats env `DLW_OUTPUT=json` beats config `json` beats `None→"table"`; an unknown value (`"yaml"`) → `"table"`.
+  - `test_output_default_json`: `monkeypatch.delenv("DLW_OUTPUT", raising=False)`; `config set defaults.output json`; install the capture transport (its GET returns `{"items": []}`); `cli.main(["-c", tmp, "list"])` → stdout is JSON (`[]`, starts with `[`). PLUS a direct unit test of `_resolve_output`: with `DLW_OUTPUT` deleted, `_resolve_output("table", cfg_with_output_json)` → `"table"` (flag wins); with flag None + `DLW_OUTPUT=json` → `"json"` (env beats config); flag None + env unset + config `"yaml"` → `"table"` (unknown→table); all None → `"table"`.
 - [ ] **Step 2: verify FAIL.**
 - [ ] **Step 3 (parser defaults→None):** in `cli/main.py`:
   - `-o/--output`: `choices=["table","json"], default=None` (was `"table"`).
@@ -198,10 +211,13 @@ In `main()`, right after `args = parser.parse_args(argv)` and the `if not args.c
                     "no storage_id: pass --storage or set defaults.storage_id "
                     "(dlw config set defaults.storage_id <N>)")
             priority = (args.priority if args.priority is not None
-                        else get_default("priority", config_path=args.config) or 1)
+                        else get_default("priority", config_path=args.config))
+            if priority is None:           # preserve a legit defaults.priority: 0
+                priority = 1
             strategy = (args.strategy if args.strategy is not None
-                        else get_default("source_strategy", config_path=args.config)
-                        or "auto_balance")
+                        else get_default("source_strategy", config_path=args.config))
+            if strategy is None:
+                strategy = "auto_balance"
 ```
 then pass `storage_id=storage_id, priority=priority, source_strategy=strategy` to `client.tasks.submit(...)` (replace the `args.*` references in that call).
 - [ ] **Step 6 (docs):** `docs/operator/cli-sdk.md`: add `dlw config get/set/unset/list` to the command listing (near `context`), document the `defaults:` YAML block + the four wired keys + precedence (flag > env > config > default) + that `set` parses values as YAML scalars + tokens are redacted on read. Update the deferral note at ~line 290: FU7 lifts the config-key get/set + defaults half (note `color`/`yaml`-output/`config edit` remain deferred); token-at-rest still deferred (FU8).
