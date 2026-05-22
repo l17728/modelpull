@@ -116,6 +116,14 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture(autouse=True)
+def _clear_dlw_config_key(monkeypatch: pytest.MonkeyPatch):
+    """Guard: clear DLW_CONFIG_KEY for every test so an ambient shell export
+    can't silently flip existing plaintext-asserting tests into encrypting.
+    FU8 crypto/config tests monkeypatch.setenv("DLW_CONFIG_KEY", "pw") explicitly."""
+    monkeypatch.delenv("DLW_CONFIG_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _patch_hf_global(monkeypatch: pytest.MonkeyPatch):
     """Global default: HF returns 2 files so POST /tasks succeeds in all test modules.
 

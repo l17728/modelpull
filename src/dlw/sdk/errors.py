@@ -38,6 +38,10 @@ class Timeout(DlwError):
     """wait/watch exceeded the deadline."""
 
 
+class TokenDecryptError(DlwError):
+    """Stored token could not be decrypted (wrong/absent DLW_CONFIG_KEY)."""
+
+
 class ApiError(DlwError):
     """Any other non-2xx."""
 
@@ -45,7 +49,7 @@ class ApiError(DlwError):
 # Most-specific first; first isinstance match wins.
 _ORDER: list[tuple[type, int]] = [
     (UsageError, 2), (NotFound, 3), (AuthError, 4), (QuotaExceeded, 5),
-    (Conflict, 6), (Timeout, 9), (ApiError, 1), (DlwError, 1),
+    (Conflict, 6), (Timeout, 9), (TokenDecryptError, 2), (ApiError, 1), (DlwError, 1),
 ]
 
 
