@@ -5,11 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dlw.db.models.storage_object import StorageObject, SubtaskObjectRef
+from dlw.db.models.storage_object import StorageObject, StoragePhysicalKey, SubtaskObjectRef
 
 
 async def _ref_exists(session: AsyncSession, subtask_id: uuid.UUID) -> bool:
@@ -83,6 +83,61 @@ async def deref_subtask(
     await session.execute(
         delete(SubtaskObjectRef)
         .where(SubtaskObjectRef.subtask_id == subtask_id))
+
+
+async def record_physical_key(
+    session: AsyncSession, *, tenant_id: int, storage_id: int,
+    sha256: str, storage_key: str, size: int,
+) -> None:
+    """Phase 4: durable ledger of a physical object key (download + inherit).
+    Idempotent on (tenant, storage, key). Caller commits."""
+    await session.execute(pg_insert(StoragePhysicalKey).values(
+        tenant_id=tenant_id, storage_id=storage_id, sha256=sha256,
+        storage_key=storage_key, size=size).on_conflict_do_nothing(
+            index_elements=["tenant_id", "storage_id", "storage_key"]))
+
+
+async def reclaim_physical_orphans(
+    session: AsyncSession, *, grace_seconds: int, delete_enabled: bool,
+    make_client, audit, max_objects_per_tick: int = 1000,
+) -> dict:
+    """Reclaim physical keys whose content sha has NO surviving storage_objects
+    row (fully dereferenced) and are past grace. S3 backends only; bytes deleted
+    only when delete_enabled. Deletes bytes BEFORE the ledger row (crash-safe).
+    Caps candidates at max_objects_per_tick (oldest first). Caller commits.
+    make_client(storage_id) -> (client, bucket, backend_type)."""
+    from datetime import timedelta
+
+    from dlw.services.storage_client import delete_object_silently
+    cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    live = exists().where(
+        StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
+        StorageObject.storage_id == StoragePhysicalKey.storage_id,
+        StorageObject.sha256 == StoragePhysicalKey.sha256)
+    rows = (await session.execute(
+        select(StoragePhysicalKey)
+        .where(StoragePhysicalKey.created_at < cutoff, ~live)
+        .order_by(StoragePhysicalKey.created_at)
+        .limit(max(1, max_objects_per_tick))
+        .with_for_update(skip_locked=True))).scalars().all()
+    deleted = 0
+    clients: dict[int, tuple] = {}
+    for row in rows:
+        if not delete_enabled:
+            continue
+        if row.storage_id not in clients:
+            clients[row.storage_id] = make_client(row.storage_id)
+        client, bucket, backend_type = clients[row.storage_id]
+        if backend_type != "s3" or client is None:
+            continue
+        ok = await delete_object_silently(client, bucket, row.storage_key)
+        if not ok:
+            continue
+        audit(action="storage.gc.physical", id=row.id, tenant_id=row.tenant_id,
+              storage_key=row.storage_key, size=row.size)
+        await session.delete(row)
+        deleted += 1
+    return {"candidates": len(rows), "deleted": deleted}
 
 
 async def gc_orphans(
