@@ -171,6 +171,51 @@ async def test_pin_modelscope_unreachable_pauses(factory):
         assert task.error_message == "pinned_source_unavailable"
 
 
+async def test_trust_no_sha_file_is_chunked_across_sources(factory):
+    """Ruling 4 / spec §6 carve-out: when task.trust_non_hf_sha256=True AND
+    expected_sha256=None (no HF sha authority for the file) the planner does
+    NOT pin to HF-only; it proceeds through the normal LPT + chunk-split path.
+    This documents that the one path assembled WITHOUT a whole-file sha gate
+    (the accepted trust opt-out) still produces subtask_chunks rows when the
+    file is large enough and ≥2 sources cover it."""
+    async with factory() as s:
+        task = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                            repo_id="o/r", revision="abc", storage_id=1,
+                            path_template="t", status="scheduling",
+                            trust_non_hf_sha256=True)
+        s.add(task)
+        await s.flush()
+        # Large file (200 MiB), no sha256 — the no-sha carve-out path.
+        big_file = SourceFile("big.bin", 200 * 1024 * 1024, None, "ref")
+        s.add(FileSubTask(task_id=task.id, tenant_id=1, filename="big.bin",
+                          file_size=big_file.size, expected_sha256=None,
+                          status="pending"))
+        await s.commit()
+        # Two non-HF sources both cover the file (HF absent — trust flag bypasses
+        # the HF-authority gate).
+        ms_files = [big_file]
+        reg = _FakeReg({"modelscope": _FakeDriver("modelscope", ms_files, False),
+                        "hf_mirror": _FakeDriver("hf_mirror", ms_files, True)})
+        await plan_task_sources(
+            s, task, registry=reg, resolver=_IdResolver(),
+            speeds={"modelscope": 900.0, "hf_mirror": 300.0},
+            chunk_min_mb=100)
+        await s.commit()
+        sub = (await s.execute(select(FileSubTask).where(
+            FileSubTask.task_id == task.id))).scalar_one()
+        # The planner must chunk the file (is_chunked=True) and produce ≥2 rows,
+        # proving the trust+no-sha path goes through the full LPT/chunk split.
+        assert sub.is_chunked is True, (
+            "trust_non_hf_sha256=True + no sha should still chunk a large file")
+        chunks = (await s.execute(select(SubtaskChunk).where(
+            SubtaskChunk.subtask_id == sub.id))).scalars().all()
+        assert len(chunks) >= 2, (
+            f"Expected ≥2 chunk rows for the trust+no-sha path, got {len(chunks)}")
+        chunk_sources = {c.source_id for c in chunks}
+        assert len(chunk_sources) >= 2, (
+            f"Expected chunks routed to ≥2 distinct sources, got {chunk_sources}")
+
+
 async def test_run_scheduling_tick_inherits_before_planning(factory):
     """diff_and_dedup runs before plan_task_sources: a subtask whose sha has
     an existing storage_object is `inherit` (not source-planned)."""
