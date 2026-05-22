@@ -139,3 +139,18 @@ async def test_downgrade_then_reupgrade(
     )
     # Re-upgrade so subsequent tests see the schema
     _alembic(["upgrade", "head"], test_db_name)
+
+
+@pytest.mark.slow
+async def test_phys_key_has_last_referenced_at(
+    engine: AsyncEngine, test_db_name: str
+) -> None:
+    """storage_physical_keys has a last_referenced_at column after upgrade head."""
+    _alembic(["upgrade", "head"], test_db_name)
+    async with engine.connect() as conn:
+        def _get_columns(sync_conn):
+            return {c["name"] for c in inspect(sync_conn).get_columns("storage_physical_keys")}
+        cols = await conn.run_sync(_get_columns)
+    assert "last_referenced_at" in cols, (
+        f"last_referenced_at not found in storage_physical_keys columns: {cols}"
+    )

@@ -48,17 +48,23 @@ async def test_dispatch_returns_only_this_executor_local_orphans(session):
     # ex-1 local orphan (storage 1) -> dispatched; s3 key, other-executor key,
     # non-orphan (has storage_objects row), fresh key -> excluded.
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="a"*64,
-        storage_key="repo/r/f", size=1, created_at=_old(), executor_id="ex-1"))
+        storage_key="repo/r/f", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-1"))
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=2, sha256="b"*64,   # s3
-        storage_key="repo/s3/f", size=1, created_at=_old(), executor_id="ex-1"))
+        storage_key="repo/s3/f", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-1"))
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="c"*64,   # other exec
-        storage_key="repo/other/f", size=1, created_at=_old(), executor_id="ex-2"))
+        storage_key="repo/other/f", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-2"))
     session.add(StorageObject(tenant_id=1, storage_id=1, storage_key="repo/r/g",
         sha256="d"*64, size=1, refcount=1))                                    # live sha
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="d"*64,   # non-orphan
-        storage_key="repo/r/g", size=1, created_at=_old(), executor_id="ex-1"))
+        storage_key="repo/r/g", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-1"))
+    now = datetime.now(UTC)
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="e"*64,   # fresh
-        storage_key="repo/fresh/f", size=1, created_at=datetime.now(UTC), executor_id="ex-1"))
+        storage_key="repo/fresh/f", size=1, created_at=now,
+        last_referenced_at=now, executor_id="ex-1"))
     await session.commit()
     items = await dispatch_local_reclaim(session, "ex-1", grace_seconds=3600, limit=10)
     keys = {it.storage_key for it in items}
@@ -68,9 +74,11 @@ async def test_dispatch_returns_only_this_executor_local_orphans(session):
 
 async def test_confirm_deletes_only_scoped_rows(session):
     r = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="f"*64,
-        storage_key="repo/conf/f", size=1, created_at=_old(), executor_id="ex-1")
+        storage_key="repo/conf/f", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-1")
     other = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="g"*64,
-        storage_key="repo/conf/o", size=1, created_at=_old(), executor_id="ex-2")
+        storage_key="repo/conf/o", size=1, created_at=_old(),
+        last_referenced_at=_old(), executor_id="ex-2")
     session.add_all([r, other]); await session.commit()
     audited = []
     async def _audit(**kw): audited.append(kw)
@@ -105,7 +113,7 @@ async def test_dispatch_sibling_with_accessible_ids(session):
 
     orphan = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="aa"*32,
         storage_key="repo/sibling/f", size=42, created_at=_old(),
-        executor_id="ex-writer")
+        last_referenced_at=_old(), executor_id="ex-writer")
     session.add(orphan)
     await session.commit()
 
@@ -121,7 +129,7 @@ async def test_dispatch_sibling_without_accessible_ids_excluded(session):
     """Without accessible_storage_ids, a sibling cannot see the writer's key."""
     orphan = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="bb"*32,
         storage_key="repo/sib-noac/f", size=42, created_at=_old(),
-        executor_id="ex-writer2")
+        last_referenced_at=_old(), executor_id="ex-writer2")
     session.add(orphan)
     await session.commit()
 
@@ -136,7 +144,7 @@ async def test_dispatch_writer_gets_own_key(session):
     """The writer gets its own key regardless of accessible_storage_ids."""
     orphan = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="cc"*32,
         storage_key="repo/writer-own/f", size=99, created_at=_old(),
-        executor_id="ex-writer3")
+        last_referenced_at=_old(), executor_id="ex-writer3")
     session.add(orphan)
     await session.commit()
 
@@ -154,7 +162,7 @@ async def test_confirm_widening_sibling_authorized(session):
 
     orphan = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="dd"*32,
         storage_key="repo/confirm-sib/f", size=77, created_at=_old(),
-        executor_id="ex-writer4")
+        last_referenced_at=_old(), executor_id="ex-writer4")
     session.add(orphan)
     await session.commit()
     key_id = orphan.id
@@ -177,7 +185,7 @@ async def test_confirm_widening_sibling_unauthorized_without_acc(session):
     """Without accessible_storage_ids, sibling confirm returns 0 (no match)."""
     orphan = StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="ee"*32,
         storage_key="repo/confirm-sib-no/f", size=55, created_at=_old(),
-        executor_id="ex-writer5")
+        last_referenced_at=_old(), executor_id="ex-writer5")
     session.add(orphan)
     await session.commit()
     key_id = orphan.id
@@ -218,7 +226,7 @@ async def test_confirm_tenant_scope(session):
 
     orphan = StoragePhysicalKey(tenant_id=2, storage_id=99, sha256="ff"*32,
         storage_key="repo/tenant-scope/f", size=33, created_at=_old(),
-        executor_id="ex-writer6")
+        last_referenced_at=_old(), executor_id="ex-writer6")
     session.add(orphan)
     await session.commit()
     key_id = orphan.id
@@ -238,3 +246,28 @@ async def test_confirm_tenant_scope(session):
     # Row should still exist
     row = await session.get(StoragePhysicalKey, key_id)
     assert row is not None
+
+
+async def test_dispatch_orders_by_last_referenced(session):
+    """dispatch_local_reclaim returns the key with the oldest last_referenced_at first.
+    Key X: created_at=_old(1d) but last_referenced_at=_old(9d) — oldest last-ref → first.
+    Key Y: created_at=_old(9d) but last_referenced_at=_old(1d) — newest last-ref → skipped.
+    Under old created_at ordering Y would come first; under last_referenced_at ordering X wins."""
+    key_x = StoragePhysicalKey(
+        tenant_id=1, storage_id=1, sha256="lru_x" + "0" * 59,
+        storage_key="repo/lru-ord/x", size=10,
+        created_at=_old(1), last_referenced_at=_old(9),   # newer created, older last-ref
+        executor_id="ex-lru")
+    key_y = StoragePhysicalKey(
+        tenant_id=1, storage_id=1, sha256="lru_y" + "1" * 59,
+        storage_key="repo/lru-ord/y", size=10,
+        created_at=_old(9), last_referenced_at=_old(1),   # older created, newer last-ref
+        executor_id="ex-lru")
+    session.add_all([key_x, key_y])
+    await session.commit()
+
+    items = await dispatch_local_reclaim(
+        session, "ex-lru", grace_seconds=3600, limit=1)
+    assert len(items) == 1
+    assert items[0].storage_key == "repo/lru-ord/x", \
+        "Oldest last_referenced_at (key X, 9d) must be dispatched first"
