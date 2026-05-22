@@ -31,6 +31,44 @@ def make_mock_transport() -> httpx.MockTransport:
         path = request.url.path
         m = re.fullmatch(r"/api/v1/tasks/([^/]+)", path)
         mc = re.fullmatch(r"/api/v1/tasks/([^/]+)/cancel", path)
+        mev = re.fullmatch(r"/api/v1/tasks/([^/]+)/events", path)
+        # --- read-only routes ---
+        if request.method == "GET" and path == "/api/v1/auth/me":
+            return httpx.Response(200, json={
+                "user_id": 1, "tenant_id": 1, "role": "tenant_admin",
+                "project_ids": [1], "is_service": False})
+        if request.method == "GET" and path == "/api/v1/quota/current":
+            return httpx.Response(200, json={
+                "tenant_id": 1, "bytes_used_month": 0,
+                "bytes_quota_month": 1000, "storage_gb_used": 0,
+                "storage_gb_quota": 1024, "concurrent_tasks": 0,
+                "concurrent_quota": 10})
+        if request.method == "GET" and path == "/api/v1/executors":
+            items = [{"id": "ex-1", "status": "healthy", "health_score": 100,
+                      "epoch": 1, "host_id": "h1", "tenant_id": 1,
+                      "last_heartbeat_at": None, "nic_speed_gbps": 10,
+                      "disk_free_gb": 900, "disk_total_gb": 1000,
+                      "created_at": "2026-01-01T00:00:00"}]
+            status_filter = request.url.params.get("status")
+            if status_filter:
+                items = [i for i in items if i["status"] == status_filter]
+            return httpx.Response(200, json={"items": items})
+        if mev and request.method == "GET":
+            return httpx.Response(200, json={
+                "items": [{"ts": "2026-01-01T00:00:00", "type": "task.created",
+                           "message": "created", "details": {}}],
+                "next_cursor": None})
+        if request.method == "GET" and path == "/api/v1/audit/log":
+            return httpx.Response(200, json={
+                "items": [{"id": 1, "occurred_at": "2026-01-01T00:00:00",
+                           "tenant_id": 1, "actor_user_id": 1,
+                           "actor_ip": "127.0.0.1", "action": "task.created",
+                           "resource_type": "task", "resource_id": "t1",
+                           "outcome": "success", "payload": {},
+                           "trace_id": "tr1", "prev_hash": None,
+                           "self_hash": "h1"}],
+                "next_cursor": None})
+        # --- task write routes ---
         if request.method == "POST" and path == "/api/v1/tasks":
             body = json.loads(request.content or b"{}")
             t = _task(body["repo_id"], body["revision"])

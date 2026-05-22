@@ -80,6 +80,31 @@ def _build_parser() -> argparse.ArgumentParser:
     w.add_argument("task_id")
     w.add_argument("--interval", type=float, default=5.0)
     w.add_argument("--timeout", type=float, default=None)
+
+    sub.add_parser("whoami", help="show the current principal")
+    sub.add_parser("quota", help="show current tenant quota usage")
+
+    ex = sub.add_parser("exec", help="executor commands")
+    ex_sub = ex.add_subparsers(dest="exec_cmd")
+    ex_ls = ex_sub.add_parser("list", help="list executors")
+    ex_ls.add_argument("--status", default=None)
+
+    ev = sub.add_parser("events", help="show task events")
+    ev.add_argument("task_id")
+    ev.add_argument("--limit", type=int, default=50)
+    ev.add_argument("--cursor", default=None)
+    ev.add_argument("--follow", action="store_true",
+                    help="stream events via SSE until Ctrl-C / disconnect")
+    ev.add_argument("--max-ticks", type=int, default=None,
+                    help=argparse.SUPPRESS)   # test bound for --follow
+
+    au = sub.add_parser("audit", help="search the audit log")
+    au.add_argument("--action", default=None)
+    au.add_argument("--actor", type=int, default=None)
+    au.add_argument("--from", dest="from_", default=None)
+    au.add_argument("--to", default=None)
+    au.add_argument("--limit", type=int, default=50)
+    au.add_argument("--cursor", default=None)
     return p
 
 
@@ -101,9 +126,43 @@ def _emit(obj: Any, args: argparse.Namespace) -> None:
             str(r.get(c, "")).ljust(widths[c]) for c in cols) + "\n")
 
 
+def _emit_obj(obj: Any, args: argparse.Namespace,
+              cols: list[str] | None = None) -> None:
+    if args.output == "json":
+        sys.stdout.write(json.dumps(obj, default=str) + "\n")
+        return
+    if isinstance(obj, dict) and isinstance(obj.get("items"), list):
+        _emit_rows(obj["items"], cols)
+    elif isinstance(obj, list):
+        _emit_rows(obj, cols)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            sys.stdout.write(f"{k}: {v}\n")
+    else:
+        sys.stdout.write(str(obj) + "\n")
+
+
+def _emit_rows(rows: list, cols: list[str] | None = None) -> None:
+    if not rows:
+        sys.stdout.write("(none)\n")
+        return
+    if cols is None:
+        cols = []
+        for r in rows:
+            for k in r:
+                if k not in cols:
+                    cols.append(k)
+    widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows))
+              for c in cols}
+    sys.stdout.write("  ".join(c.ljust(widths[c]) for c in cols) + "\n")
+    for r in rows:
+        sys.stdout.write("  ".join(
+            str(r.get(c, "")).ljust(widths[c]) for c in cols) + "\n")
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     from dlw.cli import handlers
-    return handlers.run(args, _make_client, _emit)
+    return handlers.run(args, _make_client, _emit, _emit_obj)
 
 
 def main(argv: list[str] | None = None) -> int:
