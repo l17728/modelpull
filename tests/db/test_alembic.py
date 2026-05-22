@@ -67,6 +67,7 @@ EXPECTED_TABLES = {
     "source_speed_samples",
     "storage_backends",
     "storage_objects",
+    "storage_physical_keys",
     "subtask_chunks",
     "subtask_object_refs",
     "tenants",

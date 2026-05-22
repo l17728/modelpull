@@ -24,6 +24,7 @@ from dlw.db.models import (  # noqa: F401  side-effect import
     Project,
     QuotaSnapshot,
     StorageBackend,
+    StoragePhysicalKey,
     Tenant,
     UsageRecord,
     User,
