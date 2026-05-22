@@ -19,11 +19,33 @@ does NOT change WHICH keys are eligible (still refcount=0 / no surviving
 `storage_objects` row, past grace), only the priority when capped. §3.2's
 "refcount=0 only" semantics are preserved — no live data is ever evicted.
 
-Note (honest): a candidate key is reclaimable precisely because its content's
-`storage_objects` row is already GC'd, so reclaiming it does not reduce the
-tenant's `storage_gb_used` (which counts tracked content). The pressure signal
-is therefore a *priority heuristic* ("this tenant is space-pressured → free its
-orphaned bytes first"), not a guarantee that the quota number drops. Documented.
+**Honest framing (pre-review — do not overstate this):**
+
+- **Layer mismatch vs §3.2's literal target.** §3.2 says "按 last_referenced_at
+  LRU 淘汰 **refcount=0 的对象**" — those are `storage_objects` rows that are
+  refcount=0 but **still tracked** (still counted in `storage_gb_used`, within
+  their GC grace). That deletion is `gc_orphans()`, which is **time-only**
+  (`refcount<=0 AND created_at<cutoff`), has **no quota awareness and no cap**,
+  and FU2 **does NOT touch it**. FU2 instead reorders
+  `reclaim_physical_orphans`, whose candidates are keys whose `storage_objects`
+  row is **already gone** (fully orphaned). So FU2 is **NOT** "wiring §3.2's
+  quota-trigger" in the literal sense — it **partially approximates** it by
+  applying the quota-pressure heuristic to the *physical-orphan reclaim* layer
+  (real per-tenant DISK relief), while the tracked-refcount=0 eviction that §3.2
+  names stays time-only. Making `gc_orphans` quota-aware is a separate, larger
+  change, explicitly NOT in FU2.
+- **Doesn't reduce `storage_gb_used`.** A reclaimable key's `storage_objects`
+  row is already GC'd, so freeing it lowers physical disk/object-store bytes but
+  NOT the tracked quota number. The pressure signal is a *priority heuristic*
+  ("this tenant is space-pressured → free its orphaned bytes first").
+- **Integer-GiB-floor coarseness.** `storage_gb_used` is floor(bytes/GiB) and
+  `quota_storage_gb` is integer GiB (Phase 4 Part A), so `used >= 0.9*quota`
+  is coarse: a 1-GiB-quota tenant never trips until used hits exactly 1 GiB
+  (=100%); the trigger is effectively inert below ~10-GiB quotas. Documented.
+- **Narrow effect window.** The ordering only changes behavior when the per-tick
+  cap (default 1000) binds — i.e. a reclaim backlog > 1000 orphan keys AND a
+  pressured tenant has keys in it AND the snapshot is fresh. In normal operation
+  it is near-inert; the operator doc must not oversell it.
 
 ## 1. Scope
 
@@ -157,10 +179,14 @@ byte-identical when there's no pressure.)
 
 ## 6. Self-Review
 
-- **Wires §3.2 quota-trigger**: pressured tenants' dereferenced keys reclaimed
-  first under the cap. ✓ (refcount=0-only preserved; `created_at` proxies LRU.)
-- **Pure addition**: empty-pressure path identical to today. ✓
-- **Honest**: the "doesn't reduce storage_gb_used" nuance + the LRU proxy are
-  documented, not hidden. ✓
+- **Partially approximates §3.2** (NOT "wires" — see §0): pressured tenants'
+  *orphaned physical keys* reclaimed first under the cap (disk relief); the
+  tracked-refcount=0 eviction §3.2 names stays time-only in `gc_orphans`.
+  refcount=0-only preserved; `created_at` proxies LRU.
+- **Pure addition**: empty-pressure path byte-identical to today. ✓
+- **Honest**: the layer-mismatch, the "doesn't reduce storage_gb_used", the
+  integer-GiB-floor coarseness, the LRU `created_at` proxy, and the narrow
+  cap-binding effect window are ALL documented in §0 + the operator doc, not
+  hidden. ✓
 - **Consistency**: reuses `QuotaSnapshot.storage_gb_used` (Phase 4 Part A), the
   reclaim candidate query, the loop wiring.

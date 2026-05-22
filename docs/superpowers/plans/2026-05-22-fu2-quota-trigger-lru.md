@@ -73,27 +73,36 @@ async def test_pressured_set(session):
     ids = await pressured_tenant_ids(session, threshold=0.9)
     assert ids == frozenset({1})
 ```
-And extend `tests/services/test_physical_reclaim.py` with a priority-ordering test (reuse its `_FakeS3`/`session`/bootstrap; the bootstrap seeds StorageBackend id=1 s3):
+And extend `tests/services/test_physical_reclaim.py` with a DISCRIMINATING priority-ordering test. The bootstrap seeds only tenant 1 + StorageBackend id=1 (s3) — so seed a SECOND tenant in the test, give the **priority** tenant the **NEWER** key and the **non-priority** tenant the **OLDER** key, cap=1, and assert the **newer (priority)** key was the one deleted. This proves priority OVERRODE oldest-first (without priority, the older key would win → the test would fail). Note `reclaim_physical_orphans` keys clients off `row.storage_id` and never validates tenant↔backend ownership, so tenant-2 keys on `storage_id=1` reclaim fine:
 ```python
 async def test_priority_tenant_reclaimed_first_under_cap(session):
     from dlw.db.models.storage_object import StoragePhysicalKey
+    from dlw.db.models.tenant import Tenant
+    from sqlalchemy import select
     fake = _FakeS3()
-    # two old, fully-dereferenced keys (no storage_objects rows): tenant 1 (priority) + tenant 1-other.
-    # Use distinct tenants if the bootstrap seeds >1; else distinguish by key. The bootstrap seeds tenant 1.
-    # Seed a second tenant + backend in THIS test if needed, OR key priority off tenant_id present.
-    session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="p"*64,
-                                   storage_key="repo/prio/x", size=1, created_at=_old(5)))
+    session.add(Tenant(id=2, slug="t2p", display_name="T2P"))
+    await session.flush()
+    # priority tenant 2 → NEWER key; non-priority tenant 1 → OLDER key.
+    session.add(StoragePhysicalKey(tenant_id=2, storage_id=1, sha256="p"*64,
+                                   storage_key="repo/prio/new", size=1,
+                                   created_at=_old(1)))   # newer
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="q"*64,
-                                   storage_key="repo/other/y", size=1, created_at=_old(1)))
+                                   storage_key="repo/other/old", size=1,
+                                   created_at=_old(5)))   # older
     await session.commit()
     res = await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=True,
         make_client=lambda sid: (fake, "bkt", "s3"), audit=lambda **k: None,
-        max_objects_per_tick=1, priority_tenant_ids=frozenset({1}))
+        max_objects_per_tick=1, priority_tenant_ids=frozenset({2}))
     await session.commit()
-    assert res["deleted"] == 1   # cap=1; a tenant-1 key reclaimed
+    # cap=1: priority (newer) key reclaimed even though the other is OLDER.
+    assert ("bkt", "repo/prio/new") in fake.deleted
+    assert res["deleted"] == 1
+    remaining = (await session.execute(
+        select(StoragePhysicalKey.storage_key))).scalars().all()
+    assert "repo/prio/new" not in remaining and "repo/other/old" in remaining
 ```
-(NOTE: the priority test needs TWO tenants to meaningfully prove "priority wins" — if `test_physical_reclaim.py`'s bootstrap only seeds tenant 1, either (a) add a second tenant + its backend in the bootstrap, or (b) write the priority assertion to seed a priority tenant key with an OLDER `created_at`-disadvantage so that without priority the OTHER key would be chosen — i.e. give the priority tenant the NEWER key, the non-priority the OLDER key, cap=1, and assert the PRIORITY (newer) key is the one deleted, proving priority overrode created_at. Implementer: read the bootstrap, pick the variant that cleanly proves priority overrides oldest-first. The assertion must distinguish priority-wins from oldest-first-wins.)
+(If a `Tenant(id=2, ...)` already exists from another test in the module's shared DB, dedupe or use `id=42`; the discriminating property is priority-tenant=newer + non-priority=older + cap=1 + assert the newer one deleted.)
 
 - [ ] **Step 2: verify FAIL** (`pressured_tenant_ids` missing; priority param missing).
 
@@ -130,7 +139,7 @@ and pass `priority_tenant_ids=priority` into the existing `reclaim_physical_orph
 
 - [ ] **Step 2: smoke + lifespan.** `cd "D:/download_weights" && uv run python -c "import dlw.main; print('ok')"` → ok. Run `tests/test_phase4_lifespan.py` (extend it to assert the new config default `gc_quota_pressure_threshold == 0.9` if it already asserts other gc config defaults) → pass.
 
-- [ ] **Step 3: docs.** In `docs/operator/storage-reclamation.md`, add a short note under the reclamation section: under the per-tick cap, tenants at/over `gc_quota_pressure_threshold` (default 0.9) of their storage quota have their dereferenced keys reclaimed first; ordering within a group is oldest-first (`created_at`, the available proxy for §3.2's `last_referenced_at`); note this is a priority heuristic that does not itself lower `storage_gb_used` (orphan bytes are already untracked). Prose.
+- [ ] **Step 3: docs.** In `docs/operator/storage-reclamation.md`, add a short note under the reclamation section — and keep it HONEST (pre-review), not overselling: tenants at/over `gc_quota_pressure_threshold` (default 0.9) of their storage quota have their dereferenced physical keys reclaimed first **only when the per-tick cap binds** (a reclaim backlog > `gc_max_objects_per_tick`); within a group ordering is oldest-first (`created_at`, the proxy for §3.2's `last_referenced_at`). State the four caveats: (1) this prioritizes freeing a pressured tenant's already-orphaned DISK bytes — it does NOT lower `storage_gb_used` (those bytes are already untracked); (2) §3.2's eviction of *tracked* refcount=0 `storage_objects` rows remains time-only (`gc_orphans`) — FU2 does not make that quota-aware; (3) the trigger uses integer-GiB `storage_gb_used` vs `quota_storage_gb`, so it is coarse and effectively inert below ~10-GiB quotas; (4) in normal operation (backlog ≤ cap) the ordering has no observable effect. Prose.
 
 - [ ] **Step 4: full backend gate + commit.**
 ```bash
