@@ -57,6 +57,7 @@ EXPECTED_TABLES = {
     "ai_tool_calls",
     "audit_log",
     "casbin_rule",
+    "device_auth_sessions",
     "download_tasks",
     "executor_status_history",
     "executors",

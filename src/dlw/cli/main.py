@@ -95,6 +95,23 @@ def _build_parser() -> argparse.ArgumentParser:
     ctx_set.add_argument("--no-current", action="store_true",
                          help="do not switch current_context to this one")
 
+    login = sub.add_parser("login", help="authenticate and store a token")
+    login.add_argument("--device-code", action="store_true",
+                       help="force device-code flow (default when no --token)")
+    login.add_argument("--no-browser", action="store_true",
+                       help="do not open the browser automatically")
+    login.add_argument("--context", default=None,
+                       help="context name to write token into")
+    login.add_argument("--server", default=None, help="API base URL")
+    login.add_argument("--token", default=None,
+                       help="store this token directly (skips device flow)")
+    login.add_argument("--timeout", type=float, default=None,
+                       help="seconds to wait for device approval")
+
+    logout = sub.add_parser("logout", help="clear a stored token")
+    logout.add_argument("--context", default=None,
+                        help="context to log out of (default: current)")
+
     sub.add_parser("whoami", help="show the current principal")
     sub.add_parser("quota", help="show current tenant quota usage")
 

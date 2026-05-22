@@ -82,6 +82,9 @@ class Settings(BaseSettings):
         default="http://localhost:8000/api/v1/auth/callback"
     )
     auth_tenant_rules_json: str = Field(default="[]")
+    device_code_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    device_poll_interval_seconds: int = Field(default=5, ge=1, le=60)
+    device_verification_uri: str = Field(default="/device")
 
     # Phase 3 SP2 — multi-source
     sources_yaml_path: str = Field(default="config/sources.yaml")

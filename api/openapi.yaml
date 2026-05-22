@@ -164,6 +164,127 @@ paths:
                   is_service: {type: boolean}
         '401': {$ref: '#/components/responses/Unauthenticated'}
 
+  /auth/device:
+    post:
+      tags: [auth]
+      summary: Start RFC 8628 device-code flow
+      operationId: authDeviceAuthorize
+      security: []
+      description: |
+        Issues a device_code and user_code. The caller should display the
+        verification_uri and user_code to the end-user, who must authenticate
+        in a browser and approve the device. The device then polls
+        /auth/device/token until a token is issued or the session expires.
+      responses:
+        '200':
+          description: Device-code session created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval]
+                properties:
+                  device_code: {type: string, description: High-entropy opaque code for polling}
+                  user_code: {type: string, description: "Short human-typeable code (XXXX-XXXX)"}
+                  verification_uri: {type: string, description: URI where the user approves}
+                  verification_uri_complete: {type: string, description: URI with user_code pre-filled}
+                  expires_in: {type: integer, description: Seconds until device_code expires}
+                  interval: {type: integer, description: Minimum poll interval in seconds}
+
+  /auth/device/approve:
+    post:
+      tags: [auth]
+      summary: Approve or deny a pending device-code session
+      operationId: authDeviceApprove
+      description: |
+        An already-authenticated user calls this to approve or deny a device
+        waiting at the given user_code. Service principals (system-admin token)
+        are rejected — only real users may grant device access.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_code]
+              properties:
+                user_code:
+                  type: string
+                  description: The user_code shown to the user on the device
+                action:
+                  type: string
+                  enum: [approve, deny]
+                  default: approve
+      responses:
+        '200':
+          description: Action applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [approved, denied]
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403':
+          description: Forbidden (service principal or invalid action)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '404':
+          description: Unknown or expired user_code
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+
+  /auth/device/token:
+    post:
+      tags: [auth]
+      summary: Poll for device-code token
+      operationId: authDeviceToken
+      security: []
+      description: |
+        Poll to exchange a device_code for a bearer token. Returns RFC 8628
+        error codes as HTTP 400 while waiting or on failure; 200 on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_code]
+              properties:
+                device_code:
+                  type: string
+                  description: Opaque device_code from /auth/device
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in, tenant_id, role]
+                properties:
+                  access_token: {type: string}
+                  token_type: {type: string, enum: [Bearer]}
+                  expires_in: {type: integer, description: JWT TTL in seconds}
+                  tenant_id: {type: integer, format: int64}
+                  role: {type: string}
+        '400':
+          description: RFC 8628 polling error
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                    enum: [authorization_pending, slow_down, access_denied, expired_token, invalid_grant]
+
   # ========== Tasks ==========
   /tasks:
     get:

@@ -18,6 +18,7 @@ from dlw.db.models import (  # noqa: F401  side-effect import
     AIToolCall,
     AuditLog,
     CasbinRule,
+    DeviceAuthSession,
     DownloadTask,
     Executor,
     FileSubTask,

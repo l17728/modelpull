@@ -325,11 +325,13 @@ async def test_heartbeat_confirm_deletes_scoped_rows(
             tenant_id=1, storage_id=1,
             sha256="a" * 64, storage_key="models/confirm/file1.bin",
             size=100, executor_id=ex_id, created_at=old_time,
+            last_referenced_at=old_time,
         )
         k2_row = StoragePhysicalKey(
             tenant_id=1, storage_id=1,
             sha256="b" * 64, storage_key="models/confirm/file2.bin",
             size=200, executor_id="other-executor-999", created_at=old_time,
+            last_referenced_at=old_time,
         )
         s.add(k_row)
         s.add(k2_row)
@@ -403,6 +405,7 @@ async def test_heartbeat_dispatch_enabled_returns_reclaim_item(
             tenant_id=1, storage_id=local_storage_id,
             sha256="c" * 64, storage_key="models/dispatch/fileX.bin",
             size=512, executor_id=ex_id, created_at=old_time,
+            last_referenced_at=old_time,
         )
         s.add(phys)
         await s.flush()

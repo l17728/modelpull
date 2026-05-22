@@ -8,7 +8,9 @@ from __future__ import annotations
 from dlw.sdk import errors
 from dlw.sdk.aclient import AsyncClient, AsyncDownloadTask
 from dlw.sdk.client import Client
+from dlw.sdk.device import device_authorize, device_token, poll_for_token
 from dlw.sdk.models import DownloadTask
 
 __all__ = ["Client", "AsyncClient", "AsyncDownloadTask",
-           "DownloadTask", "errors"]
+           "DownloadTask", "errors",
+           "device_authorize", "device_token", "poll_for_token"]
