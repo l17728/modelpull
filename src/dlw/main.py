@@ -150,6 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.exception("rebalance tick failed; retrying")
 
     gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    physical_gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _gc_loop() -> None:
         from dlw.services.audit import write_audit
@@ -175,6 +176,65 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception:
                 logger.exception("gc tick failed; retrying")
 
+    async def _physical_gc_loop() -> None:
+        from sqlalchemy import select as _select
+
+        from dlw.db.models.storage import StorageBackend
+        from dlw.services.audit import write_audit
+        from dlw.services.storage_client import make_s3_client, storage_config_from_backend
+        from dlw.services.storage_objects import reclaim_physical_orphans
+        while True:
+            try:
+                await asyncio.sleep(_gs().gc_interval_seconds)
+                grace = max(_gs().gc_grace_seconds,
+                            _gs().gc_archive_after_days * 86400)
+                async with factory() as session:
+                    backends = (await session.execute(
+                        _select(StorageBackend))).scalars().all()
+                    bmap = {b.id: b for b in backends}
+                    cache: dict[int, tuple] = {}
+
+                    def _make_client(sid: int):
+                        if sid not in cache:
+                            b = bmap.get(sid)
+                            if b is None:
+                                cache[sid] = (None, "", "missing")
+                            else:
+                                cfg = storage_config_from_backend(b)
+                                client = (make_s3_client(cfg)
+                                          if b.backend_type == "s3" else None)
+                                cache[sid] = (client, cfg.bucket, b.backend_type)
+                        return cache[sid]
+
+                    audited: list[dict] = []
+                    res = await reclaim_physical_orphans(
+                        session, grace_seconds=grace,
+                        delete_enabled=_gs().gc_delete_physical_bytes,
+                        make_client=_make_client,
+                        audit=lambda **kw: audited.append(kw),
+                        max_objects_per_tick=_gs().gc_max_objects_per_tick)
+                    for a in audited:
+                        # resource_id is String(128); the (<=1024-char) key goes
+                        # in payload — truncation here would abort the commit
+                        # AFTER the S3 bytes were deleted.
+                        await write_audit(
+                            session, action=a["action"],
+                            resource_type="storage_physical_keys",
+                            resource_id=str(a["id"]), outcome="success",
+                            tenant_id=a["tenant_id"], actor_user_id=None,
+                            payload={"storage_key": a["storage_key"],
+                                     "size": a["size"]})
+                    await session.commit()
+                    if res["candidates"]:
+                        logger.info(
+                            "physical gc: %d candidate(s), %d deleted "
+                            "(delete_enabled=%s)", res["candidates"],
+                            res["deleted"], _gs().gc_delete_physical_bytes)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("physical gc tick failed; retrying")
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -190,6 +250,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sched_task_holder["t"] = asyncio.create_task(_scheduling_loop())
         rebalance_task_holder["t"] = asyncio.create_task(_rebalance_loop())
         gc_task_holder["t"] = asyncio.create_task(_gc_loop())
+        physical_gc_task_holder["t"] = asyncio.create_task(_physical_gc_loop())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -232,6 +293,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             gc_task_holder["t"] = None
+        pt = physical_gc_task_holder["t"]
+        if pt is not None:
+            pt.cancel()
+            try:
+                await asyncio.wait_for(pt, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            physical_gc_task_holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,
