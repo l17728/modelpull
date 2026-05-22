@@ -55,12 +55,12 @@ async def test_dereferenced_s3_keys_deleted_when_enabled(session):
     fake = _FakeS3()
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="a"*64,
                                    storage_key="repo/rev1/f", size=10,
-                                   created_at=_old()))
+                                   created_at=_old(), last_referenced_at=_old()))
     session.add(StorageObject(tenant_id=1, storage_id=1, storage_key="repo/rev1/g",
                               sha256="b"*64, size=10, refcount=1))
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="b"*64,
                                    storage_key="repo/rev1/g", size=10,
-                                   created_at=_old()))
+                                   created_at=_old(), last_referenced_at=_old()))
     await session.commit()
     audited = []
     res = await reclaim_physical_orphans(
@@ -81,7 +81,7 @@ async def test_disabled_is_dry_run(session):
     fake = _FakeS3()
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="d"*64,
                                    storage_key="repo/rev1/h", size=10,
-                                   created_at=_old()))
+                                   created_at=_old(), last_referenced_at=_old()))
     await session.commit()
     res = await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=False,
@@ -98,7 +98,7 @@ async def test_non_s3_backend_skipped(session):
     fake = _FakeS3()
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=2, sha256="e"*64,
                                    storage_key="loc/rev1/i", size=10,
-                                   created_at=_old()))
+                                   created_at=_old(), last_referenced_at=_old()))
     await session.commit()
     res = await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=True,
@@ -112,9 +112,10 @@ async def test_non_s3_backend_skipped(session):
 
 async def test_grace_respected(session):
     fake = _FakeS3()
+    now = datetime.now(UTC)
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="f0"*32,
                                    storage_key="repo/rev1/fresh", size=10,
-                                   created_at=datetime.now(UTC)))
+                                   created_at=now, last_referenced_at=now))
     await session.commit()
     await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=True,
@@ -128,7 +129,7 @@ async def test_per_tick_cap(session):
         session.add(StoragePhysicalKey(tenant_id=1, storage_id=1,
                                        sha256=f"{n:064d}",
                                        storage_key=f"repo/cap/{n}", size=1,
-                                       created_at=_old()))
+                                       created_at=_old(), last_referenced_at=_old()))
     await session.commit()
     res = await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=True,
@@ -147,10 +148,12 @@ async def test_priority_tenant_reclaimed_first_under_cap(session):
     await session.flush()
     session.add(StoragePhysicalKey(tenant_id=42, storage_id=1, sha256="p" * 64,
                                    storage_key="repo/prio/new", size=1,
-                                   created_at=_old(1)))    # newer, priority
+                                   created_at=_old(1),
+                                   last_referenced_at=_old(1)))    # newer, priority
     session.add(StoragePhysicalKey(tenant_id=1, storage_id=1, sha256="q" * 64,
                                    storage_key="repo/other/old", size=1,
-                                   created_at=_old(5)))    # older, non-priority
+                                   created_at=_old(5),
+                                   last_referenced_at=_old(5)))    # older, non-priority
     await session.commit()
     res = await reclaim_physical_orphans(
         session, grace_seconds=3600, delete_enabled=True,
@@ -162,3 +165,62 @@ async def test_priority_tenant_reclaimed_first_under_cap(session):
     remaining = (await session.execute(
         select(StoragePhysicalKey.storage_key))).scalars().all()
     assert "repo/prio/new" not in remaining and "repo/other/old" in remaining
+
+
+async def test_orders_by_last_referenced_not_created(session):
+    """LRU ordering: key with older last_referenced_at is reclaimed first,
+    even if it has a newer created_at. Would FAIL under old created_at ordering."""
+    fake = _FakeS3()
+    # Key A: created long ago, but last_referenced recently (should be kept)
+    session.add(StoragePhysicalKey(
+        tenant_id=1, storage_id=1, sha256="lru1" + "a" * 60,
+        storage_key="repo/lru/a", size=1,
+        created_at=_old(10), last_referenced_at=_old(1 / 24)))  # _old(1h)
+    # Key B: created more recently, but last_referenced long ago (should be reclaimed)
+    session.add(StoragePhysicalKey(
+        tenant_id=1, storage_id=1, sha256="lru2" + "b" * 60,
+        storage_key="repo/lru/b", size=1,
+        created_at=_old(2), last_referenced_at=_old(9)))
+    await session.commit()
+
+    audited = []
+    res = await reclaim_physical_orphans(
+        session, grace_seconds=3600, delete_enabled=True,
+        make_client=lambda sid: (fake, "bkt", "s3"),
+        audit=lambda **k: audited.append(k),
+        max_objects_per_tick=1)
+    await session.commit()
+
+    deleted_keys = [k for _, k in fake.deleted]
+    assert "repo/lru/b" in deleted_keys, "B (older last_referenced_at) must be reclaimed first"
+    assert "repo/lru/a" not in deleted_keys, "A (recently referenced) must be skipped under cap=1"
+    assert res["candidates"] == 1
+    assert res["deleted"] == 1
+
+
+async def test_grace_uses_last_referenced_at(session):
+    """Grace is measured from last_referenced_at, not created_at.
+    A key re-referenced just now must NOT be a candidate even if created long ago."""
+    fake = _FakeS3()
+    session.add(StoragePhysicalKey(
+        tenant_id=1, storage_id=1, sha256="grace1" + "g" * 58,
+        storage_key="repo/grace/recent_ref", size=10,
+        created_at=_old(30),        # 30 days old — well past created_at grace
+        last_referenced_at=datetime.now(UTC)))  # just re-referenced
+    await session.commit()
+
+    res = await reclaim_physical_orphans(
+        session, grace_seconds=3600, delete_enabled=True,
+        make_client=lambda sid: (fake, "bkt", "s3"),
+        audit=lambda **k: None)
+    await session.commit()
+
+    deleted_keys = [k for _, k in fake.deleted]
+    assert "repo/grace/recent_ref" not in deleted_keys, \
+        "Key re-referenced now must NOT be reclaimed (grace from last_referenced_at)"
+    # candidates should be 0 for this specific key
+    remaining = (await session.execute(
+        select(StoragePhysicalKey.storage_key)
+        .where(StoragePhysicalKey.storage_key == "repo/grace/recent_ref")
+    )).scalars().all()
+    assert remaining == ["repo/grace/recent_ref"]

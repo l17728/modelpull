@@ -51,6 +51,12 @@ async def record_ref_only(
         storage_key=storage_key, sha256=sha256, size=size, bump=True)
     await session.execute(pg_insert(SubtaskObjectRef).values(
         subtask_id=subtask_id, object_id=oid).on_conflict_do_nothing())
+    await session.execute(
+        update(StoragePhysicalKey)
+        .where(StoragePhysicalKey.tenant_id == tenant_id,
+               StoragePhysicalKey.storage_id == storage_id,
+               StoragePhysicalKey.sha256 == sha256)
+        .values(last_referenced_at=datetime.now(UTC)))
     return oid
 
 
@@ -90,12 +96,15 @@ async def record_physical_key(
     sha256: str, storage_key: str, size: int, executor_id: str | None = None,
 ) -> None:
     """Phase 4: durable ledger of a physical object key (download + inherit).
-    Idempotent on (tenant, storage, key). Caller commits."""
+    Idempotent on (tenant, storage, key). On conflict, bumps last_referenced_at
+    only — executor_id and size are NOT overwritten (FU3/FU4 writer-targeting).
+    Caller commits."""
     await session.execute(pg_insert(StoragePhysicalKey).values(
         tenant_id=tenant_id, storage_id=storage_id, sha256=sha256,
         storage_key=storage_key, size=size,
-        executor_id=executor_id).on_conflict_do_nothing(
-            index_elements=["tenant_id", "storage_id", "storage_key"]))
+        executor_id=executor_id).on_conflict_do_update(
+            index_elements=["tenant_id", "storage_id", "storage_key"],
+            set_={"last_referenced_at": datetime.now(UTC)}))
 
 
 async def pressured_tenant_ids(
@@ -136,12 +145,12 @@ async def reclaim_physical_orphans(
         prio = case(
             (StoragePhysicalKey.tenant_id.in_(priority_tenant_ids), 0), else_=1)
         stmt = (select(StoragePhysicalKey)
-                .where(StoragePhysicalKey.created_at < cutoff, ~live)
-                .order_by(prio, StoragePhysicalKey.created_at))
+                .where(StoragePhysicalKey.last_referenced_at < cutoff, ~live)
+                .order_by(prio, StoragePhysicalKey.last_referenced_at))
     else:
         stmt = (select(StoragePhysicalKey)
-                .where(StoragePhysicalKey.created_at < cutoff, ~live)
-                .order_by(StoragePhysicalKey.created_at))
+                .where(StoragePhysicalKey.last_referenced_at < cutoff, ~live)
+                .order_by(StoragePhysicalKey.last_referenced_at))
     rows = (await session.execute(
         stmt.limit(max(1, max_objects_per_tick))
         .with_for_update(skip_locked=True))).scalars().all()
@@ -250,7 +259,7 @@ async def dispatch_local_reclaim(
     auth = StoragePhysicalKey.executor_id == executor_id
     if accessible_storage_ids:
         auth = auth | StoragePhysicalKey.storage_id.in_(accessible_storage_ids)
-    where = [auth, StoragePhysicalKey.created_at < cutoff, ~live,
+    where = [auth, StoragePhysicalKey.last_referenced_at < cutoff, ~live,
              StorageBackend.backend_type == "local"]
     if tenant_id is not None:
         where.append(StoragePhysicalKey.tenant_id == tenant_id)
@@ -258,7 +267,7 @@ async def dispatch_local_reclaim(
         select(StoragePhysicalKey)
         .join(StorageBackend, StorageBackend.id == StoragePhysicalKey.storage_id)
         .where(*where)
-        .order_by(StoragePhysicalKey.created_at)
+        .order_by(StoragePhysicalKey.last_referenced_at)
         .limit(max(1, limit))
         .with_for_update(skip_locked=True, of=StoragePhysicalKey))).scalars().all()
     out: list[ReclaimItem] = []
@@ -295,7 +304,7 @@ async def count_stuck_local_orphans(session: AsyncSession) -> int:
         .join(StorageBackend, StorageBackend.id == StoragePhysicalKey.storage_id)
         .where(
             StoragePhysicalKey.executor_id.is_(None),
-            StoragePhysicalKey.created_at < cutoff,
+            StoragePhysicalKey.last_referenced_at < cutoff,
             ~live,
             StorageBackend.backend_type == "local",
         ))
