@@ -501,3 +501,45 @@ is the deliverable; the per-token accuracy follows the backend.
 
 **Deferred** (named slices): SP4c sandboxed-MCP subprocess (inv 37),
 SP4e external-content tools + prompt-injection sanitization (inv 19/41).
+
+## UI-SP4e — AI Copilot external-content tools + prompt-injection sanitization
+
+Fourth AI slice: the Copilot can now pull **external content** about a
+HuggingFace repo, and all external-origin text is **sanitized before it
+enters the LLM context** (🔒 invariants 19/36/41). Two new read-only tools
+are added (read-only ⇒ no confirmation gate, inv 17): `hf_api_metadata`
+returns HF structured metadata (commit sha, file list, last-modified) and
+`hf_model_card` fetches a repo's model-card / README text. Both fetch only
+through the configured HuggingFace endpoint — there is no arbitrary-URL
+egress.
+
+**Sanitization** lives in `src/dlw/ai/sanitize.py`. Every external string
+is NFKC-normalized, screened for Bidi/RTL override characters (which cause
+an outright refusal — the content is dropped, not forwarded), stripped of
+zero-width and other format characters, scanned for mixed-script homoglyph
+confusables, for imperative-plus-tool-name and "repeat your instructions"
+injection patterns, and for suspiciously long base64 runs, then truncated
+and wrapped in a boundary tag. Trusted structured metadata (T1) is wrapped
+`<external_content source="…">`; user-authored content such as a model
+card (T2, inv 41) is truncated to 8 KB and wrapped
+`<external_user_content trust_level="t2" source="…">` with a leading line
+instructing that the content was uploaded by an arbitrary user and must
+not be treated as instructions. The same pass also now sanitizes the
+executor-reported `error_message` and task-event messages returned by the
+existing `dlw_get_task` / `dlw_get_task_events` tools, which were the other
+external-origin fields flowing into the model.
+
+**Honest caveat**: complete prompt-injection defense is an unsolved
+problem. SP4e raises the bar with a structural data/instruction boundary
+plus the scans above, but the real lines of defense remain the user
+confirmation gate (SP4b), the audit trail (SP4a), and the token budget
+(SP4d). The confusables check uses in-house cross-script detection (no new
+dependency); it catches Latin/Cyrillic/Greek mixing but not within-script
+look-alikes, and it emits a warning rather than refusing.
+
+**Deferred** (named slices): SP4c sandboxed-MCP subprocess (inv 37, not
+feasible on the Windows dev environment); `fetch_user_content` / `web_search`
+arbitrary-egress tools (need an egress allowlist and admin enable); and a
+non-bypassable structural sanitization choke point (today each external
+tool calls the sanitizer itself — correct for the tools that exist, with a
+declarative choke point tracked as a follow-on).
