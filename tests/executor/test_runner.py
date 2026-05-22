@@ -250,6 +250,7 @@ async def test_runner_reregisters_on_poll_401(
     """W3a: on a 401 from poll, the runner re-registers (load_or_register) and
     continues. Generalizes the W1 EPOCH_MISMATCH re-join path."""
     import httpx as _httpx
+
     import dlw.executor.runner as runner_mod
 
     register_calls: list[int] = []
@@ -302,3 +303,166 @@ async def test_runner_reregisters_on_poll_401(
     # load_or_register called at least twice: initial bootstrap + after the 401.
     assert len(register_calls) >= 2
     assert "poll" in runner._client.calls
+
+
+# ---------------------------------------------------------------------------
+# FU3 — local-fs reclamation via heartbeat
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+async def test_heartbeat_reclaims_local_key(
+    settings, auth_state, tmp_path: Path,
+) -> None:
+    """Runner unlinks a file dispatched via reclaim and confirms on next beat."""
+    target_file = tmp_path / "k.bin"
+    target_file.write_bytes(b"data")
+
+    base_path = str(tmp_path)
+    hb_resp_with_reclaim = {
+        "id": "x", "status": "healthy", "health_score": 100, "epoch": 1,
+        "reclaim": [{"id": 7, "base_path": base_path, "storage_key": "k.bin"}],
+    }
+    hb_resp_empty = {
+        "id": "x", "status": "healthy", "health_score": 100, "epoch": 1,
+        "reclaim": [],
+    }
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return hb_resp_with_reclaim
+        return hb_resp_empty
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    # File must be deleted.
+    assert not target_file.exists(), "reclaim target should have been unlinked"
+
+    # 7 must appear in reclaimed_key_ids of a subsequent heartbeat call.
+    all_calls = client.heartbeat.call_args_list
+    assert len(all_calls) >= 2
+    confirmed_ids = [
+        kw.get("reclaimed_key_ids", [])
+        for _, kw in ((c.args, c.kwargs) for c in all_calls[1:])
+    ]
+    assert any(7 in ids for ids in confirmed_ids), (
+        f"id 7 never confirmed; later calls kwargs: {confirmed_ids}"
+    )
+
+
+@pytest.mark.slow
+async def test_heartbeat_reclaim_missing_file_still_confirms(
+    settings, auth_state, tmp_path: Path,
+) -> None:
+    """A reclaim for a missing file (already gone) is still confirmed."""
+    base_path = str(tmp_path)
+    # File does NOT exist — we do not create it.
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "id": "x", "status": "healthy", "health_score": 100, "epoch": 1,
+                "reclaim": [{"id": 7, "base_path": base_path, "storage_key": "missing.bin"}],
+            }
+        return {"id": "x", "status": "healthy", "health_score": 100, "epoch": 1, "reclaim": []}
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    all_calls = client.heartbeat.call_args_list
+    assert len(all_calls) >= 2
+    confirmed_ids = [
+        c.kwargs.get("reclaimed_key_ids", [])
+        for c in all_calls[1:]
+    ]
+    assert any(7 in ids for ids in confirmed_ids), (
+        f"id 7 not confirmed for missing file; later calls: {confirmed_ids}"
+    )
+
+
+@pytest.mark.slow
+async def test_heartbeat_reclaim_refuses_path_traversal(
+    settings, auth_state, tmp_path: Path,
+) -> None:
+    """Path-traversal keys are refused: sentinel survives, id 9 never confirmed."""
+    # Create a sentinel OUTSIDE base_path.
+    sentinel = tmp_path.parent / "evil_sentinel"
+    sentinel.write_bytes(b"secret")
+
+    base_path = str(tmp_path)
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "id": "x", "status": "healthy", "health_score": 100, "epoch": 1,
+                "reclaim": [
+                    {"id": 9, "base_path": base_path, "storage_key": "../../evil_sentinel"},
+                    # Also test empty base_path → refused.
+                    {"id": 10, "base_path": "", "storage_key": "anything"},
+                ],
+            }
+        return {"id": "x", "status": "healthy", "health_score": 100, "epoch": 1, "reclaim": []}
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False, "subtask": None, "assignment_token": None})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    # Sentinel must survive.
+    assert sentinel.exists(), "path-traversal guard failed: sentinel was deleted"
+
+    # id 9 must NEVER appear in any reclaimed_key_ids.
+    all_calls = client.heartbeat.call_args_list
+    all_confirmed = [
+        _id
+        for c in all_calls
+        for _id in c.kwargs.get("reclaimed_key_ids", [])
+    ]
+    assert 9 not in all_confirmed, f"id 9 was incorrectly confirmed: {all_confirmed}"
+    assert 10 not in all_confirmed, f"id 10 (empty base) was incorrectly confirmed: {all_confirmed}"
+
+    # Clean up sentinel.
+    sentinel.unlink(missing_ok=True)

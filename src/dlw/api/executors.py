@@ -10,6 +10,7 @@ Phase 2 W3a changes:
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -23,6 +24,7 @@ from dlw.auth.ca import fingerprint_of, sign_csr
 from dlw.auth.executor_epoch import require_executor_epoch
 from dlw.auth.executor_jwt_dep import require_executor_jwt
 from dlw.auth.hmac_heartbeat_dep import require_hmac_heartbeat
+from dlw.config import get_settings
 from dlw.db.models.executor import Executor
 from dlw.db.models.source import SubtaskChunk
 from dlw.db.models.storage import StorageBackend
@@ -32,14 +34,19 @@ from dlw.schemas.executor import (
     ExecutorHeartbeat,
     ExecutorRead,
     ExecutorRegister,
+    ReclaimItem,
     RegistrationResponse,
     RenewRequest,
     RenewResponse,
 )
 from dlw.schemas.storage import StorageConfig
 from dlw.schemas.subtask import ChunkAssignment, SubTaskRead
+from dlw.services.audit import write_audit
 from dlw.services.executor_service import record_heartbeat, upsert_executor_with_cert
 from dlw.services.scheduler import claim_one_subtask
+from dlw.services.storage_objects import confirm_local_reclaim, dispatch_local_reclaim
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/executors", tags=["executors"])
 
@@ -134,12 +141,46 @@ async def post_heartbeat(
     executor: Executor = Depends(require_executor_epoch),
     session: AsyncSession = Depends(_session),
 ) -> ExecutorRead:
+    s = get_settings()
     try:
         ex = await record_heartbeat(session, executor.id, body)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+
+    async def _audit(*, action, id, tenant_id, storage_key, size):
+        await write_audit(
+            session, action=action,
+            resource_type="storage_physical_keys",
+            resource_id=str(id), outcome="success",
+            tenant_id=tenant_id, actor_user_id=None,
+            payload={"storage_key": storage_key, "size": size},
+        )
+
+    if body.reclaimed_key_ids:
+        await confirm_local_reclaim(
+            session, executor.id, body.reclaimed_key_ids, audit=_audit)
+
+    reclaim: list[ReclaimItem] = []
+    if s.gc_delete_physical_bytes:
+        reclaim = await dispatch_local_reclaim(
+            session, executor.id,
+            grace_seconds=max(s.gc_grace_seconds, s.gc_archive_after_days * 86400),
+            limit=s.gc_max_objects_per_tick,
+        )
+        # Observability: count local orphan keys not dispatchable to any executor.
+        try:
+            from dlw.services.storage_objects import count_stuck_local_orphans
+            stuck = await count_stuck_local_orphans(session)
+            if stuck:
+                logger.info(
+                    "local-reclaim: %d stuck local orphan(s) (null executor_id or past-grace~live)",
+                    stuck,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     await session.commit()
-    return ExecutorRead.model_validate(ex)
+    return ExecutorRead.model_validate(ex).model_copy(update={"reclaim": reclaim})
 
 
 @router.post("/{executor_id}/poll",

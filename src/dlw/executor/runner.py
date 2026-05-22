@@ -33,6 +33,26 @@ from dlw.executor.parts_dir import startup_gc, total_parts_bytes
 logger = logging.getLogger(__name__)
 
 
+def _safe_target(base_path: str, storage_key: str) -> Path | None:
+    """Return resolved Path only if storage_key stays inside base_path.
+
+    Rejects empty or non-absolute base_path, and any key that resolves
+    outside the base directory (path-traversal guard).
+    """
+    if not base_path:
+        return None
+    base = Path(base_path)
+    if not base.is_absolute():
+        return None
+    resolved = (base / storage_key).resolve()
+    try:
+        if not resolved.is_relative_to(base.resolve()):
+            return None
+    except ValueError:
+        return None
+    return resolved
+
+
 class ExecutorRunner:
     def __init__(
         self,
@@ -50,6 +70,7 @@ class ExecutorRunner:
         # When auth_state is provided (tests), run() skips load_or_register.
         self._auth = auth_state
         self._shutdown = asyncio.Event()
+        self._pending_reclaim_confirms: list[int] = []
 
     def _choose_downloader(self, file_size: int | None, *, has_chunks: bool = False):
         if has_chunks:
@@ -106,11 +127,31 @@ class ExecutorRunner:
                     _disk_free_gb = int(_du.free // (1024 ** 3))
                 except OSError:
                     _disk_free_gb = None
-                await self._client.heartbeat(
+                resp = await self._client.heartbeat(
                     executor_id=self._s.id, health_score=100,
                     parts_dir_bytes=total_parts_bytes(self._s.parts_dir_path),
                     disk_free_gb=_disk_free_gb,
+                    reclaimed_key_ids=self._pending_reclaim_confirms,
                 )
+                confirmed: list[int] = []
+                for item in (resp.get("reclaim") or []):
+                    target = _safe_target(
+                        item.get("base_path", ""), item.get("storage_key", "")
+                    )
+                    if target is None:
+                        logger.warning(
+                            "local reclaim: refusing unsafe target base=%r key=%r",
+                            item.get("base_path"), item.get("storage_key"),
+                        )
+                        continue
+                    try:
+                        target.unlink(missing_ok=True)
+                        confirmed.append(item["id"])
+                    except OSError as e:
+                        logger.warning(
+                            "local reclaim unlink failed %s: %s", target, e
+                        )
+                self._pending_reclaim_confirms = confirmed
             except Exception as e:
                 logger.warning("heartbeat failed: %s", e)
             try:

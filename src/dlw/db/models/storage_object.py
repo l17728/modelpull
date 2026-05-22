@@ -57,6 +57,7 @@ class StoragePhysicalKey(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    executor_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False)
 

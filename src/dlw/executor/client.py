@@ -151,6 +151,7 @@ class ControllerClient:
         health_score: int,
         parts_dir_bytes: int,
         disk_free_gb: int | None = None,
+        reclaimed_key_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """POST /heartbeat with mTLS + JWT + HMAC. The body is sent as raw
         content (not json=) so the HMAC signature covers the exact bytes."""
@@ -161,6 +162,8 @@ class ControllerClient:
         }
         if disk_free_gb is not None:
             body_dict["disk_free_gb"] = disk_free_gb
+        if reclaimed_key_ids:
+            body_dict["reclaimed_key_ids"] = reclaimed_key_ids
         body = _json.dumps(body_dict).encode("utf-8")
         ts = int(time.time())
         nonce = secrets.token_hex(16)

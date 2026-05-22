@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import dlw.db.models  # noqa: F401
 from dlw.db.base import Base
-from dlw.db.models.storage_object import StorageObject
+from dlw.db.models.storage_object import StorageObject, StoragePhysicalKey
 from dlw.db.models.task import DownloadTask, FileSubTask
 from dlw.services.scheduler import complete_subtask
 
@@ -60,6 +60,32 @@ async def test_download_complete_records_object(f):
         obj = (await s.execute(select(StorageObject))).scalar_one()
         assert (obj.sha256, obj.storage_key, obj.refcount) == \
                ("c" * 64, "o/r/abc/m", 1)
+
+
+async def test_complete_subtask_records_executor_id_on_physical_key(f):
+    """Writer executor_id flows through complete_subtask into storage_physical_keys."""
+    async with f() as s:
+        t = DownloadTask(tenant_id=1, project_id=1, owner_user_id=1,
+                         repo_id="o/r", revision="xyz", storage_id=1,
+                         path_template="t", status="downloading")
+        s.add(t)
+        await s.flush()
+        tok = uuid.uuid4()
+        sub = FileSubTask(task_id=t.id, tenant_id=1, filename="n",
+                          file_size=8, expected_sha256="d" * 64,
+                          status="assigned", assignment_token=tok,
+                          executor_id="ex-writer-1")
+        s.add(sub)
+        await s.flush()
+        sid = sub.id
+        await complete_subtask(s, sid, final_status="succeeded",
+                               actual_sha256="d" * 64, bytes_downloaded=8,
+                               error=None, assignment_token=tok,
+                               s3_key="o/r/xyz/n")
+        await s.commit()
+        phys = (await s.execute(select(StoragePhysicalKey).where(
+            StoragePhysicalKey.storage_key == "o/r/xyz/n"))).scalar_one()
+        assert phys.executor_id == "ex-writer-1"
 
 
 async def test_inherit_complete_does_not_double_count(f):
