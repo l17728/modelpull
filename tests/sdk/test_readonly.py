@@ -35,3 +35,13 @@ def test_task_events(sync_client):
 def test_audit_search(sync_client):
     a = sync_client.audit.search(action="task.")
     assert a["items"][0]["outcome"] == "success"
+
+
+def test_task_stream_buffered(sync_client):
+    lines = []
+    with sync_client.tasks.task_stream("33333333-3333-3333-3333-333333333333") as r:
+        assert r.status_code == 200
+        for line in r.iter_lines():
+            lines.append(line)
+    data = [l for l in lines if l.startswith("data: ")]
+    assert data and '"status": "succeeded"' in data[0]

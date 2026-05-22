@@ -68,6 +68,16 @@ async def test_tasks_events_stream_async(aclient):
     assert any(ln.startswith("data:") or ln.startswith(":open") for ln in lines)
 
 
+async def test_task_stream_async(aclient):
+    t = await aclient.tasks.submit(repo_id="o/r", revision="b" * 40,
+                                   storage_id=1)
+    lines = []
+    async with aclient.tasks.task_stream(t.id, max_ticks=1) as r:
+        async for line in r.aiter_lines():
+            lines.append(line)
+    assert any(l.startswith("data: ") or l.startswith(":open") for l in lines)
+
+
 async def test_async_wait_polls_until_terminal():
     from dlw.sdk.aclient import AsyncDownloadTask
 

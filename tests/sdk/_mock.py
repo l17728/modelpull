@@ -53,6 +53,16 @@ def make_mock_transport() -> httpx.MockTransport:
             if status_filter:
                 items = [i for i in items if i["status"] == status_filter]
             return httpx.Response(200, json={"items": items})
+        mst = re.fullmatch(r"/api/v1/tasks/([^/]+)/stream", path)
+        if mst and request.method == "GET":
+            tid = mst.group(1)
+            status = "failed" if "fail" in tid else "succeeded"
+            detail = {"id": tid, "repo_id": "o/r", "revision": "a" * 40,
+                      "status": status, "priority": 1, "created_at": None,
+                      "completed_at": None, "error_message": None, "subtasks": []}
+            body = f":open\n\ndata: {json.dumps(detail)}\n\n"
+            return httpx.Response(200, text=body,
+                                  headers={"content-type": "text/event-stream"})
         if mev and request.method == "GET":
             return httpx.Response(200, json={
                 "items": [{"ts": "2026-01-01T00:00:00", "type": "task.created",
