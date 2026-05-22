@@ -51,18 +51,43 @@
    the project has held a strict "no new runtime dep" line across every UI SP;
    `confusable_homoglyphs` is unmaintained and pulls a data table; mixed-script
    detection covers the invariant's stated intent ("拉丁/西里尔/希腊字母混淆").
-   Documented deliberate deviation.
+   Documented deliberate deviation. **Residual gap (precise):** this detects
+   cross-script mixing only — it does NOT catch (a) within-script confusables
+   (`rn`→`m`, `0`/`O`, `1`/`l`), (b) scripts beyond Latin/Cyrillic/Greek
+   (Armenian, Cherokee), or (c) a fully single-script (all-Cyrillic) word that
+   visually mimics Latin without mixing. NFKC (run first) already folds most
+   fullwidth/compatibility homoglyphs to ASCII. Net: **inv 36's "confusables"
+   criterion is satisfied partially (mixed-script)**; a `confusable_homoglyphs`
+   upgrade is a tracked future option, not a silent regression. Acceptable
+   because this is a *warning* (not a refusal) — the real backstops are
+   user-confirm (SP4b) + audit (SP4a) + budget (SP4d), per §6.1's own caveat.
+
+5. **Inv-19 retrofit on the existing tools** (pre-review IMPORTANT #2): doc §3.1
+   marks `dlw_get_task.error_message` (executor-reported) and
+   `dlw_get_task_events` event `message` as external-origin fields requiring
+   sanitize. They flow into LLM context UNSANITIZED on `main` today — a live
+   inv-19 gap. SP4e closes it now (the sanitizer makes it ~2 lines each):
+   `_get_task` sanitizes `error_message`, `_get_task_events` sanitizes each
+   item's `message`, both via `sanitize_external(..., source="executor"/"event")`.
+   `dlw_list_tasks` is doc-marked "internal — no external fields", left untouched.
 
 **Out of scope (named, deferred):**
 - `fetch_user_content(url)` + `web_search` — arbitrary-egress tools needing an
   egress allowlist + admin-enable flag; deferred (HF-scoped tools fully exercise
   inv 19/41 without arbitrary egress).
 - SP4c sandboxed-MCP subprocess (inv 37) — Windows-dev infeasible.
-- Retrofitting sanitization onto the **existing** internal tools' marginal
-  external fields (`dlw_get_task.error_message` from executor reports,
-  `dlw_get_task_events` event messages). These are internal-DB-stored, lower
-  risk; SP4e's named scope is the *external-content tool layer + the sanitizer*.
-  Documented follow-on. (The sanitizer module is reusable for that retrofit.)
+- **Non-bypassable structural sanitization choke point** (named follow-on, NOT
+  buried): inv-19 enforcement in SP4e is per-tool — each external tool calls the
+  sanitizer itself (the new HF tools wrap their output; the retrofitted existing
+  tools sanitize their named fields in place). Doc §3.1 envisions an *automatic*
+  choke point ("MCP server 序列化 tool output 时自动…开发者不能选择性跳过") so a
+  future tool author cannot forget. A declarative `Tool.external_fields` +
+  `call_tool` recursive-scan choke point is deferred because (a) it touches the
+  merged `call_tool` contract (scope creep on a security-critical path), and (b)
+  the two output shapes here (wrap-whole vs sanitize-field) don't share one
+  assertion cleanly. **Tracked inv-19 partial-compliance item**: enforcement is
+  correct for all tools that exist as of SP4e; the structural guarantee against
+  future omission is the follow-on. The sanitizer module is the reusable basis.
 - Inv 16-v2.1 (audit final assistant message), inv 39 (conversation isolation /
   history_summary), inv 36's library-based confusables — not SP4e.
 
@@ -198,9 +223,15 @@ async def _hf_api_metadata(session, principal, *, repo_id, revision=None) -> dic
         return {"error": str(e)}
     except HfNetworkError as e:
         return {"error": f"hf_network: {e}"}
-    # sanitize the only free-text-ish field(s); structural numbers pass through
-    res = sanitize_external(json.dumps(meta, default=str), source=f"hf:{repo_id}")
-    return {"repo_id": repo_id, "sanitized": res.text, "warnings": res.warnings}
+    # T1 trusted-structured: sha/timestamp/sizes pass through untouched; only
+    # the attacker-influenceable file paths are sanitized (scanning the whole
+    # JSON would false-positive base64 on a 40-hex sha — pre-review B1).
+    paths = "\n".join(str(s.get("path", "")) for s in meta["siblings"])
+    res = sanitize_external(paths, source=f"hf:{repo_id}")
+    return {"repo_id": repo_id, "sha": meta["sha"],
+            "last_modified": meta["last_modified"],
+            "file_count": len(meta["siblings"]),
+            "files_sanitized": res.text, "warnings": res.warnings}
 
 async def _hf_model_card(session, principal, *, repo_id) -> dict:
     s = get_settings()
@@ -305,8 +336,15 @@ is monkeypatched (no live network).
   trust_level="t2">` + 8 KB + demotion line. ✓
 - **Inv 17** (read-only ⇒ no confirm): both new tools are read-only. ✓
 - **Inv 15** (RBAC scope): tools take `(session, principal)`; HF fetch uses the
-  configured server `hf_token` (HF is public/repo-scoped, not per-user) — no
-  privilege escalation; tools return only public HF data. ✓
+  configured server `hf_token` — no *modelpull* privilege escalation (the token
+  grants no modelpull access; the AI returns only data any user could fetch from
+  HF directly). This holds *because gated/private repos surface as an error*:
+  `GatedRepoError`/401/403 map to `HfPrivateOrAuthRequired` → `{"error": ...}`,
+  so the tools never silently fetch a private repo with the server token (which
+  would be an inv-15 leak). Confirmed by the error-mapping test. ✓
+- **Inv 16** (audit): the new tools register in `READONLY_TOOLS` and run through
+  the same `service.py::call_tool` closure that writes `ai.tool.{name}` audit —
+  no audit gap. ✓
 - **Placeholder scan**: the system-prompt notice is a defined constant + asserted
   present (real-backend wiring is honestly deferred), not a vague TODO.
 - **Consistency**: Tool dataclass + `READONLY_TOOLS` registration, stub-trigger
