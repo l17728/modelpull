@@ -127,11 +127,15 @@ class ExecutorRunner:
                     _disk_free_gb = int(_du.free // (1024 ** 3))
                 except OSError:
                     _disk_free_gb = None
+                accessible = [
+                    p for p in self._s.local_base_paths if Path(p).is_dir()
+                ]
                 resp = await self._client.heartbeat(
                     executor_id=self._s.id, health_score=100,
                     parts_dir_bytes=total_parts_bytes(self._s.parts_dir_path),
                     disk_free_gb=_disk_free_gb,
                     reclaimed_key_ids=self._pending_reclaim_confirms,
+                    accessible_base_paths=accessible,
                 )
                 confirmed: list[int] = []
                 for item in (resp.get("reclaim") or []):
@@ -142,6 +146,13 @@ class ExecutorRunner:
                         logger.warning(
                             "local reclaim: refusing unsafe target base=%r key=%r",
                             item.get("base_path"), item.get("storage_key"),
+                        )
+                        continue
+                    expected = item.get("size")
+                    if target.exists() and expected is not None and target.stat().st_size != expected:
+                        logger.warning(
+                            "local reclaim: size mismatch %s (have %d want %s); refusing",
+                            target, target.stat().st_size, expected,
                         )
                         continue
                     try:

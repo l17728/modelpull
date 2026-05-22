@@ -466,3 +466,200 @@ async def test_heartbeat_reclaim_refuses_path_traversal(
 
     # Clean up sentinel.
     sentinel.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# FU4 — executor advertises local_base_paths + size-verifies before unlink
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+async def test_advertises_existing_base_paths(
+    auth_state, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner passes accessible_base_paths (only existing dirs) to heartbeat."""
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-test-w1")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    monkeypatch.setenv("DLW_EXECUTOR_HEARTBEAT_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("DLW_EXECUTOR_POLL_INTERVAL_SECONDS", "1")
+    # JSON list: forward slashes work cross-platform for env parsing
+    fwd_tmp = str(tmp_path).replace("\\", "/")
+    monkeypatch.setenv(
+        "DLW_EXECUTOR_LOCAL_BASE_PATHS",
+        f'["{fwd_tmp}","/nonexistent/bogus"]',
+    )
+    settings = ExecutorSettings()
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(return_value={"id": "x", "status": "healthy"})
+    client.poll = AsyncMock(return_value={"assigned": False})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(1.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert client.heartbeat.await_count >= 1
+    call_kwargs = client.heartbeat.call_args.kwargs
+    assert "accessible_base_paths" in call_kwargs
+    # tmp_path exists; /nonexistent/bogus does not → filtered out
+    # Normalize separators for cross-platform comparison
+    reported = [Path(p) for p in call_kwargs["accessible_base_paths"]]
+    assert reported == [tmp_path], f"expected [{tmp_path}], got {reported}"
+
+
+@pytest.mark.slow
+async def test_reclaim_size_mismatch_refused(
+    auth_state, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present file whose size differs from the ledger size is NOT unlinked."""
+    target = tmp_path / "k"
+    target.write_bytes(b"123456789")  # 9 bytes; ledger says 5
+
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-test-w1")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    monkeypatch.setenv("DLW_EXECUTOR_HEARTBEAT_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("DLW_EXECUTOR_POLL_INTERVAL_SECONDS", "1")
+    settings = ExecutorSettings()
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "id": "x", "status": "healthy",
+                "reclaim": [{"id": 5, "base_path": str(tmp_path), "storage_key": "k", "size": 5}],
+            }
+        return {"id": "x", "status": "healthy", "reclaim": []}
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    # File must survive (size mismatch → refused).
+    assert target.exists(), "size-mismatch file must NOT be unlinked"
+
+    # id 5 must never appear in any reclaimed_key_ids.
+    all_confirmed = [
+        _id
+        for c in client.heartbeat.call_args_list
+        for _id in c.kwargs.get("reclaimed_key_ids", [])
+    ]
+    assert 5 not in all_confirmed, f"id 5 incorrectly confirmed: {all_confirmed}"
+
+
+@pytest.mark.slow
+async def test_reclaim_size_match_unlinks(
+    auth_state, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present file whose size matches the ledger size IS unlinked and confirmed."""
+    target = tmp_path / "k"
+    target.write_bytes(b"12345")  # 5 bytes; ledger says 5
+
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-test-w1")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    monkeypatch.setenv("DLW_EXECUTOR_HEARTBEAT_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("DLW_EXECUTOR_POLL_INTERVAL_SECONDS", "1")
+    settings = ExecutorSettings()
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "id": "x", "status": "healthy",
+                "reclaim": [{"id": 5, "base_path": str(tmp_path), "storage_key": "k", "size": 5}],
+            }
+        return {"id": "x", "status": "healthy", "reclaim": []}
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    # File must be deleted.
+    assert not target.exists(), "size-match file must be unlinked"
+
+    # id 5 must be confirmed in a later heartbeat.
+    all_calls = client.heartbeat.call_args_list
+    assert len(all_calls) >= 2
+    confirmed_ids = [
+        _id
+        for c in all_calls[1:]
+        for _id in c.kwargs.get("reclaimed_key_ids", [])
+    ]
+    assert 5 in confirmed_ids, f"id 5 never confirmed; later calls: {confirmed_ids}"
+
+
+@pytest.mark.slow
+async def test_reclaim_missing_file_confirms(
+    auth_state, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reclaim for a missing file is still confirmed (size field present but irrelevant)."""
+    monkeypatch.setenv("DLW_EXECUTOR_ID", "host-test-w1")
+    monkeypatch.setenv("DLW_EXECUTOR_BEARER_TOKEN", "secret")
+    monkeypatch.setenv("DLW_EXECUTOR_HEARTBEAT_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("DLW_EXECUTOR_POLL_INTERVAL_SECONDS", "1")
+    settings = ExecutorSettings()
+
+    call_count = 0
+
+    async def hb_side_effect(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {
+                "id": "x", "status": "healthy",
+                "reclaim": [{"id": 5, "base_path": str(tmp_path), "storage_key": "missing_k", "size": 5}],
+            }
+        return {"id": "x", "status": "healthy", "reclaim": []}
+
+    client = MagicMock(spec=ControllerClient)
+    client.heartbeat = AsyncMock(side_effect=hb_side_effect)
+    client.poll = AsyncMock(return_value={"assigned": False})
+
+    runner = ExecutorRunner(
+        settings=settings, client=client,
+        stream_downloader=MagicMock(), chunk_downloader=MagicMock(),
+        auth_state=auth_state,
+    )
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(2.5)
+    runner.request_shutdown()
+    await asyncio.wait_for(task, timeout=5)
+
+    all_calls = client.heartbeat.call_args_list
+    assert len(all_calls) >= 2
+    confirmed_ids = [
+        _id
+        for c in all_calls[1:]
+        for _id in c.kwargs.get("reclaimed_key_ids", [])
+    ]
+    assert 5 in confirmed_ids, f"id 5 not confirmed for missing file; later calls: {confirmed_ids}"
