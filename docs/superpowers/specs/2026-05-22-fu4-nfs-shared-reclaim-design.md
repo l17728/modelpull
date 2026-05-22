@@ -46,6 +46,16 @@ Double-dispatch (writer AND a sibling both get the key across 10 s beats) is the
 harmless: idempotent `unlink` (size-checked) + `confirm` re-selects 0 the second
 time. No writer-health gating needed.
 
+**Dispatch→confirm window (re-review IMPORTANT, documented residual):** if an
+executor's advertised set SHRINKS between the dispatch beat and the confirm beat
+(an unmount/reconfig), the confirming `acc` no longer authorizes the key →
+confirm matches 0 → the file is already unlinked but the ledger row persists.
+This is NOT a regression of B1 and NOT data loss: the row stays past-grace +
+`~live`, and the next beat from ANY executor still advertising that base_path
+(the writer, or another mount-holder) re-dispatches it → the now-missing file →
+`unlink(missing_ok=True)` → confirm succeeds → row cleared. Worst case is a
+delayed re-clear; the stuck-orphan gauge (FU3) surfaces it if it lingers.
+
 **Honest scope:** local-fs is a minor backend (inherit-only writes), and
 NFS-shared-with-offline-writer is a narrow sub-case — FU4 is near-dead-code,
 shipped for parity/completeness. The size-verify + storage_id binding + tenant
