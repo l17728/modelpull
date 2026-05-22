@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from dlw.ai.runner import (AgentContext, AIBackendUnavailable, StubAgentRunner,
-                           build_runner)
+from dlw.ai.runner import AgentContext, AIBackendUnavailable, StubAgentRunner, build_runner
 
 
 class _Settings:
@@ -52,3 +51,22 @@ def test_build_runner_stub_and_unavailable():
         build_runner(_Settings("claude_code"))
     with pytest.raises(AIBackendUnavailable):
         build_runner(_Settings("openai_compat"))
+
+
+async def test_model_card_trigger_calls_tool():
+    seen = []
+
+    async def call_tool(name, tool_input):
+        seen.append((name, tool_input))
+        return {"repo_id": "org/m",
+                "sanitized": '<external_user_content trust_level="t2" '
+                             'source="hf-card:org/m">safe</external_user_content>',
+                "warnings": []}
+
+    evs = [ev async for ev in StubAgentRunner().run(
+        AgentContext(user_message="show me the model card for org/m"),
+        call_tool=call_tool)]
+    kinds = [e.event for e in evs]
+    assert "tool_call" in kinds and "tool_result" in kinds
+    assert seen and seen[0][0] == "hf_model_card"
+    assert seen[0][1]["repo_id"] == "org/m"
