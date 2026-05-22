@@ -44,8 +44,8 @@
   - `GET /api/v1/auth/me` → `{"user_id":1,"tenant_id":1,"role":"tenant_admin","project_ids":[1],"is_service":false}`
   - `GET /api/v1/quota/current` → `{"tenant_id":1,"bytes_used_month":0,"bytes_quota_month":1000,"storage_gb_used":0,"storage_gb_quota":1024,"concurrent_tasks":0,"concurrent_quota":10}`
   - `GET /api/v1/executors` → `{"items":[{"id":"ex-1","status":"healthy","health_score":100,"epoch":1,"host_id":"h1","tenant_id":1,"last_heartbeat_at":null,"nic_speed_gbps":10,"disk_free_gb":900,"disk_total_gb":1000,"created_at":"2026-01-01T00:00:00"}]}` (respect a `?status=` filter if present)
-  - `GET /api/v1/tasks/{id}/events` → `{"items":[{"id":1,"occurred_at":"2026-01-01T00:00:00","action":"task.created","message":"created","outcome":"success"}],"next_cursor":null}`
-  - `GET /api/v1/audit/log` → `{"items":[{"id":1,"occurred_at":"2026-01-01T00:00:00","tenant_id":1,"actor_user_id":1,"action":"task.created","resource_type":"task","resource_id":"t1","outcome":"success","payload":{}}],"next_cursor":null}`
+  - `GET /api/v1/tasks/{id}/events` → REAL `TaskEvent` shape is `{ts, type, message, details}` (verified `schemas/task_detail.py` — NOT `id`/`action`/`outcome`): `{"items":[{"ts":"2026-01-01T00:00:00","type":"task.created","message":"created","details":{}}],"next_cursor":null}`
+  - `GET /api/v1/audit/log` → REAL `AuditEntryRead` requires `actor_ip`/`trace_id`/`prev_hash`/`self_hash` too (verified `schemas/audit.py`): `{"items":[{"id":1,"occurred_at":"2026-01-01T00:00:00","tenant_id":1,"actor_user_id":1,"actor_ip":"127.0.0.1","action":"task.created","resource_type":"task","resource_id":"t1","outcome":"success","payload":{},"trace_id":"tr1","prev_hash":null,"self_hash":"h1"}],"next_cursor":null}`
 
 - [ ] **Step 2: Write the failing sync tests.** In `tests/sdk/test_readonly.py` (new; mirror `test_client_sync.py`'s `Client(..., transport=make_mock_transport())` setup):
 ```python
@@ -62,7 +62,7 @@ def test_executors_list(sync_client):
 
 def test_task_events(sync_client):
     ev = sync_client.tasks.events("11111111-1111-1111-1111-111111111111")
-    assert ev["items"][0]["action"] == "task.created"
+    assert ev["items"][0]["type"] == "task.created"   # real TaskEvent key is `type`
 
 def test_audit_search(sync_client):
     a = sync_client.audit.search(action="task.")
@@ -119,7 +119,16 @@ Add to `TasksAPI`:
         r = self._h.get(f"/api/v1/tasks/{task_id}/events", params=params)
         raise_for_status(r)
         return r.json()
+
+    def events_stream(self, task_id: str, *, max_ticks: int | None = None):
+        """SSE seam for `dlw events --follow`. Returns the httpx streaming
+        context manager (caller iterates `.iter_lines()`). `max_ticks` bounds
+        the stream for tests; production passes None (runs until disconnect)."""
+        params = {"max_ticks": max_ticks} if max_ticks is not None else None
+        return self._h.stream(
+            "GET", f"/api/v1/tasks/{task_id}/events/stream", params=params)
 ```
+(pre-review: this is the SDK seam, NOT a reach into `client._http` from the CLI. The handler calls `client.tasks.events_stream(...)`.)
 Add to `Client.__init__` (after `self.tasks = TasksAPI(self._http)`):
 ```python
         self.quota = QuotaAPI(self._http)
@@ -148,9 +157,9 @@ git add src/dlw/sdk/client.py tests/sdk/_mock.py tests/sdk/test_readonly.py && g
 - Modify: `src/dlw/sdk/aclient.py`
 - Test: `tests/sdk/test_client_async.py` (extend)
 
-- [ ] **Step 1: Read `aclient.py`** to match its exact async resource-class pattern (`AsyncTasksAPI` etc.). Add async `AsyncQuotaAPI`/`AsyncExecutorsAPI`/`AsyncAuditAPI` (same methods, `async def` + `await self._h.get(...)`), `AsyncTasksAPI.events`, `AsyncClient.me`, and wire `self.quota/executors/audit` in `AsyncClient.__init__`.
+- [ ] **Step 1: Read `aclient.py`** to match its exact async resource-class pattern (`AsyncTasksAPI` etc.). Add async `AsyncQuotaAPI`/`AsyncExecutorsAPI`/`AsyncAuditAPI` (same methods, `async def` + `await self._h.get(...)`), `AsyncTasksAPI.events`, `AsyncTasksAPI.events_stream` (async ctx mgr: `return self._h.stream("GET", url, params=...)` — async httpx supports `async with ... as r: async for line in r.aiter_lines()`), `AsyncClient.me`, and wire `self.quota/executors/audit` in `AsyncClient.__init__`. (The async `events_stream` is what the `--follow` ASGI test exercises — sync httpx.Client can't drive ASGITransport, so the streaming test MUST be async over the real `/events/stream` with `max_ticks=1`.)
 
-- [ ] **Step 2: Extend `tests/sdk/test_client_async.py`** (uses the real ASGI app via the `aclient` fixture). Add (the `_bootstrap` already seeds tenant/quota/executor — verify; if an audit row or task-events row is needed, seed minimally or assert on shape/empty):
+- [ ] **Step 2: Extend `tests/sdk/test_client_async.py`** (uses the real ASGI app via the `aclient` fixture). NOTE (pre-review): `_bootstrap` seeds ONLY Tenant/Project/User/StorageBackend — NOT a QuotaSnapshot, executor, audit, or event rows. So `quota.current()` returns a zero-filled dict (the endpoint returns zeros when no snapshot — Tenant exists), `executors.list()`/`audit.search()` return `{"items": []}`, and `tasks.events(<arbitrary-uuid>)` → 404 → `NotFound`. Keep assertions SHAPE-ONLY (don't expect non-empty items); for `tasks.events`, either submit a task first (reuse the existing submit test's flow) and assert its events shape, or assert the `NotFound` exit for an unowned id. Add:
 ```python
 async def test_me_async(aclient):
     assert (await aclient.me())["tenant_id"] == 1
@@ -232,7 +241,9 @@ def test_audit(capsys):
     ev.add_argument("--limit", type=int, default=50)
     ev.add_argument("--cursor", default=None)
     ev.add_argument("--follow", action="store_true",
-                    help="stream events via SSE until the task is terminal")
+                    help="stream events via SSE until Ctrl-C / disconnect")
+    ev.add_argument("--max-ticks", type=int, default=None,
+                    help=argparse.SUPPRESS)   # test bound for --follow
 
     au = sub.add_parser("audit", help="search the audit log")
     au.add_argument("--action", default=None)
@@ -245,14 +256,15 @@ def test_audit(capsys):
 
 - [ ] **Step 4: Add the generic emitter** in `main.py` (after `_emit`):
 ```python
-def _emit_obj(obj: Any, args: argparse.Namespace) -> None:
+def _emit_obj(obj: Any, args: argparse.Namespace,
+              cols: list[str] | None = None) -> None:
     if args.output == "json":
         sys.stdout.write(json.dumps(obj, default=str) + "\n")
         return
     if isinstance(obj, dict) and isinstance(obj.get("items"), list):
-        _emit_rows(obj["items"])
+        _emit_rows(obj["items"], cols)
     elif isinstance(obj, list):
-        _emit_rows(obj)
+        _emit_rows(obj, cols)
     elif isinstance(obj, dict):
         for k, v in obj.items():
             sys.stdout.write(f"{k}: {v}\n")
@@ -260,15 +272,20 @@ def _emit_obj(obj: Any, args: argparse.Namespace) -> None:
         sys.stdout.write(str(obj) + "\n")
 
 
-def _emit_rows(rows: list) -> None:
+def _emit_rows(rows: list, cols: list[str] | None = None) -> None:
     if not rows:
         sys.stdout.write("(none)\n")
         return
-    cols: list[str] = []
-    for r in rows:
-        for k in r:
-            if k not in cols:
-                cols.append(k)
+    # pre-review: table mode uses a CURATED column allow-list per command (the
+    # JSON output is the stable machine surface; -o json dumps everything). A
+    # full union dump would be unreadably wide and render nested dicts (e.g.
+    # audit `payload`) inline. cols=None → fall back to the union of keys.
+    if cols is None:
+        cols = []
+        for r in rows:
+            for k in r:
+                if k not in cols:
+                    cols.append(k)
     widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows))
               for c in cols}
     sys.stdout.write("  ".join(c.ljust(widths[c]) for c in cols) + "\n")
@@ -293,7 +310,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             return 0
         if args.cmd == "exec":
             if getattr(args, "exec_cmd", None) == "list":
-                emit_obj(client.executors.list(status=args.status), args)
+                emit_obj(client.executors.list(status=args.status), args,
+                         cols=["id", "status", "health_score", "host_id",
+                               "disk_free_gb"])
                 return 0
             sys.stderr.write("usage: dlw exec list\n")
             return 2
@@ -301,32 +320,34 @@ def _dispatch(args: argparse.Namespace) -> int:
             if args.follow:
                 return _follow_events(client, args)
             emit_obj(client.tasks.events(
-                args.task_id, limit=args.limit, cursor=args.cursor), args)
+                args.task_id, limit=args.limit, cursor=args.cursor), args,
+                cols=["ts", "type", "message"])
             return 0
         if args.cmd == "audit":
             emit_obj(client.audit.search(
                 action=args.action, actor_user_id=args.actor,
                 from_=args.from_, to=args.to, limit=args.limit,
-                cursor=args.cursor), args)
+                cursor=args.cursor), args,
+                cols=["occurred_at", "actor_user_id", "action",
+                      "resource_type", "outcome"])
             return 0
 ```
-And add the SSE follow helper (uses the client's underlying httpx for streaming):
+And add the SSE follow helper (uses the SDK `events_stream` seam, NOT `client._http`):
 ```python
 def _follow_events(client, args) -> int:
-    import json
-    url = f"/api/v1/tasks/{args.task_id}/events/stream"
-    with client._http.stream("GET", url) as r:
+    from dlw.sdk._http import raise_for_status
+    max_ticks = getattr(args, "max_ticks", None)   # tests pass a bound
+    with client.tasks.events_stream(args.task_id, max_ticks=max_ticks) as r:
         if r.status_code != 200:
-            r.read()
-            from dlw.sdk._http import raise_for_status
-            raise_for_status(r)
+            r.read()                # materialize the error body before mapping
+            raise_for_status(r)     # 404→NotFound→exit 3, etc.
         for line in r.iter_lines():
             if line.startswith("data: "):
                 sys.stdout.write(line[len("data: "):] + "\n")
                 sys.stdout.flush()
     return 0
 ```
-(`client._http` is the httpx client; using it for streaming is acceptable for the CLI layer. If a cleaner SDK seam is preferred, add `TasksAPI.events_stream(task_id)` returning the stream context manager — but the direct `_http.stream` keeps scope minimal. The stream self-terminates when the task is terminal.)
+**CORRECTION (pre-review I1)**: the `/events/stream` endpoint does NOT self-terminate on a terminal task — it loops until `max_ticks` is reached OR the client disconnects (verified `tasks_events_stream.py:70`). So production `dlw events --follow` runs until Ctrl-C/disconnect (correct for a `--follow`), and TESTS MUST pass `max_ticks` so the stream ends deterministically. Add a hidden `--max-ticks` arg (or `argparse.SUPPRESS` help) to the `events` parser so tests can bound it: `ev.add_argument("--max-ticks", type=int, default=None, help=argparse.SUPPRESS)`. The 404 path is covered by `r.read()` + `raise_for_status` → exit 3.
 
 - [ ] **Step 6: Verify PASS** + full CLI regression: `cd "D:/download_weights" && uv run pytest tests/cli/ -v` → all pass (existing `test_cli_ops.py` etc. unaffected — `run`'s new 4th param is additive; `_dispatch` always passes it).
 
@@ -351,7 +372,7 @@ git add src/dlw/cli/main.py src/dlw/cli/handlers.py tests/cli/test_cli_readonly.
 **Files:**
 - Modify: `docs/operator/cli-sdk.md`
 
-- [ ] **Step 1:** In `docs/operator/cli-sdk.md`, document the new commands (`whoami`, `quota`, `exec list`, `events [--follow]`, `audit`) with one-line usage each + the SDK methods (`client.me()`, `client.quota.current()`, `client.executors.list()`, `client.tasks.events()`, `client.audit.search()`). Move these out of the §6 "deferred" list; keep `login`/`logout`/`materialize`/`retry`/`upgrade`/`search`/`info`/`storage`/`template`/`admin`/`completion`/config-write in deferred WITH the reason (`login` needs a device-code flow endpoint that doesn't exist; the rest have no implemented endpoints). Prose; match the file's style.
+- [ ] **Step 1:** In `docs/operator/cli-sdk.md`, document the new commands (`whoami`, `quota`, `exec list`, `events [--follow]`, `audit`) with one-line usage each + the SDK methods (`client.me()`, `client.quota.current()`, `client.executors.list()`, `client.tasks.events()`, `client.audit.search()`). Move these out of the §6 "deferred" list; keep `login`/`logout`/`materialize`/`retry`/`upgrade`/`search`/`info`/`storage`/`template`/`admin`/`completion`/config-write in deferred WITH the reason (`login` needs a device-code flow endpoint that doesn't exist; the rest have no implemented endpoints). Prose; match the file's style. ALSO add two clarifying notes (pre-review): (a) **auth scope** — `whoami` uses `require_principal` (any valid bearer, incl. the system-admin service token, which resolves to `user_id=0, is_service=true`), whereas `quota`/`exec`/`audit` use `require_perm` (tenant roles) — so with the service token `whoami` succeeds but `quota`/`audit` may 403; use a tenant-user token for the latter. (b) **`watch` vs `events --follow`** — `watch` is the task-STATUS poller (prints status until terminal); `events --follow` streams the raw event log via SSE until Ctrl-C. `events --follow` is a deliberate additive extension (the v2.0 vision's `stream_events` remains otherwise deferred).
 
 - [ ] **Step 2: Commit.**
 ```bash

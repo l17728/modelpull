@@ -181,9 +181,18 @@ Extend the established patterns:
   the controller's exact query-param names in `api/audit.py` and map precisely.
 - **`exec` subcommand form**: nested `dlw exec list` vs flat — implementer matches
   the existing argparse structure; either is fine, document the chosen form.
-- **`events --follow` SSE**: httpx streams natively; the endpoint self-terminates
-  on terminal status. Keep the follow loop minimal (print + exit on close); if
-  the mock-transport SSE test is awkward, use the async ASGI client. No new dep.
+- **`events --follow` SSE (pre-review correction)**: the `/events/stream`
+  endpoint does NOT self-terminate on terminal task status — it loops until
+  `?max_ticks=N` is hit OR the client disconnects (verified
+  `tasks_events_stream.py:70`). So production `--follow` runs until Ctrl-C/
+  disconnect (correct for a follow), and TESTS pass `max_ticks` to bound it.
+  The SDK exposes a real `events_stream(task_id, *, max_ticks=None)` seam
+  (sync + async) — the handler uses that, NOT a reach into `client._http`.
+  **Sync httpx.Client cannot drive ASGITransport** (httpx async-only — the
+  project's prior SP4 lesson), so the `--follow` test that hits the REAL
+  endpoint is ASYNC (`AsyncTasksAPI.events_stream` over ASGITransport with
+  `max_ticks=1`); a sync MockTransport test can cover the buffered-body parse +
+  the 404→NotFound path. No new dep.
 - **No openapi change** (these endpoints are already in the spec / are runtime),
   no null examples. No migration. No frontend.
 - **CI doesn't gate ruff** — real gate is pytest + `lint_invariants`; `ruff
