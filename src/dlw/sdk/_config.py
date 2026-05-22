@@ -89,6 +89,24 @@ def use_context(name: str, *, config_path: str | None = None) -> Path:
     return save_config(cfg, config_path=config_path)
 
 
+def resolve_server(*, server: str | None = None,
+                   config_path: str | None = None) -> str:
+    """Server precedence only (no token required): flag > DLW_SERVER > current-context server > default."""
+    cfg = _load_config(config_path)
+    cur = cfg.get("current_context")
+    ctx = ((cfg.get("contexts") or {}).get(cur) or {}) if cur else {}
+    srv = (server or os.environ.get("DLW_SERVER")
+           or ctx.get("server") or _DEFAULT_SERVER)
+    return str(srv).rstrip("/")
+
+
+def clear_token(name: str, *, config_path: str | None = None) -> Path:
+    """Remove auth.<name>.access_token from the config (gracefully if absent)."""
+    cfg = _load_config(config_path) or {}
+    cfg.get("auth", {}).get(name, {}).pop("access_token", None)
+    return save_config(cfg, config_path=config_path)
+
+
 def resolve(*, server: str | None, token: str | None,
             config_path: str | None = None) -> Resolved:
     cfg = _load_config(config_path)
