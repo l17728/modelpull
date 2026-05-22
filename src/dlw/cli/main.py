@@ -49,16 +49,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", default=None, help="bearer token")
     p.add_argument("-c", "--config", default=None, help="config file path")
     p.add_argument("-o", "--output", choices=["table", "json"],
-                   default="table")
+                   default=None)
     p.add_argument("-q", "--quiet", action="store_true")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("submit", help="create a download task")
     s.add_argument("repo")
     s.add_argument("-r", "--revision", required=True)
-    s.add_argument("-s", "--storage", type=int, required=True)
-    s.add_argument("--priority", type=int, default=1)
-    s.add_argument("--strategy", default="auto_balance")
+    s.add_argument("-s", "--storage", type=int, default=None)
+    s.add_argument("--priority", type=int, default=None)
+    s.add_argument("--strategy", default=None)
     s.add_argument("--upgrade-from", default=None)
     s.add_argument("--wait", action="store_true")
     s.add_argument("--timeout", type=float, default=None)
@@ -202,6 +202,15 @@ def _emit_rows(rows: list, cols: list[str] | None = None) -> None:
             str(r.get(c, "")).ljust(widths[c]) for c in cols) + "\n")
 
 
+def _resolve_output(flag: str | None, config_path: str | None) -> str:
+    import os
+
+    from dlw.sdk._config import get_default
+    val = flag or os.environ.get("DLW_OUTPUT") or get_default(
+        "output", config_path=config_path)
+    return val if val in ("table", "json") else "table"
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     from dlw.cli import handlers
     return handlers.run(args, _make_client, _emit, _emit_obj)
@@ -220,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.cmd:
         parser.print_help(sys.stderr)
         return 2
+    args.output = _resolve_output(args.output, args.config)
     try:
         return _dispatch(args)
     except KeyboardInterrupt:

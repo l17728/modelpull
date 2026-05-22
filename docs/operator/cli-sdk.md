@@ -93,8 +93,9 @@ dlw login --token JWT [--server URL] [--context NAME]
 dlw logout [--context NAME]
     # clears the stored access_token for the named context.
 
-dlw submit <repo> -r <revision> -s <storage_id> [--priority N] \
+dlw submit <repo> -r <revision> [-s <storage_id>] [--priority N] \
     [--strategy auto_balance] [--upgrade-from REV] [--wait] [--timeout S]
+    # -s/--storage is optional if defaults.storage_id is set in config
 dlw list [--status STATUS]
 dlw show <task_id>
 dlw cancel <task_id> [--reason TEXT]
@@ -110,7 +111,51 @@ dlw context list                    # contexts in ~/.dlw/config.yaml (marks curr
 dlw context current                 # the active context (token redacted)
 dlw context use <name>              # switch current_context
 dlw context set <name> [--server URL] [--token JWT] [--no-current]
+dlw config get <key>                # print a dotted config key (access_token redacted)
+dlw config set <key> <value>        # set a dotted key (value parsed as YAML scalar)
+dlw config unset <key>              # remove a dotted config key
+dlw config list                     # list all config keys (tokens redacted)
 ```
+
+### 3.3 `dlw config` — config key management (FU7)
+
+```bash
+dlw config get defaults.storage_id
+dlw config set defaults.storage_id 5    # int: yaml.safe_load coerces "5"→5
+dlw config set defaults.output json     # table|json; unknown→table
+dlw config set defaults.priority 1
+dlw config set defaults.source_strategy auto_balance
+dlw config unset defaults.priority
+dlw config list                         # shows all keys; access_token→***
+```
+
+The `defaults:` block in `~/.dlw/config.yaml` persists preferred values for the
+four wired CLI flags. Precedence is **flag > env > config defaults > hardcoded**:
+
+| Flag | Env | Config key | Hardcoded |
+|------|-----|-----------|-----------|
+| `-s/--storage` | — | `defaults.storage_id` | (error if missing) |
+| `--priority` | — | `defaults.priority` | `1` |
+| `--strategy` | — | `defaults.source_strategy` | `auto_balance` |
+| `-o/--output` | `DLW_OUTPUT` | `defaults.output` | `table` |
+
+Example `~/.dlw/config.yaml` after setup:
+```yaml
+defaults:
+  storage_id: 5
+  source_strategy: auto_balance
+  priority: 1
+  output: table
+```
+
+Notes:
+- `config set` coerces the value via `yaml.safe_load`: `5`→int, `true`→bool,
+  `auto_balance`→str. Surprising YAML scalars: `off`/`no`→bool(False), `~`→None.
+- `config get`/`list` redact any key whose leaf is `access_token` (printed as `***`).
+- `defaults.output: yaml` stores fine but falls back to `table` (yaml output
+  is not implemented). `color`/`yaml`-output/`config edit` remain deferred.
+- Arbitrary dotted keys can be stored/read, but only the four `defaults.*` keys
+  above change CLI behavior.
 
 ### 3.1 `dlw login` — device-code flow
 
@@ -277,7 +322,8 @@ is the `show` view), `exec list`, `events [--follow]`, `audit`, `login`
 So the earlier "no events endpoint", "no `quota`/`exec`/`audit`", and "polling
 `watch`" limitations are lifted: `watch` now streams the task SSE, `events
 --follow` streams the event log, `dlw context list/current/use/set` manage
-`~/.dlw/config.yaml`, and `dlw login`/`dlw logout` handle device-code auth.
+`~/.dlw/config.yaml`, `dlw login`/`dlw logout` handle device-code auth, and
+`dlw config get/set/unset/list` + `defaults.*` wiring (FU7) are now implemented.
 
 Still deferred:
 
@@ -287,10 +333,14 @@ Still deferred:
    is now implemented; the browser approval UI page (`GET /device`) is a
    follow-on. See §3.1 for honest deferrals. `whoami`/`context set`/`logout`
    all work. No browser-authcode (OIDC redirect) mode; no refresh token.
-3. **Arbitrary config keys (`config get/set`, defaults) + secure token-at-rest**
-   — `dlw context` manages server/token contexts (plaintext, chmod-600
-   best-effort; no-op on Windows). General config-key get/set and encrypted token
-   storage are deferred.
+3. **Config key get/set + defaults wiring (FU7 — now available)** — `dlw config
+   get/set/unset/list` (dotted keys, `yaml.safe_load` coercion, `access_token`
+   redaction) is implemented. The four `defaults.*` keys
+   (`storage_id`/`priority`/`source_strategy`/`output`) are wired into the CLI
+   with `flag > env > config > hardcoded` precedence. Still deferred: `color`
+   wiring, `defaults.output: yaml`, `dlw config edit` (open `$EDITOR`).
+   **Secure token-at-rest** (FU8) is deferred — tokens remain plaintext,
+   chmod-600 best-effort (no-op on Windows).
 4. **`cancel --reason` not persisted** — reserved (no API field).
 
 Also deferred to later sub-projects / Phase 4: `materialize`, `search`,

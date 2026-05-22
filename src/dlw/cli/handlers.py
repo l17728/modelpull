@@ -208,10 +208,26 @@ def run(args: argparse.Namespace, make_client: Callable,
     client = make_client(args)
     try:
         if args.cmd == "submit":
+            from dlw.sdk._config import get_default
+            storage_id = (args.storage if args.storage is not None
+                          else get_default("storage_id", config_path=args.config))
+            if storage_id is None:
+                from dlw.sdk.errors import UsageError
+                raise UsageError(
+                    "no storage_id: pass --storage or set defaults.storage_id "
+                    "(dlw config set defaults.storage_id <N>)")
+            priority = (args.priority if args.priority is not None
+                        else get_default("priority", config_path=args.config))
+            if priority is None:           # preserve a legit defaults.priority: 0
+                priority = 1
+            strategy = (args.strategy if args.strategy is not None
+                        else get_default("source_strategy", config_path=args.config))
+            if strategy is None:
+                strategy = "auto_balance"
             t = client.tasks.submit(
                 repo_id=args.repo, revision=args.revision,
-                storage_id=args.storage, priority=args.priority,
-                source_strategy=args.strategy,
+                storage_id=storage_id, priority=priority,
+                source_strategy=strategy,
                 upgrade_from_revision=args.upgrade_from)
             if args.wait:
                 t = t.wait(timeout=args.timeout)
