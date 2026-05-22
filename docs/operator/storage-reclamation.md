@@ -98,8 +98,18 @@ does not do:
   make that quota-aware.
 - The pressure check uses integer-GiB `storage_gb_used` vs `quota_storage_gb`,
   so it is coarse and effectively inert below roughly 10-GiB quotas.
-- `created_at` (ledger-write time) is the available proxy for the design's
-  `last_referenced_at`; a true per-key last-access column is a follow-on.
+Physical keys now carry a real `last_referenced_at` (FU5). It is bumped whenever
+the content is referenced again — a re-download to the same key, or a later
+revision inheriting the same content via the dedup path — so reclamation orders
+orphans **least-recently-referenced first** and measures the grace window **from
+the last reference, not the ledger write**. The grace change is strictly more
+conservative: `last_referenced_at` is always at or after `created_at`, so bytes
+are deleted no sooner than they were before FU5. Caveats remain: the signal only
+diverges from write-time for content re-referenced during its live lifetime
+(single-use content has `last_referenced_at == created_at`); the ordering only
+has an observable effect when the per-tick cap binds; and the *tracked*
+refcount-0 `storage_objects` eviction (`gc_orphans`) is still time-only — FU5
+sharpens only the physical-orphan ordering and grace.
 
 Cold-storage tiering and reclamation of physical objects written before the
 ledger shipped (which have no ledger row) are also follow-ons.
