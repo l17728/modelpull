@@ -7,32 +7,60 @@
 > `base_path` mounted can reclaim the key — not just the writer.
 > Status: self-approved per Rule #1. Branch: `feat/fu4-nfs-shared-reclaim`.
 
-## 0. The safety hinge
+## 0. Safety design (revised after pre-review — two BLOCKERs + a cross-tenant vector)
 
-FU3's confirm-on-missing is safe only because the WRITER wrote the file to its
-own disk. Extending to siblings risks a false confirm: a sibling that does NOT
-have the mount would `unlink(missing_ok=True)` → no-op → confirm → controller
-deletes the ledger row while the bytes persist on the real writer. FU4's hinge:
-**an executor advertises only base_paths it has VERIFIED exist as directories on
-its host** (`os.path.isdir`). So "executor E advertises base_path P" ⟹ "E has P
-mounted" ⟹ on a shared NFS mount the file is the SAME file the writer wrote ⟹
-`unlink` is a real delete (or genuinely-already-gone by a sibling) = safe. A
-false advertisement is only possible via operator misconfig of
-`local_base_paths` pointing at a same-named-but-different dir — documented; the
-path-traversal guard (FU3) still bounds every delete under `base_path`.
+Pre-review found the naive "widen dispatch, leave confirm unchanged" design BROKEN
+and unsafe. The safe design rests on FOUR controls:
 
-Double-dispatch (writer AND a sibling both get the key) is HARMLESS: idempotent
-`unlink(missing_ok=True)` + the controller's confirm-delete is a no-op on an
-already-deleted row. So FU4 needs NO "writer-not-healthy" gating — it simply
-widens the candidate executors.
+1. **Confirm MUST be widened in lockstep with dispatch.** FU3's
+   `confirm_local_reclaim` filters `executor_id == confirming_executor`. If a
+   SIBLING (non-writer) reclaims a key (whose `executor_id` is the writer), its
+   confirm matches ZERO rows → the file is deleted but the ledger row PERSISTS →
+   re-dispatched forever. So confirm must authorize a key for executor E when
+   `executor_id == E` **OR** the key's `storage_id` is in E's resolved-accessible
+   set — the SAME authorization dispatch uses. A single helper
+   `resolve_accessible_storage_ids(session, base_paths)` computes the set once;
+   the handler passes it to BOTH confirm and dispatch.
+2. **Bind to `storage_id`, not the raw base_path string.** Dispatch/confirm
+   resolve E's advertised base_paths → the set of local `storage_id`s whose
+   decrypted `base_path` ∈ the advertised set, and match keys on `storage_id`.
+   Two backends sharing a base_path string would BOTH resolve — so the operator
+   constraint **local backend `base_path` values MUST be unique** is documented
+   + the dispatch is tenant-scoped (a key is only handed to E if the key's
+   `tenant_id` matches E's `tenant_id`, when E has one — see control 4).
+3. **File-size verification before delete (the real wrong-file guard).** The
+   `is_dir`-verified advertisement proves E has *a* dir at that path, NOT that the
+   file under it is the right backend's data (same-named-different-mount
+   misconfig). So the executor, before unlinking, `os.stat`s the target: if it
+   EXISTS and its size != the ledger `size` (now carried in `ReclaimItem`) →
+   REFUSE + do NOT confirm (wrong file); if MISSING → confirm (already gone, the
+   safe NFS-shared / already-reclaimed case); if PRESENT and size matches →
+   unlink + confirm. Plus the FU3 path-traversal guard (under base_path) is kept.
+4. **Tenant scoping.** Dispatch + confirm only authorize a key for E when the
+   key's `tenant_id` == E's `tenant_id` if E has one set (`Executor.tenant_id` is
+   nullable and currently NULL for all executors → a no-op today, but it
+   future-proofs against the cross-tenant deletion vector when tenant-pinned
+   executors arrive). Documented.
+
+Double-dispatch (writer AND a sibling both get the key across 10 s beats) is then
+harmless: idempotent `unlink` (size-checked) + `confirm` re-selects 0 the second
+time. No writer-health gating needed.
+
+**Honest scope:** local-fs is a minor backend (inherit-only writes), and
+NFS-shared-with-offline-writer is a narrow sub-case — FU4 is near-dead-code,
+shipped for parity/completeness. The size-verify + storage_id binding + tenant
+scope + path-guard + default-OFF gate are the envelope; the residual is an
+operator who reuses a base_path string across backends OR mounts a same-named
+different filesystem with same-sized colliding files (extremely unlikely).
 
 ## 1. Scope
 
 **In scope (additive; no migration — reuse `Executor.capabilities` JSONB; no new dep):**
 
 1. **`ExecutorSettings.local_base_paths: list[str] = []`** — operator config: the
-   local/NFS base_paths this executor can serve (env `DLW_EXECUTOR_LOCAL_BASE_PATHS`,
-   pydantic parses a JSON list / comma list per its env conventions).
+   local/NFS base_paths this executor can serve. Env `DLW_EXECUTOR_LOCAL_BASE_PATHS`
+   is parsed as a **JSON list** (pydantic-settings 2.6 is JSON-only for complex
+   types — `'["/srv/dlw"]'`, NOT comma-separated; verified pinned version).
 2. **Executor advertises verified base_paths** in the heartbeat:
    `ExecutorHeartbeat.accessible_base_paths: list[str] | None = None` (None = no
    update, backward-compat). The runner sends
@@ -42,15 +70,17 @@ widens the candidate executors.
    (`record_heartbeat`: when `body.accessible_base_paths is not None`, set
    `ex.capabilities = {**ex.capabilities, "base_paths": body.accessible_base_paths}`
    — reassign so SQLAlchemy detects the JSONB change).
-4. **`dispatch_local_reclaim` widens candidacy**: for the heartbeating executor E,
-   return local orphan keys (past grace, `~live`) where `executor_id == E.id`
-   (FU3 writer path) **OR** the key's backend `base_path` ∈ E's advertised
-   `base_paths`. The handler passes E's advertised set (from `ex.capabilities`)
-   into dispatch. Implementation: resolve the set of local `storage_id`s whose
-   decrypted `base_path` ∈ E's advertised set (decrypt the few local backends in
-   Python), then the candidate query is
-   `(executor_id == E.id) OR (storage_id IN those_ids)`, still local-only +
-   `~live` + grace + cap + `FOR UPDATE OF storage_physical_keys SKIP LOCKED`.
+4. **`dispatch_local_reclaim` AND `confirm_local_reclaim` widen in lockstep**
+   (§0 control 1): both authorize a key for E when `executor_id == E.id` OR
+   `storage_id ∈ resolve_accessible_storage_ids(E's advertised base_paths)`,
+   tenant-scoped to E's `tenant_id` (control 4). The handler computes the
+   resolved storage-id set ONCE and passes it to both. (Leaving confirm
+   writer-only — the naive design — deletes the file but never the ledger row →
+   infinite redispatch. This is the BLOCKER the pre-review caught.)
+5. **`ReclaimItem.size`** + **executor size-verify** (§0 control 3): the executor
+   refuses to unlink a present file whose size ≠ the ledger size (wrong-file /
+   misconfig guard), confirms a missing file (already gone), unlinks+confirms a
+   size-matching file. Keeps the FU3 path-traversal guard.
 
 **Out of scope (named):**
 - Auto-discovery of mounts (the executor advertises only operator-configured
@@ -95,45 +125,111 @@ updates:
                            "base_paths": list(body.accessible_base_paths)}
 ```
 
-`services/storage_objects.py` `dispatch_local_reclaim` — add an optional
-`accessible_base_paths: frozenset[str] = frozenset()` param; the handler passes
-`frozenset(ex.capabilities.get("base_paths") or [])`. Build the sibling
-`storage_id` set:
-```python
-    sibling_ids: set[int] = set()
-    if accessible_base_paths:
-        locals_ = (await session.execute(
-            select(StorageBackend).where(StorageBackend.backend_type == "local"))
-        ).scalars().all()
-        for b in locals_:
-            bp = storage_config_from_backend(b).base_path
-            if bp and bp in accessible_base_paths:
-                sibling_ids.add(b.id)
-    writer_or_sibling = (StoragePhysicalKey.executor_id == executor_id)
-    if sibling_ids:
-        writer_or_sibling = writer_or_sibling | StoragePhysicalKey.storage_id.in_(sibling_ids)
-    # candidate query: .where(writer_or_sibling, created_at<cutoff, ~live,
-    #                         StorageBackend.backend_type=="local") ...
-```
-(The existing query already joins `StorageBackend` for `backend_type=="local"`;
-add `writer_or_sibling` to its `.where(...)`. Keep the dedup `out` keyed by row
-id so a key matched by both branches isn't emitted twice — `select` returns
-distinct rows anyway since it's one row per key.)
+`schemas/executor.py` `ReclaimItem`: add `size: int` (the executor size-verifies
+against it). So `ReclaimItem = {id, base_path, storage_key, size}`.
 
-The handler (`api/executors.py::post_heartbeat`) passes
-`accessible_base_paths=frozenset((ex.capabilities or {}).get("base_paths") or [])`
-into `dispatch_local_reclaim`. Confirm/unlink/path-guard are UNCHANGED (FU3).
+`services/storage_objects.py` — a shared resolver + widened dispatch + widened confirm:
+```python
+async def resolve_accessible_storage_ids(session, base_paths) -> set[int]:
+    """Local storage_ids whose decrypted base_path is in `base_paths`.
+    NOTE: base_path MUST be unique per local backend (operator constraint);
+    a shared string resolves to MULTIPLE ids (tenant scope below bounds it)."""
+    if not base_paths:
+        return set()
+    from dlw.db.models.storage import StorageBackend
+    from dlw.services.storage_client import storage_config_from_backend
+    out: set[int] = set()
+    for b in (await session.execute(
+            select(StorageBackend).where(StorageBackend.backend_type == "local"))
+            ).scalars().all():
+        bp = storage_config_from_backend(b).base_path
+        if bp and bp in base_paths:
+            out.add(b.id)
+    return out
+
+async def dispatch_local_reclaim(session, executor_id, *, grace_seconds, limit,
+                                 accessible_storage_ids=frozenset(),
+                                 tenant_id=None):
+    ...
+    auth = (StoragePhysicalKey.executor_id == executor_id)
+    if accessible_storage_ids:
+        auth = auth | StoragePhysicalKey.storage_id.in_(accessible_storage_ids)
+    where = [auth, StoragePhysicalKey.created_at < cutoff, ~live,
+             StorageBackend.backend_type == "local"]
+    if tenant_id is not None:                       # control 4: tenant scope
+        where.append(StoragePhysicalKey.tenant_id == tenant_id)
+    rows = (await session.execute(
+        select(StoragePhysicalKey).join(StorageBackend, ...)
+        .where(*where).order_by(...).limit(...)
+        .with_for_update(skip_locked=True, of=StoragePhysicalKey))).scalars().all()
+    # ReclaimItem(id, base_path, storage_key, size=row.size) per row
+    ...
+
+async def confirm_local_reclaim(session, executor_id, key_ids, *, audit,
+                                accessible_storage_ids=frozenset(),
+                                tenant_id=None) -> int:
+    auth = (StoragePhysicalKey.executor_id == executor_id)
+    if accessible_storage_ids:
+        auth = auth | StoragePhysicalKey.storage_id.in_(accessible_storage_ids)
+    where = [StoragePhysicalKey.id.in_(key_ids), auth]
+    if tenant_id is not None:
+        where.append(StoragePhysicalKey.tenant_id == tenant_id)
+    rows = (await session.execute(
+        select(StoragePhysicalKey).where(*where))).scalars().all()
+    for r in rows:
+        await audit(action="storage.gc.physical.local", id=r.id,
+                    tenant_id=r.tenant_id, storage_key=r.storage_key, size=r.size)
+        await session.delete(r)
+    return len(rows)
+```
+The handler (`api/executors.py::post_heartbeat`) computes the resolved set ONCE
+and passes it to BOTH (tenant from the executor row):
+```python
+    paths = frozenset((ex.capabilities or {}).get("base_paths") or [])
+    acc_ids = frozenset(await resolve_accessible_storage_ids(session, paths))
+    if body.reclaimed_key_ids:
+        await confirm_local_reclaim(session, executor.id, body.reclaimed_key_ids,
+            audit=_audit, accessible_storage_ids=acc_ids, tenant_id=executor.tenant_id)
+    if s.gc_delete_physical_bytes:
+        reclaim = await dispatch_local_reclaim(session, executor.id,
+            grace_seconds=..., limit=..., accessible_storage_ids=acc_ids,
+            tenant_id=executor.tenant_id)
+```
+
+`executor/runner.py` `_heartbeat_loop` reclaim handling adds **size-verify**
+(control 3) before the unlink (the path-traversal guard `_safe_target` from FU3
+is kept):
+```python
+    target = _safe_target(item.get("base_path",""), item.get("storage_key",""))
+    if target is None:
+        logger.warning("local reclaim: refusing unsafe target ..."); continue
+    expected = item.get("size")
+    if target.exists() and expected is not None and target.stat().st_size != expected:
+        logger.warning("local reclaim: size mismatch for %s (have %d want %s); "
+                       "refusing", target, target.stat().st_size, expected)
+        continue                                   # wrong file — do NOT confirm
+    try:
+        target.unlink(missing_ok=True)             # missing = already gone = ok
+        confirmed.append(item["id"])
+    except OSError as e:
+        logger.warning("local reclaim unlink failed %s: %s", target, e)
+```
 
 ## 3. Tests
 
 - **`tests/services/test_local_reclaim.py`** (extend): seed a local backend
-  (base_path `/srv/dlw`) + an orphan key written by `ex-writer`. (a) executor
-  `ex-sibling` with `accessible_base_paths={"/srv/dlw"}` → `dispatch_local_reclaim(
-  session, "ex-sibling", ..., accessible_base_paths=frozenset({"/srv/dlw"}))`
-  returns the key (sibling reclaims a non-writer key). (b) `ex-sibling` with
-  `accessible_base_paths=frozenset()` → does NOT get it (writer-only, FU3
-  behavior preserved). (c) a sibling advertising a DIFFERENT base_path → not
-  matched. (d) the writer still gets its own keys regardless of advertised set.
+  (base_path `/srv/dlw`, storage_id S) + an orphan key written by `ex-writer`.
+  `acc = await resolve_accessible_storage_ids(session, frozenset({"/srv/dlw"}))`
+  → `{S}`. (a) `dispatch_local_reclaim(session, "ex-sibling", ...,
+  accessible_storage_ids=acc)` returns the key (sibling). (b)
+  `accessible_storage_ids=frozenset()` → does NOT (writer-only, FU3 preserved).
+  (c) advertising a different base_path → `resolve_...` empty → not matched.
+  (d) the writer gets its own keys regardless. **(e) confirm widening (the
+  BLOCKER): `confirm_local_reclaim(session, "ex-sibling", [key.id], audit=...,
+  accessible_storage_ids=acc)` DELETES the row (count 1) even though the row's
+  `executor_id` is `ex-writer`; with `accessible_storage_ids=frozenset()` it does
+  NOT (returns 0).** (f) tenant scope: a key with tenant_id 2, executor tenant_id
+  1 → not authorized (when tenant_id passed).
 - **`tests/api/test_executors.py`** (extend): a heartbeat with
   `accessible_base_paths=["/srv/dlw"]` stores it on `ex.capabilities["base_paths"]`;
   a subsequent heartbeat (gc enabled) returns a sibling-reclaimable key in
@@ -141,9 +237,15 @@ into `dispatch_local_reclaim`. Confirm/unlink/path-guard are UNCHANGED (FU3).
   (None = no update).
 - **`tests/executor/test_runner.py`** (extend): the runner sends
   `accessible_base_paths` = its `local_base_paths` filtered by `is_dir` (configure
-  one existing tmp dir + one bogus path → only the existing one advertised).
+  one existing tmp dir + one bogus path → only the existing one advertised). AND
+  **size-verify**: a `reclaim` item whose file exists but with a size ≠ the item's
+  `size` → the runner does NOT unlink it AND does NOT confirm its id (wrong-file
+  refusal); a size-matching file → unlinked + confirmed; a missing file →
+  confirmed.
 - Backward-compat: existing reclaim/heartbeat tests unchanged (new params default
-  empty/None).
+  empty/None; `ReclaimItem.size` — FU3 tests that construct ReclaimItem must add
+  `size=` OR it defaults; make `size: int` required in the schema and update any
+  FU3 test that built a ReclaimItem to pass `size`).
 
 ## 4. Milestones
 - **M1 — controller**: `ExecutorHeartbeat.accessible_base_paths` + `record_heartbeat`
