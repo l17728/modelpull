@@ -220,6 +220,33 @@ async def dispatch_local_reclaim(
     return out
 
 
+async def count_stuck_local_orphans(session: AsyncSession) -> int:
+    """Count local-fs physical keys that are past-grace and ~live but have no
+    dispatchable executor (executor_id IS NULL). Cheap single-query gauge for
+    observability; called by the heartbeat handler when gc_delete_physical_bytes
+    is enabled. Caller does NOT commit."""
+    from datetime import timedelta
+
+    from sqlalchemy import func as _func
+
+    from dlw.db.models.storage import StorageBackend
+    cutoff = datetime.now(UTC) - timedelta(seconds=86400)  # 1-day heuristic
+    live = exists().where(
+        StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
+        StorageObject.storage_id == StoragePhysicalKey.storage_id,
+        StorageObject.sha256 == StoragePhysicalKey.sha256)
+    result = await session.scalar(
+        select(_func.count(StoragePhysicalKey.id))
+        .join(StorageBackend, StorageBackend.id == StoragePhysicalKey.storage_id)
+        .where(
+            StoragePhysicalKey.executor_id.is_(None),
+            StoragePhysicalKey.created_at < cutoff,
+            ~live,
+            StorageBackend.backend_type == "local",
+        ))
+    return int(result or 0)
+
+
 async def gc_orphans(
     session: AsyncSession, *, grace_seconds: int
 ) -> int:

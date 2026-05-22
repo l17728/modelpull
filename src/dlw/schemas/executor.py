@@ -45,6 +45,8 @@ class ExecutorHeartbeat(BaseModel):
     parts_dir_bytes: int = Field(default=0, ge=0)
     # W2b1: optional disk capacity report; None means "no update" (backward-compat).
     disk_free_gb: int | None = Field(default=None, ge=0)
+    # FU3: ledger row ids the executor deleted (or found absent) since last beat.
+    reclaimed_key_ids: list[int] = Field(default_factory=list)
 
 
 class ReclaimItem(BaseModel):
@@ -61,6 +63,8 @@ class ExecutorRead(BaseModel):
     status: str
     health_score: int
     epoch: int        # NEW (P2-W1 fence: clients persist this from /join response)
+    # FU3: local orphan keys for this executor to delete now.
+    reclaim: list[ReclaimItem] = Field(default_factory=list)
 
 
 class AssignmentResponse(BaseModel):

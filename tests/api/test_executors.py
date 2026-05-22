@@ -1,6 +1,9 @@
 """Tests for executors API: register / heartbeat / poll under mTLS + JWT + HMAC (W3a)."""
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -294,3 +297,175 @@ async def test_poll_after_reregister_uses_new_epoch(client: AsyncClient) -> None
         headers=executor_request_headers(reg2),
     )
     assert r4.status_code == 200
+
+
+# ── FU3: heartbeat confirm + dispatch tests ──────────────────────────────────
+
+@pytest.mark.slow
+async def test_heartbeat_confirm_deletes_scoped_rows(
+    client: AsyncClient, engine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reclaimed_key_ids=[K, K2]: K (owned by ex) deleted; K2 (other executor) survives."""
+    from dlw.db.models.storage import StorageBackend
+    from dlw.db.models.storage_object import StoragePhysicalKey
+
+    # Register an executor
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="ex-confirm-1", host_id="host-confirm",
+    )
+    ex_id = reg["executor_id"]
+
+    # Seed rows via the test DB
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    old_time = datetime.now(UTC) - timedelta(hours=2)
+    async with factory() as s:
+        # StorageBackend id=1 already seeded by _bootstrap
+        k_row = StoragePhysicalKey(
+            tenant_id=1, storage_id=1,
+            sha256="a" * 64, storage_key="models/confirm/file1.bin",
+            size=100, executor_id=ex_id, created_at=old_time,
+        )
+        k2_row = StoragePhysicalKey(
+            tenant_id=1, storage_id=1,
+            sha256="b" * 64, storage_key="models/confirm/file2.bin",
+            size=200, executor_id="other-executor-999", created_at=old_time,
+        )
+        s.add(k_row)
+        s.add(k2_row)
+        await s.commit()
+        k_id = k_row.id
+        k2_id = k2_row.id
+
+    # Heartbeat confirming both IDs
+    hb_body = json.dumps({
+        "health_score": 100, "parts_dir_bytes": 0,
+        "reclaimed_key_ids": [k_id, k2_id],
+    }).encode()
+    r = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body,
+        headers=signed_heartbeat_headers(reg, hb_body),
+    )
+    assert r.status_code == 200, r.text
+
+    # Verify: K deleted (scoped to ex_id), K2 survives (other executor)
+    from sqlalchemy import select
+    async with factory() as s:
+        k_exists = await s.scalar(
+            select(StoragePhysicalKey.id).where(StoragePhysicalKey.id == k_id))
+        k2_exists = await s.scalar(
+            select(StoragePhysicalKey.id).where(StoragePhysicalKey.id == k2_id))
+    assert k_exists is None, "K should have been deleted (owned by ex)"
+    assert k2_exists is not None, "K2 should survive (owned by other executor)"
+
+    # Cleanup K2
+    async with factory() as s:
+        row = await s.get(StoragePhysicalKey, k2_id)
+        if row:
+            await s.delete(row)
+            await s.commit()
+
+
+@pytest.mark.slow
+async def test_heartbeat_dispatch_enabled_returns_reclaim_item(
+    client: AsyncClient, engine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With gc_delete_physical_bytes=true + local orphan → response reclaim has item."""
+    from dlw.db.models.storage import StorageBackend
+    from dlw.db.models.storage_object import StoragePhysicalKey
+
+    # Register executor
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="ex-dispatch-1", host_id="host-dispatch",
+    )
+    ex_id = reg["executor_id"]
+
+    # Seed a local StorageBackend with base_path in config.
+    # Use explicit id=9001 to avoid sequence collision with seeded id=1 backend.
+    base_path = "/tmp/local-store"
+    cfg_bytes = json.dumps({
+        "bucket": "local-bucket", "base_path": base_path,
+        "backend_type": "local",
+    }).encode()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    local_storage_id = 9001
+    async with factory() as s:
+        local_backend = StorageBackend(
+            id=local_storage_id, tenant_id=1, name=f"local-dispatch-{ex_id}",
+            backend_type="local", config_encrypted=cfg_bytes,
+        )
+        s.add(local_backend)
+        # Seed an old local orphan (no matching storage_object row → orphan)
+        old_time = datetime.now(UTC) - timedelta(hours=2)
+        phys = StoragePhysicalKey(
+            tenant_id=1, storage_id=local_storage_id,
+            sha256="c" * 64, storage_key="models/dispatch/fileX.bin",
+            size=512, executor_id=ex_id, created_at=old_time,
+        )
+        s.add(phys)
+        await s.flush()
+        phys_id = phys.id
+        await s.commit()
+
+    # Enable GC dispatch via env var (mirroring _set_env / test_ai_chat pattern).
+    # Set both grace_seconds and archive_after_days to 0 so the cutoff is "now"
+    # and our 2-hour-old row is past grace.
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_GC_DELETE_PHYSICAL_BYTES", "true")
+    monkeypatch.setenv("DLW_GC_GRACE_SECONDS", "0")
+    monkeypatch.setenv("DLW_GC_ARCHIVE_AFTER_DAYS", "0")
+    get_settings.cache_clear()
+
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0}'
+    r = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body,
+        headers=signed_heartbeat_headers(reg, hb_body),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "reclaim" in body
+    assert len(body["reclaim"]) == 1
+    item = body["reclaim"][0]
+    assert item["id"] == phys_id
+    assert item["base_path"] == base_path
+    assert item["storage_key"] == "models/dispatch/fileX.bin"
+
+    # Cleanup
+    get_settings.cache_clear()
+    async with factory() as s:
+        row = await s.get(StoragePhysicalKey, phys_id)
+        if row:
+            await s.delete(row)
+            await s.commit()
+
+
+@pytest.mark.slow
+async def test_heartbeat_dispatch_disabled_returns_empty_reclaim(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With gc_delete_physical_bytes=false (default) → reclaim == []."""
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="ex-nodispatch-1", host_id="host-nodispatch",
+    )
+    ex_id = reg["executor_id"]
+
+    # Ensure GC is disabled (default)
+    get_settings.cache_clear()
+    monkeypatch.setenv("DLW_GC_DELETE_PHYSICAL_BYTES", "false")
+    get_settings.cache_clear()
+
+    hb_body = b'{"health_score": 100, "parts_dir_bytes": 0}'
+    r = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body,
+        headers=signed_heartbeat_headers(reg, hb_body),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("reclaim") == []
+
+    get_settings.cache_clear()
