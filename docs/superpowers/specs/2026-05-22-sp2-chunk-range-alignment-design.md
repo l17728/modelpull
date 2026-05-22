@@ -156,14 +156,16 @@ has_chunks=bool(assignment.chunks))`.
 ```
 ```python
 def _plans_from_chunks(chunks, file_size):
-    """ChunkPlan per subtask_chunks row, ordered by index. Returns None if the
-    rows don't contiguously tile [0, file_size-1] (defensive)."""
+    """ChunkPlan per subtask_chunks row, ordered by chunk_index, RENUMBERED to
+    dense positional index (pre-review B1: _pass2_upload uses ChunkPlan.index
+    for last-chunk detection / S3 PartNumber / <idx>.bin name — must be dense
+    0..n-1, not the raw chunk_index). None if rows don't tile [0,file_size-1]."""
     ordered = sorted(chunks, key=lambda c: c.chunk_index)
     plans, expect = [], 0
-    for c in ordered:
+    for pos, c in enumerate(ordered):
         if c.byte_start != expect or c.byte_end < c.byte_start:
             return None
-        plans.append(ChunkPlan(index=c.chunk_index, offset=c.byte_start,
+        plans.append(ChunkPlan(index=pos, offset=c.byte_start,
                                length=c.byte_end - c.byte_start + 1))
         expect = c.byte_end + 1
     if file_size is not None and expect != file_size:
@@ -207,12 +209,49 @@ the total check.)
 
 ## 8. Risks & Contingencies
 
-- **SHA safety net unchanged**: even if alignment is wrong (malformed chunks,
-  fallback), the whole-file SHA256 W4 gate + blacklist + HF-refetch still
-  guarantees no silent corruption. This change only makes the *happy multi-source
-  path* succeed; it cannot introduce corruption.
-- **`file_size` None with chunks**: derive from the last chunk's `byte_end+1`;
-  `_plans_from_chunks` handles `file_size is None` (skips the total check).
+- **SHA safety net (with one documented carve-out)**: when `expected_sha256` is
+  present (the normal case — HF is the sha authority), even wrong alignment is
+  caught by the whole-file SHA256 W4 gate → blacklist + HF-refetch, no silent
+  corruption. **Carve-out (pre-review arch-I1)**: the W4 gate is SKIPPED when
+  `expected_sha256 is None`. The planner refuses to chunk a no-sha file (pins it
+  to HF) UNLESS the task set `trust_non_hf_sha256=True` (`source_scheduler.py`
+  `no_hf_authority` branch). So the ONE residual unverified path is
+  `trust_non_hf_sha256=True` + `expected_sha256=None` + multi-source chunked:
+  bytes are assembled with no sha backstop. This is PRE-EXISTING (ruling 4: trust
+  = the user's explicit opt-out of sha authority) but SP2-alignment *activates*
+  multi-source chunk acceleration, converting "safe HF-refetch fallback" into
+  "trusted multi-source assembly". **Accepted under ruling 4** — `trust=True` is
+  an explicit, audited per-task opt-out; the alignment doesn't change *who*
+  verifies, only *which source serves which bytes*. The "cannot introduce
+  corruption" claim holds for all sha-bearing tasks; for the trust+no-sha path it
+  is the documented, opted-into behavior. (An integration test SHOULD pin this:
+  a `trust=True, expected_sha256=None` chunked sub assembles without a gate.)
+- **Stale `subtask_chunks` rows on re-pend (pre-review arch-I2)**: a failed/
+  reclaimed chunked subtask returns to `pending` WITHOUT clearing its chunk rows
+  (`is_chunked` stays True); `post_poll` serializes whatever rows currently
+  exist. This is correct because the rebalance loop maintains those rows —
+  `UPDATE subtask_chunks SET source_id = <healthy>` for `pending` chunks of a
+  blacklisted source — so a re-poll gets the current healthy map. The only
+  transient: a chunk whose source was just blacklisted before the rebalance tick
+  → executor pulls from it → W4 gate catches → re-fail → rebalanced next time.
+  Safe. **Required controller-side invariant (named, not owned by SP2)**: chunk
+  rows are created once (`_split_chunks` only adds; UNIQUE(subtask_id,
+  chunk_index)) and rebalance-maintained; if a future change ever re-runs
+  `_split_chunks` on an existing `is_chunked` subtask it must clear old rows
+  first. Flagged as a known limitation, not introduced here.
+- **Fallback on a chunked sub still mis-routes (but fails safe)**: if
+  `_plans_from_chunks` returns None (malformed/stale) and we fall back to
+  `plan_chunks`, the 16-MiB Ranges again cross source boundaries → proxy
+  mis-routes → W4 SHA mismatch → blacklist + HF-refetch. Same safe degradation as
+  today; the fallback only avoids crashing on malformed rows.
+- **`file_size` None with chunks (harmless edge)**: in practice the controller
+  only chunks files with KNOWN size ≥100 MiB, so `file_size` is never None when
+  `chunks` is non-empty — the derivation branch is essentially unreachable.
+  `_pass2_upload` uses `assignment.file_size` only for `DownloadResult.
+  bytes_written` (the multipart size derives from the `.bin` parts), so the
+  `dataclasses.replace` is a harmless correctness belt-and-suspenders, not a
+  load-bearing path. `_plans_from_chunks` tolerates `file_size is None` (skips
+  the total check).
 - **Contiguity**: the controller `_split_chunks` tiles `[0, size-1]` exactly (last
   source gets the remainder); the defensive check + fallback covers any drift.
 - **No migration, no new dep.** `subtask_chunks` + the source-proxy routing

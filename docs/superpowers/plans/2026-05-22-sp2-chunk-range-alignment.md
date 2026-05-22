@@ -68,11 +68,11 @@ assert chunks[0]["byte_start"] == 0 and chunks[0]["source_id"] == "modelscope"
 assert chunks[1]["byte_start"] == 67108864 and chunks[1]["source_id"] == "hf_mirror"
 # a NON-chunked subtask poll → subtask.chunks == []
 ```
-(Match the file's real fixtures/seeding — the executor poll needs an enrolled executor with the right epoch + a claimable `pending` subtask. Reuse the existing poll test's setup verbatim; only add the SubtaskChunk seeding + the chunks assertions. Seed `FileSubTask(..., is_chunked=True)` + `SubtaskChunk` rows from `dlw.db.models.source`.)
+(Match the file's real fixtures/seeding — the executor poll needs an enrolled executor with the right epoch + a claimable `pending` subtask. Reuse the existing poll test's setup verbatim; only add the SubtaskChunk seeding + the chunks assertions. Seed `FileSubTask(..., is_chunked=True)` + `SubtaskChunk` rows from `dlw.db.models.source`. **IMPORTANT (pre-review I3)**: the API `client` runs in its OWN session against the shared per-session test DB, so seed rows via the `db_session` fixture and `await db_session.commit()` — NOT flush (the poll won't see uncommitted rows). Insert in FK order: the task/subtask must exist (committed) before the `SubtaskChunk` rows (FK `subtask_chunks.subtask_id → file_subtasks.id`). If the existing poll test creates subtasks only via `POST /api/v1/tasks` with a mocked HF tree, you still need a direct `db_session` insert of a `FileSubTask(is_chunked=True)` + its chunks, then commit, then poll.)
 
 - [ ] **Step 4: Verify FAIL** (`cd "D:/download_weights" && uv run pytest tests/api/test_poll_chunks.py -v`) — `chunks` absent/empty.
 
-- [ ] **Step 5: Implement in `post_poll`** (`src/dlw/api/executors.py`). Add imports (`from dlw.db.models.source import SubtaskChunk`, `from dlw.schemas.subtask import ChunkAssignment` — and `select` if not already imported). After `sub_read = SubTaskRead.model_validate(sub)` and BEFORE `await session.commit()`:
+- [ ] **Step 5: Implement in `post_poll`** (`src/dlw/api/executors.py`). Add imports: `from dlw.db.models.source import SubtaskChunk`, `from dlw.schemas.subtask import ChunkAssignment`, and `from sqlalchemy import select` (NOT currently imported — executors.py only imports `AsyncSession`; verify and add it). After `sub_read = SubTaskRead.model_validate(sub)` and BEFORE `await session.commit()`:
 ```python
     if sub.is_chunked:
         rows = (await session.execute(
@@ -119,7 +119,7 @@ And to `Assignment` (after `storage_config`):
     chunks: tuple[ChunkAssignment, ...] = ()
 ```
 
-- [ ] **Step 2: Build chunks in the runner** (`src/dlw/executor/runner.py`, where `Assignment(...)` is constructed ~line 203). Import `ChunkAssignment` from `dlw.executor.downloader` (which re-exports types) or `dlw.executor.types`. Before constructing `assignment`:
+- [ ] **Step 2: Build chunks in the runner** (`src/dlw/executor/runner.py`, where `Assignment(...)` is constructed ~line 203). Import `ChunkAssignment` directly from `dlw.executor.types` (pre-review B2: `dlw.executor.downloader.__all__` is `["Assignment","DownloadResult","HfS3StreamDownloader"]` and does NOT re-export `ChunkAssignment`, so `from dlw.executor.downloader import ChunkAssignment` would ImportError — use `from dlw.executor.types import ChunkAssignment`, alongside the existing local `from dlw.executor.downloader import Assignment`). Before constructing `assignment`:
 ```python
             raw_chunks = subtask.get("chunks") or []
             chunks = tuple(
@@ -165,16 +165,21 @@ git add src/dlw/executor/types.py src/dlw/executor/runner.py && git commit -m "f
 - [ ] **Step 3: Implement** in `src/dlw/executor/chunk_downloader.py`. Add `_plans_from_chunks` (module-level fn near `plan_chunks`):
 ```python
 def _plans_from_chunks(chunks, file_size: int | None) -> list[ChunkPlan] | None:
-    """One ChunkPlan per subtask_chunks row, ordered by index. Returns None if
-    the rows don't contiguously tile [0, file_size-1] (defensive — controller
-    guarantees tiling; on drift we fall back to plan_chunks, which is sha-safe)."""
+    """One ChunkPlan per subtask_chunks row, ordered by chunk_index, RENUMBERED
+    to dense positional indices 0..n-1. Returns None if the rows don't
+    contiguously tile [0, file_size-1] (defensive — controller guarantees
+    tiling; on drift we fall back to plan_chunks, which is sha-safe)."""
     ordered = sorted(chunks, key=lambda c: c.chunk_index)
     plans: list[ChunkPlan] = []
     expect = 0
-    for c in ordered:
+    for pos, c in enumerate(ordered):
         if c.byte_start != expect or c.byte_end < c.byte_start:
             return None
-        plans.append(ChunkPlan(index=c.chunk_index, offset=c.byte_start,
+        # pre-review B1: ChunkPlan.index MUST be the dense positional index, NOT
+        # the raw chunk_index — _pass2_upload uses it for last-chunk detection
+        # (index != len(plans)-1), the S3 PartNumber (index+1), and the
+        # <idx>.bin filename. A sparse chunk_index would break all three.
+        plans.append(ChunkPlan(index=pos, offset=c.byte_start,
                                length=c.byte_end - c.byte_start + 1))
         expect = c.byte_end + 1
     if not plans:
@@ -239,7 +244,8 @@ git add src/dlw/executor/chunk_downloader.py tests/executor/test_chunk_downloade
 - Test: a focused integration test (may live in `tests/executor/` or `tests/api/`)
 - Modify: the SP2 spec banner / a doc note
 
-- [ ] **Step 1: Integration assertion.** If not already covered by Task 4's Range-header assertion, add one test that exercises poll→executor: given a chunked subtask whose poll payload carries 2 chunks routed to 2 sources, the `DirectOffsetDownloader` (driven by the Assignment built from that payload) issues exactly the 2 chunk-aligned Range requests. (This can reuse Task 4's mechanism; the goal is to assert the END-TO-END mapping `subtask_chunks row → Assignment.chunks → Range header` once. If Task 1 + Task 4 tests together already prove each hop, state that and skip a redundant test.)
+- [ ] **Step 1: Routing assertion at the source-proxy (pre-review I1).** Task 4's executor test only proves the Range HEADERS equal the chunk boundaries — the executor's `stream_source` fake routes every Range to one handler, so it CANNOT prove row→source routing. The actual `byte_start <= start <= byte_end → chunk.source_id` routing lives in `source_proxy.py`. So the end-to-end "row → correct source" hop must be asserted at the API level: extend/add a `tests/api/test_source_proxy.py` case that seeds a chunked subtask with 2 `SubtaskChunk` rows pointing at 2 DIFFERENT registered source drivers, issues two Range requests (`bytes={chunk0.byte_start}-{chunk0.byte_end}` then chunk1's), and asserts each is served from the chunk's `source_id` (the existing proxy test already checks single-source routing — extend it for the chunked + per-chunk-Range case). The chain is then proven hop-by-hop: Task 1 (row → poll payload), Task 4 (payload → Range header), this test (Range header → source). State this decomposition explicitly.
+- [ ] **Step 1b: Pin the trust+no-sha carve-out (pre-review arch-I1).** Add a test (service-level, `tests/services/test_source_scheduler.py` or similar) asserting that a task with `trust_non_hf_sha256=True` and a file whose `expected_sha256 is None` IS chunked across sources (documenting that this is the one path assembled without a W4 sha gate — the accepted ruling-4 trust opt-out). This pins the behavior so it can't change silently.
 
 - [ ] **Step 2: Update the SP2 spec deferral note.** In `docs/superpowers/specs/2026-05-19-phase-3-sp2-multi-source-design.md`, append a one-line note to item 7 / ruling 6b that the chunk-Range alignment is now wired (PR reference) — or add a short note to an operator/architecture doc. Keep it factual; do NOT rewrite history, just mark the deferral closed.
 
