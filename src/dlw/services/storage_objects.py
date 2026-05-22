@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, exists, select, update
+from sqlalchemy import case, delete, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,9 +97,26 @@ async def record_physical_key(
             index_elements=["tenant_id", "storage_id", "storage_key"]))
 
 
+async def pressured_tenant_ids(
+    session: AsyncSession, *, threshold: float = 0.9,
+) -> frozenset[int]:
+    """Tenants at/over `threshold` of their storage quota (from the maintained
+    QuotaSnapshot). Empty if none / no quota set."""
+    from dlw.db.models.tenant import Tenant
+    from dlw.db.models.usage import QuotaSnapshot
+    rows = (await session.execute(
+        select(QuotaSnapshot.tenant_id)
+        .join(Tenant, Tenant.id == QuotaSnapshot.tenant_id)
+        .where(Tenant.quota_storage_gb > 0,
+               QuotaSnapshot.storage_gb_used
+               >= threshold * Tenant.quota_storage_gb))).scalars().all()
+    return frozenset(int(t) for t in rows)
+
+
 async def reclaim_physical_orphans(
     session: AsyncSession, *, grace_seconds: int, delete_enabled: bool,
     make_client, audit, max_objects_per_tick: int = 1000,
+    priority_tenant_ids: frozenset[int] = frozenset(),
 ) -> dict:
     """Reclaim physical keys whose content sha has NO surviving storage_objects
     row (fully dereferenced) and are past grace. S3 backends only; bytes deleted
@@ -114,11 +131,18 @@ async def reclaim_physical_orphans(
         StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
         StorageObject.storage_id == StoragePhysicalKey.storage_id,
         StorageObject.sha256 == StoragePhysicalKey.sha256)
+    if priority_tenant_ids:
+        prio = case(
+            (StoragePhysicalKey.tenant_id.in_(priority_tenant_ids), 0), else_=1)
+        stmt = (select(StoragePhysicalKey)
+                .where(StoragePhysicalKey.created_at < cutoff, ~live)
+                .order_by(prio, StoragePhysicalKey.created_at))
+    else:
+        stmt = (select(StoragePhysicalKey)
+                .where(StoragePhysicalKey.created_at < cutoff, ~live)
+                .order_by(StoragePhysicalKey.created_at))
     rows = (await session.execute(
-        select(StoragePhysicalKey)
-        .where(StoragePhysicalKey.created_at < cutoff, ~live)
-        .order_by(StoragePhysicalKey.created_at)
-        .limit(max(1, max_objects_per_tick))
+        stmt.limit(max(1, max_objects_per_tick))
         .with_for_update(skip_locked=True))).scalars().all()
     deleted = 0
     clients: dict[int, tuple] = {}
