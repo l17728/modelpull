@@ -71,3 +71,12 @@ async def test_record_physical_key_does_not_bump_refcount(session):
     after = await session.scalar(select(StorageObject.refcount).where(
         StorageObject.sha256 == "f" * 64))
     assert before == after == 1
+
+
+async def test_record_physical_key_stores_executor_id(session):
+    await record_physical_key(session, tenant_id=1, storage_id=1, sha256="e" * 64,
+                              storage_key="repo/exec/k", size=3, executor_id="ex-9")
+    await session.commit()
+    row = (await session.execute(select(StoragePhysicalKey).where(
+        StoragePhysicalKey.storage_key == "repo/exec/k"))).scalar_one()
+    assert row.executor_id == "ex-9"

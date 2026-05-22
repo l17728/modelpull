@@ -222,7 +222,7 @@ async def complete_subtask(
         await record_physical_key(
             session, tenant_id=sub.tenant_id, storage_id=parent.storage_id,
             sha256=sub.actual_sha256, storage_key=sub.s3_key,
-            size=sub.bytes_downloaded or 0)
+            size=sub.bytes_downloaded or 0, executor_id=sub.executor_id)
     elif final_status == "failed" and sub.inherit_from_key:
         # banner 7f: an inherit copy failed. diff_and_dedup already did
         # refcount++ + a SubtaskObjectRef — undo it and re-queue the file as

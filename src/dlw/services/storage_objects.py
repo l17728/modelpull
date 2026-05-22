@@ -87,13 +87,14 @@ async def deref_subtask(
 
 async def record_physical_key(
     session: AsyncSession, *, tenant_id: int, storage_id: int,
-    sha256: str, storage_key: str, size: int,
+    sha256: str, storage_key: str, size: int, executor_id: str | None = None,
 ) -> None:
     """Phase 4: durable ledger of a physical object key (download + inherit).
     Idempotent on (tenant, storage, key). Caller commits."""
     await session.execute(pg_insert(StoragePhysicalKey).values(
         tenant_id=tenant_id, storage_id=storage_id, sha256=sha256,
-        storage_key=storage_key, size=size).on_conflict_do_nothing(
+        storage_key=storage_key, size=size,
+        executor_id=executor_id).on_conflict_do_nothing(
             index_elements=["tenant_id", "storage_id", "storage_key"]))
 
 
