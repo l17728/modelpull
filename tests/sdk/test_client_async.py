@@ -35,6 +35,39 @@ async def test_async_delete_non_terminal_conflict(aclient):
         await aclient.tasks.delete(t.id)
 
 
+async def test_me_async(aclient):
+    me = await aclient.me()
+    assert me["tenant_id"] == 1
+
+
+async def test_quota_async(aclient):
+    q = await aclient.quota.current()
+    assert "bytes_quota_month" in q and "storage_gb_used" in q
+
+
+async def test_executors_async(aclient):
+    assert "items" in await aclient.executors.list()
+
+
+async def test_audit_async(aclient):
+    assert "items" in await aclient.audit.search(limit=10)
+
+
+async def test_tasks_events_async(aclient):
+    t = await aclient.tasks.submit(repo_id="o/ev", revision="e" * 40,
+                                   storage_id=1)
+    result = await aclient.tasks.events(t.id)
+    assert "items" in result
+
+
+async def test_tasks_events_stream_async(aclient):
+    t = await aclient.tasks.submit(repo_id="o/es", revision="f" * 40,
+                                   storage_id=1)
+    async with aclient.tasks.events_stream(t.id, max_ticks=1) as r:
+        lines = [ln async for ln in r.aiter_lines() if ln]
+    assert any(ln.startswith("data:") or ln.startswith(":open") for ln in lines)
+
+
 async def test_async_wait_polls_until_terminal():
     from dlw.sdk.aclient import AsyncDownloadTask
 
