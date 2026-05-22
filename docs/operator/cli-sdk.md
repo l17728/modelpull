@@ -85,7 +85,26 @@ dlw show <task_id>
 dlw cancel <task_id> [--reason TEXT]
 dlw delete <task_id>            # terminal tasks only (else exit 6)
 dlw watch <task_id> [--interval S] [--timeout S]
+dlw whoami                          # the current principal (GET /auth/me)
+dlw quota                           # current tenant quota usage
+dlw exec list [--status STATUS]     # registered executors
+dlw events <task_id> [--limit N] [--cursor C] [--follow]
+dlw audit [--action PREFIX] [--actor USER_ID] [--from DATE] [--to DATE] \
+    [--limit N] [--cursor C]
 ```
+
+`whoami`/`quota`/`exec list`/`events`/`audit` are read-only wraps of existing
+endpoints (added in the SP4-CLI read-only slice). Two notes:
+
+- **Auth scope**: `whoami` uses `require_principal` (any valid bearer, including
+  the system-admin service token — which reports `user_id=0, is_service=true`),
+  while `quota`/`exec`/`audit` use `require_perm` (tenant roles). So with the
+  admin service token `whoami` works but `quota`/`audit` may return `403`; use a
+  tenant-user JWT (§2.1) for those.
+- **`watch` vs `events --follow`**: `watch` polls task *status* until terminal;
+  `events --follow` streams the raw event log via SSE until Ctrl-C / disconnect
+  (it does not self-terminate on a terminal task). `events` (no `--follow`) is a
+  one-shot paginated list.
 
 Global: `-o/--output {table,json}` (json is the stable machine contract),
 `-q/--quiet`, `--server`, `--token`, `-c/--config`, `--version`, `-h`.
@@ -144,6 +163,14 @@ async def main():
 asyncio.run(main())
 ```
 
+Read-only resource methods (return the parsed JSON dict — read-only metadata,
+not the typed `DownloadTask`): `c.me()`, `c.quota.current()`,
+`c.executors.list(status=None)`, `c.tasks.events(task_id, limit=50, cursor=None)`,
+`c.audit.search(action=None, actor_user_id=None, from_=None, to=None,
+cursor=None, limit=50)`, and the SSE seam `c.tasks.events_stream(task_id,
+max_ticks=None)` (a streaming context manager — `with … as r: for line in
+r.iter_lines(): …`). All mirrored on `AsyncClient`.
+
 Errors are typed (`dlw.sdk.errors`): `NotFound`, `AuthError`,
 `QuotaExceeded`, `Conflict`, `Timeout`, `UsageError`, `ApiError` (all
 subclass `DlwError`), each mapped to the CLI exit code above.
@@ -161,16 +188,31 @@ subclass `DlwError`), each mapped to the CLI exit code above.
 
 ## 6. MVP limitations (authoritative — deferred on purpose)
 
+**Now available** (read-only slice, added after the original SP4 MVP):
+`whoami`, `quota` (the `usage` subcommand is still deferred — bare `dlw quota`
+is the `show` view), `exec list`, `events [--follow]`, `audit` — and the SDK
+methods `me`/`quota.current`/`executors.list`/`tasks.events`/
+`tasks.events_stream`/`audit.search`. So the earlier "no events endpoint" and
+"no `quota`/`exec`/`audit`" limitations are lifted; `events --follow` provides
+live streaming (the polling `watch` is unchanged).
+
+Still deferred:
+
 1. **Client-side `list` filtering** — server-side `?status=&limit=&cursor=`
    is a future additive controller change.
-2. **Polling `watch`/`wait`** — no streaming/events endpoint exists;
-   `stream_events` is deferred.
-3. **Token-only auth** — no OIDC `login`/`logout`/`whoami` (deferred).
+2. **OIDC `login`/`logout`** — the controller's OIDC is a browser
+   authorization-code redirect flow; a CLI needs a **device-code flow**
+   endpoint (`POST /auth/device`) that does not exist. `whoami` works today
+   (token auth); `login` does not.
+3. **Config write (`config set`/`edit`, context switching)** — the config
+   *read* path works; the write-back path (storing a token, switching context)
+   pairs with `login` and is deferred.
 4. **`cancel --reason` not persisted** — reserved (no API field).
 
 Also deferred to later sub-projects / Phase 4: `materialize`, `search`,
-`info`, `quota`, `exec`, `storage`, `audit`, `template`, `admin`,
-`completion`, `--idempotency-key`, `-o yaml|wide`, Rich/Typer UX. The CLI
-and SDK public surface added here is forward-compatible with adding them.
+`info`, `retry`, `upgrade`, `storage`, `template`, `admin`, `completion`,
+`--idempotency-key`, `-o yaml|wide`, Rich/Typer UX — these have no implemented
+controller endpoints (or need a byte/executor path). The CLI and SDK public
+surface is forward-compatible with adding them.
 
 See `docs/v2.0/11-cli-and-sdk-spec.md` §6-§7 for the eventual full surface.
