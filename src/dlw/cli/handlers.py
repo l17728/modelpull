@@ -111,6 +111,46 @@ def _context_cmd(args) -> int:
     return 2
 
 
+def _redact(key: str, value):
+    return "***" if key.split(".")[-1] == "access_token" else value
+
+
+def _config_cmd(args) -> int:
+    import yaml
+
+    from dlw.sdk import _config as cfgmod
+    cp = args.config
+    sub = getattr(args, "config_cmd", None)
+    if sub == "set":
+        val = yaml.safe_load(args.value)   # 5->int, true->bool, str->str
+        cfgmod.set_config_value(args.key, val, config_path=cp)
+        if not args.quiet:
+            sys.stdout.write(f"set {args.key} = {_redact(args.key, val)}\n")
+        return 0
+    if sub == "unset":
+        existed = cfgmod.unset_config_value(args.key, config_path=cp)
+        if not args.quiet:
+            sys.stdout.write(
+                f"{'unset' if existed else 'no such key'} {args.key}\n")
+        return 0
+    if sub == "get":
+        v = cfgmod.get_config_value(args.key, config_path=cp)
+        if v is not None:
+            sys.stdout.write(f"{_redact(args.key, v)}\n")
+        return 0
+    if sub == "list":
+        cfg = cfgmod.load_config(cp)
+        sys.stdout.write(f"# config: {cfgmod._resolve_write_path(cp)}\n")
+        flat = cfgmod.flatten_config(cfg)
+        if not flat:
+            sys.stdout.write("(empty)\n")
+        for k in sorted(flat):
+            sys.stdout.write(f"{k} = {_redact(k, flat[k])}\n")
+        return 0
+    sys.stderr.write("usage: dlw config [get KEY|set KEY VALUE|unset KEY|list]\n")
+    return 2
+
+
 def _watch_sse(client, args, emit) -> int:
     import json
     import time
@@ -163,6 +203,8 @@ def run(args: argparse.Namespace, make_client: Callable,
         return _logout_cmd(args)
     if args.cmd == "context":
         return _context_cmd(args)
+    if args.cmd == "config":
+        return _config_cmd(args)
     client = make_client(args)
     try:
         if args.cmd == "submit":

@@ -95,6 +95,17 @@ def _build_parser() -> argparse.ArgumentParser:
     ctx_set.add_argument("--no-current", action="store_true",
                          help="do not switch current_context to this one")
 
+    cfgp = sub.add_parser("config", help="get/set CLI config keys + defaults")
+    cfg_sub = cfgp.add_subparsers(dest="config_cmd")
+    cfg_get = cfg_sub.add_parser("get", help="print a dotted config key")
+    cfg_get.add_argument("key")
+    cfg_set = cfg_sub.add_parser("set", help="set a dotted config key")
+    cfg_set.add_argument("key")
+    cfg_set.add_argument("value")
+    cfg_unset = cfg_sub.add_parser("unset", help="remove a dotted config key")
+    cfg_unset.add_argument("key")
+    cfg_sub.add_parser("list", help="list all config keys (tokens redacted)")
+
     login = sub.add_parser("login", help="authenticate and store a token")
     login.add_argument("--device-code", action="store_true",
                        help="force device-code flow (default when no --token)")
