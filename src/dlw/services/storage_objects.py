@@ -165,6 +165,61 @@ async def reclaim_physical_orphans(
     return {"candidates": len(rows), "deleted": deleted}
 
 
+async def confirm_local_reclaim(
+    session: AsyncSession, executor_id: str, key_ids: list[int], *, audit,
+) -> int:
+    rows = (await session.execute(
+        select(StoragePhysicalKey).where(
+            StoragePhysicalKey.id.in_(key_ids),
+            StoragePhysicalKey.executor_id == executor_id))).scalars().all()
+    for r in rows:
+        await audit(action="storage.gc.physical.local", id=r.id,
+                    tenant_id=r.tenant_id, storage_key=r.storage_key, size=r.size)
+        await session.delete(r)
+    return len(rows)
+
+
+async def dispatch_local_reclaim(
+    session: AsyncSession, executor_id: str, *, grace_seconds: int, limit: int,
+) -> list:
+    """Local-fs orphan keys written by this executor, past grace. Returns
+    list[ReclaimItem] — base_path resolved from the backend config (a backend
+    whose config lacks base_path is SKIPPED, not dispatched — local backends
+    MUST carry base_path in config_encrypted)."""
+    from datetime import timedelta
+
+    from dlw.db.models.storage import StorageBackend
+    from dlw.schemas.executor import ReclaimItem
+    from dlw.services.storage_client import storage_config_from_backend
+
+    cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    live = exists().where(
+        StorageObject.tenant_id == StoragePhysicalKey.tenant_id,
+        StorageObject.storage_id == StoragePhysicalKey.storage_id,
+        StorageObject.sha256 == StoragePhysicalKey.sha256)
+    rows = (await session.execute(
+        select(StoragePhysicalKey)
+        .join(StorageBackend, StorageBackend.id == StoragePhysicalKey.storage_id)
+        .where(StoragePhysicalKey.executor_id == executor_id,
+               StoragePhysicalKey.created_at < cutoff, ~live,
+               StorageBackend.backend_type == "local")
+        .order_by(StoragePhysicalKey.created_at)
+        .limit(max(1, limit))
+        .with_for_update(skip_locked=True, of=StoragePhysicalKey))).scalars().all()
+    out: list[ReclaimItem] = []
+    cache: dict[int, str | None] = {}
+    for r in rows:
+        if r.storage_id not in cache:
+            b = await session.get(StorageBackend, r.storage_id)
+            cache[r.storage_id] = (storage_config_from_backend(b).base_path
+                                   if b else None)
+        base = cache[r.storage_id]
+        if base:
+            out.append(ReclaimItem(id=r.id, base_path=base,
+                                   storage_key=r.storage_key))
+    return out
+
+
 async def gc_orphans(
     session: AsyncSession, *, grace_seconds: int
 ) -> int:

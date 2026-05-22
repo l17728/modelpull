@@ -47,6 +47,12 @@ class ExecutorHeartbeat(BaseModel):
     disk_free_gb: int | None = Field(default=None, ge=0)
 
 
+class ReclaimItem(BaseModel):
+    id: int
+    base_path: str
+    storage_key: str
+
+
 class ExecutorRead(BaseModel):
     """Returned by join/heartbeat to confirm registration."""
     model_config = ConfigDict(from_attributes=True)
