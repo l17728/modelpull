@@ -94,22 +94,40 @@ Model `StoragePhysicalKey`: `executor_id: Mapped[str | None] = mapped_column(Str
 The handler currently: `ex = await record_heartbeat(session, executor.id, body)`
 → `ExecutorRead.model_validate(ex)`. FU3 wraps this:
 ```python
+    from dlw.config import get_settings           # NOT _gs (that alias is main.py-local)
+    from dlw.services.audit import write_audit
+    s = get_settings()
     ex = await record_heartbeat(session, executor.id, body)   # unchanged liveness
-    # FU3 confirm: delete rows the executor reclaimed, scoped to this executor.
-    if body.reclaimed_key_ids:
-        await confirm_local_reclaim(session, executor.id, body.reclaimed_key_ids, audit=...)
-    # FU3 dispatch: hand this executor its next batch of local orphans.
-    reclaim = []
-    if _gs().gc_delete_physical_bytes:
+
+    # write_audit's real signature is keyword-only: (session, *, action,
+    # resource_type, resource_id, outcome, tenant_id, actor_user_id, payload).
+    # confirm_local_reclaim calls audit(action=, id=, tenant_id=, storage_key=,
+    # size=); adapt it here (the long key goes in payload, NOT resource_id which
+    # is String(128) — same lesson as Phase 4 B1).
+    async def _audit(*, action, id, tenant_id, storage_key, size):
+        await write_audit(session, action=action,
+                          resource_type="storage_physical_keys",
+                          resource_id=str(id), outcome="success",
+                          tenant_id=tenant_id, actor_user_id=None,
+                          payload={"storage_key": storage_key, "size": size})
+
+    if body.reclaimed_key_ids:               # FU3 confirm (delete scoped rows)
+        await confirm_local_reclaim(
+            session, executor.id, body.reclaimed_key_ids, audit=_audit)
+    reclaim: list[ReclaimItem] = []          # FU3 dispatch
+    if s.gc_delete_physical_bytes:
         reclaim = await dispatch_local_reclaim(
             session, executor.id,
-            grace_seconds=max(_gs().gc_grace_seconds,
-                              _gs().gc_archive_after_days * 86400),
-            limit=_gs().gc_max_objects_per_tick)
+            grace_seconds=max(s.gc_grace_seconds,
+                              s.gc_archive_after_days * 86400),
+            limit=s.gc_max_objects_per_tick)
     await session.commit()
-    out = ExecutorRead.model_validate(ex).model_copy(update={"reclaim": reclaim})
-    return out
+    return ExecutorRead.model_validate(ex).model_copy(update={"reclaim": reclaim})
 ```
+(`confirm_local_reclaim`'s `audit` param is now an async callable; make
+`confirm_local_reclaim` `await audit(...)`. `dispatch_local_reclaim` returns
+`list[ReclaimItem]` — see below — so `model_copy(update={"reclaim": reclaim})`
+serializes the nested models cleanly, no pydantic dict-coercion warning.)
 New service fns in `services/storage_objects.py` (near `reclaim_physical_orphans`):
 ```python
 async def confirm_local_reclaim(session, executor_id, key_ids, *, audit) -> int:
@@ -118,14 +136,17 @@ async def confirm_local_reclaim(session, executor_id, key_ids, *, audit) -> int:
             StoragePhysicalKey.id.in_(key_ids),
             StoragePhysicalKey.executor_id == executor_id))).scalars().all()
     for r in rows:
-        audit(action="storage.gc.physical.local", id=r.id, tenant_id=r.tenant_id,
-              storage_key=r.storage_key, size=r.size)
+        await audit(action="storage.gc.physical.local", id=r.id,
+                    tenant_id=r.tenant_id, storage_key=r.storage_key, size=r.size)
         await session.delete(r)
     return len(rows)
 
 async def dispatch_local_reclaim(session, executor_id, *, grace_seconds, limit):
     """Local-fs orphan keys written by this executor, past grace. Returns
-    [{id, base_path, storage_key}] — base_path resolved from the backend config."""
+    list[ReclaimItem] — base_path resolved from the backend config (a backend
+    whose config lacks base_path is SKIPPED, not dispatched — local backends
+    MUST carry base_path in config_encrypted). Import ReclaimItem from
+    dlw.schemas.executor."""
     from dlw.db.models.storage import StorageBackend
     from dlw.services.storage_client import storage_config_from_backend
     cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
@@ -150,8 +171,8 @@ async def dispatch_local_reclaim(session, executor_id, *, grace_seconds, limit):
                                    if b else None)
         base = cache[r.storage_id]
         if base:
-            out.append({"id": r.id, "base_path": base,
-                        "storage_key": r.storage_key})
+            out.append(ReclaimItem(id=r.id, base_path=base,
+                                   storage_key=r.storage_key))
     return out
 ```
 (`audit` here writes via the handler's `write_audit` — same isolated best-effort
@@ -173,20 +194,46 @@ belt-and-suspenders.
 `runner._heartbeat_loop`: keep `self._pending_reclaim_confirms: list[int] = []`.
 Each iteration: pass `reclaimed_key_ids=self._pending_reclaim_confirms` to
 `heartbeat(...)`, then clear it; read `resp.get("reclaim") or []`; for each item
-`{id, base_path, storage_key}`:
+`{id, base_path, storage_key}` apply a **path-traversal guard** before deleting
+(pre-review BLOCKER — `storage_key` round-trips through the DB and becomes a
+delete instruction under the executor's often-root FS creds; a corrupt/tampered
+key like `../../etc/x` or an absolute `/abs` must NOT escape `base_path`):
 ```python
     from pathlib import Path
-    target = Path(item["base_path"]) / item["storage_key"]
+
+    def _safe_target(base_path: str, storage_key: str) -> Path | None:
+        if not base_path:
+            return None
+        base = Path(base_path)
+        if not base.is_absolute():        # reject relative/"." bases (inherit's default)
+            return None
+        resolved = (base / storage_key).resolve()
+        try:
+            if not resolved.is_relative_to(base.resolve()):   # py3.9+
+                return None
+        except ValueError:
+            return None
+        return resolved
+
+    # ... in the loop, per item:
+    target = _safe_target(item.get("base_path", ""), item.get("storage_key", ""))
+    if target is None:
+        logger.warning("local reclaim: refusing unsafe target base=%r key=%r",
+                       item.get("base_path"), item.get("storage_key"))
+        continue                          # do NOT confirm — the row stays
     try:
-        target.unlink(missing_ok=True)   # absent = already reclaimed = success
+        target.unlink(missing_ok=True)    # absent = already reclaimed = success
         confirmed.append(item["id"])
     except OSError as e:
         logger.warning("local reclaim unlink failed %s: %s", target, e)  # retry next beat
     self._pending_reclaim_confirms = confirmed
 ```
-(`unlink(missing_ok=True)` — Python 3.8+. A missing file is success: the goal is
-"ensure gone". Other OSError (permission, dir) → don't confirm → controller
-re-dispatches next beat. Best-effort, never crashes the heartbeat loop.)
+(`unlink(missing_ok=True)` — a missing file is success: the goal is "ensure
+gone". The guard refuses any target that escapes `base_path` or has an
+empty/relative base (and does NOT confirm those, so the controller never deletes
+the ledger row for an unsafe key — it surfaces as an un-reclaimable key the gauge
+in §3 reports). Other OSError → don't confirm → re-dispatched. Never crashes the
+loop.)
 
 ## 5. Tests
 
@@ -234,12 +281,29 @@ re-dispatches next beat. Best-effort, never crashes the heartbeat loop.)
   `unlink(missing_ok=True)` (idempotent); audited (`storage.gc.physical.local`);
   capped per beat. The confirm-then-delete-ledger order means a crash leaves the
   ledger row → re-dispatched (re-unlink absent = success). No silent data loss.
-- **Wrong-target safety**: dispatch is scoped to `executor_id == writer`, so a
-  reclaim item only ever goes to the host that wrote the file; an executor that
-  somehow lacks the path → `unlink(missing_ok=True)` no-ops + confirms (the
-  ledger row is removed because, from the system's view, that key's bytes are
-  the writer's responsibility and it reports them gone). For single-executor-local
-  this is correct. (NFS-shared edge documented as deferred.)
+- **Confirm-on-missing safety (honest framing, pre-review).** Dispatch is scoped
+  to `executor_id == writer`; `executor_id` is the executor's config-supplied id,
+  STABLE across re-register (register is ON CONFLICT on `id`, bumping only epoch),
+  so the writer survives restarts and writer-targeting is durable. The writer
+  wrote the file to its OWN disk under `base_path`, so `unlink(missing_ok=True)`
+  is a real delete (or genuinely-already-gone). The ONE leak vector: if the
+  writer's `base_path` is later REMAPPED to a different filesystem (config edit /
+  remount), an `unlink(missing_ok=True)` no-ops while the real bytes persist
+  elsewhere → confirmed gone → ledger row deleted → untracked orphan. This is
+  accepted because local-fs is single-host and rarely reconfigured — but it is a
+  real edge, NOT impossible. (Do NOT cite doc 13's "single-executor mode" as a
+  placement *invariant* — it is a v2.1 scheduling COST factor; doc 04 §291 says
+  local/NFS access is by path permission, so a path CAN be shared/remapped.) The
+  path-traversal guard (§4) further ensures only files UNDER the current
+  `base_path` are ever touched.
+- **Observability for un-reclaimable keys.** Keys whose `executor_id` points at a
+  GONE (deactivated) executor, keys with `executor_id=NULL` (pre-migration), and
+  keys the guard refused are never reclaimed. The dispatch path logs a periodic
+  gauge (a `logger.info` count, or an audit `storage.gc.physical.local.stuck`)
+  of local orphan keys not dispatchable, so an operator sees accruing
+  un-reclaimable bytes rather than silent growth. (Lightweight: the heartbeat
+  handler or the existing leader GC loop counts `local phys keys, ~live, past
+  grace, executor_id NULL or pointing at a deactivated executor` and logs it.)
 - **HMAC body change**: adding `reclaimed_key_ids` to the heartbeat body — the
   executor signs the new body; the controller validates the same bytes. An old
   executor (no field) → handler defaults `[]`. Backward-compatible.
