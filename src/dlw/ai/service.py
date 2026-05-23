@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from dlw.ai._sanitize_apply import apply_external_fields, sanitize_error_key
 from dlw.ai.runner import AgentContext, AgentEvent, AgentRunner
 from dlw.ai.tools import READONLY_TOOLS
 from dlw.ai.write_tools import WRITE_TOOLS
@@ -101,6 +102,14 @@ async def run_chat(
                 await ts.commit()
             except Exception:  # noqa: BLE001
                 await ts.rollback()
+        # SP4e follow-on: structural sanitize choke point.
+        # - Declared external_fields: sanitized on success path only.
+        # - Error key: sanitized unconditionally (handles _hf_* error strings
+        #   like f"hf_network: {e}" where `e` carries external content).
+        if outcome == "success" and tool.external_fields:
+            apply_external_fields(
+                out, tool.external_fields, source=f"tool:{name}")
+        sanitize_error_key(out, source=f"tool:{name}:error")
         return out
 
     # 3. Drive the runner, collecting assistant text + tool calls for persist.

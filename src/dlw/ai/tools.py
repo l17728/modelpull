@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,12 @@ class Tool:
     description: str
     input_schema: dict
     run: Callable[..., Awaitable[dict]]
+    # SP4e follow-on: declarative external-content field paths. The choke
+    # point in service.py::run_chat.call_tool applies sanitize_external() to
+    # each path before the tool result is attached to a tool_result event.
+    # Path syntax: "field" or "field[].nested" (one-level list iteration).
+    # Default [] = no external fields (most tools; or inline-sanitize handles it).
+    external_fields: list[str] = field(default_factory=list)
 
 
 async def _list_tasks(session: AsyncSession, principal: Principal, *,
@@ -134,7 +140,8 @@ READONLY_TOOLS: dict[str, Tool] = {
         {"type": "object", "properties": {
             "status": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100}}},
-        _list_tasks),
+        _list_tasks,
+        external_fields=["items[].error_message"]),
     "dlw_get_task": Tool(
         "dlw_get_task",
         "Get one download task by id (uuid).",

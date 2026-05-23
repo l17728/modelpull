@@ -170,3 +170,29 @@ async def test_get_task_events_message_sanitized(session):
         assert msg.startswith("<external_content"), (
             f"expected <external_content wrap, got: {msg!r}")
         assert _ZWC not in msg
+
+
+async def test_list_tasks_sanitizes_error_message_via_choke_point(session):
+    """SP4e follow-on: dlw_list_tasks gains items[].error_message sanitization
+    via the structural choke point (no inline call). Reuses _bootstrap_sanitize
+    fixture which seeds a task with malicious error_message at id=TASK_ERR.
+
+    Tests the helper end-to-end against the actual tool declaration, since
+    run_chat.call_tool is a nested closure that's not directly importable."""
+    from dlw.ai._sanitize_apply import apply_external_fields
+    from dlw.ai.tools import READONLY_TOOLS
+
+    tool = READONLY_TOOLS["dlw_list_tasks"]
+    assert tool.external_fields == ["items[].error_message"], (
+        "dlw_list_tasks must declare items[].error_message for inv-19")
+
+    out = await tool.run(session, _principal(1))
+    # Choke point would be applied at service.call_tool — simulate here:
+    apply_external_fields(
+        out, tool.external_fields, source=f"tool:{tool.name}")
+
+    err_item = next(
+        (it for it in out["items"] if it["id"] == str(TASK_ERR)), None)
+    assert err_item is not None, f"TASK_ERR={TASK_ERR} not in items"
+    assert err_item["error_message"].startswith("<external_content")
+    assert "source=\"tool:dlw_list_tasks\"" in err_item["error_message"]
