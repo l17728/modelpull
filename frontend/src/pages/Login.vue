@@ -7,6 +7,15 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { oidcLoginUrl } from '@/pages/oidc'
 
+function safeRedirect(raw: unknown): string {
+  if (typeof raw !== 'string') return '/'
+  // Same-origin path only: must start with '/' and NOT '//' (protocol-relative).
+  if (!raw.startsWith('/') || raw.startsWith('//')) return '/'
+  // Loop defense: never redirect back to /login.
+  if (raw === '/login' || raw.startsWith('/login?') || raw.startsWith('/login/')) return '/'
+  return raw
+}
+
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
@@ -23,7 +32,7 @@ onMounted(() => {
     ElMessage.error(t('errors.invalid_token'))
   }
   if (authStore.isAuthenticated) {
-    router.replace('/')
+    router.replace(safeRedirect(route.query.redirect))
   }
 })
 
@@ -32,12 +41,14 @@ async function onSubmit() {
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
   authStore.login(form.token.trim())
-  router.push('/')
+  router.replace(safeRedirect(route.query.redirect))
 }
 
 function loginOidc() {
   window.location.assign(oidcLoginUrl(import.meta.env.VITE_API_BASE))
 }
+
+defineExpose({ form, onSubmit })
 </script>
 
 <template>

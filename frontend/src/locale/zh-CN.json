@@ -116,5 +116,21 @@
       "projects": "项目", "serviceToken": "服务 token" },
     "theme": "主题", "themeLight": "浅色", "themeDark": "深色",
     "localeLabel": "语言", "controllerState": "控制器状态"
+  },
+  "device": {
+    "heading": "确认设备",
+    "intro": "一个命令行工具请求访问你的账号。请确认下方的设备代码以继续。",
+    "principalLabel": "当前身份",
+    "codeLabel": "设备代码",
+    "codePlaceholder": "XXXX-XXXX",
+    "codeRequired": "请输入设备代码",
+    "approve": "批准",
+    "deny": "拒绝",
+    "successApproved": "设备已批准。可以关闭此标签页，返回 CLI。",
+    "successDenied": "设备已拒绝。CLI 将收到 access_denied 错误。",
+    "errorInvalid": "设备代码无效或已过期。请重新运行 'dlw login' 获取新代码。",
+    "errorService": "服务 token 不能批准设备。请使用普通用户身份登录后再批准。",
+    "errorGeneric": "批准失败，请重试。",
+    "serviceWarning": "你目前以服务 token 身份登录，无法批准设备。请改用普通用户身份登录。"
   }
 }

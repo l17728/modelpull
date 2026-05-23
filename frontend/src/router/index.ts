@@ -40,6 +40,10 @@ export const routes: RouteRecordRaw[] = [
     path: '/settings', name: 'settings',
     component: () => import('@/pages/Settings.vue'),
   },
+  {
+    path: '/device', name: 'device',
+    component: () => import('@/pages/Device.vue'),
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
@@ -48,7 +52,7 @@ const router = createRouter({ history: createWebHistory(), routes })
 router.beforeEach((to) => {
   if (to.meta.public) return true
   const auth = useAuthStore()
-  if (!auth.isAuthenticated) return { path: '/login' }
+  if (!auth.isAuthenticated) return { path: '/login', query: { redirect: to.fullPath } }
   return true
 })
 
