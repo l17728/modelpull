@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from dlw.ai._sanitize_apply import apply_external_fields, sanitize_error_key
 from dlw.ai.runner import AgentContext, AgentEvent, AgentRunner
-from dlw.ai.tools import READONLY_TOOLS
+from dlw.ai.tools import READONLY_TOOLS, _audit_safe_url
 from dlw.ai.write_tools import WRITE_TOOLS
 from dlw.auth.principal import Principal
 from dlw.db.models.ai import AIConversation, AIMessage, AIToolCall
@@ -22,6 +22,15 @@ from dlw.services.ai_quota import (
     record_ai_token_usage,
 )
 from dlw.services.audit import write_audit
+
+
+def _safe_audit_input(tool_input: dict) -> dict:
+    """H1: return a copy of tool_input with URL-valued fields stripped of
+    query strings so tokens in ?param=value are not persisted to audit_log."""
+    return {
+        k: (_audit_safe_url(v) if isinstance(v, str) and k == "url" else v)
+        for k, v in tool_input.items()
+    }
 
 
 async def _load_conversation(session, conv_id: uuid.UUID,
@@ -98,7 +107,8 @@ async def run_chat(
                     resource_id=str(conv_id), outcome=outcome,
                     tenant_id=principal.tenant_id,
                     actor_user_id=principal.user_id,
-                    payload={"actor_kind": "ai_copilot", "input": tool_input})
+                    payload={"actor_kind": "ai_copilot",
+                             "input": _safe_audit_input(tool_input)})
                 await ts.commit()
             except Exception:  # noqa: BLE001
                 await ts.rollback()
@@ -252,6 +262,9 @@ async def run_confirmation(
                     out = await tool.run(s, principal, **final_input)
                 except Exception as exc:  # noqa: BLE001
                     out = {"error": str(exc)}
+            # WriteTool choke point: sanitize the error key in case a future
+            # write tool propagates external content in error messages.
+            sanitize_error_key(out, source=f"tool:{tool_name}:error")
             ok = "error" not in out
             call.final_input = final_input
             call.output = out

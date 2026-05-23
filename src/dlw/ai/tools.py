@@ -137,8 +137,11 @@ async def _hf_model_card(session: AsyncSession, principal: Principal, *,
 
 
 def _audit_safe_url(url: str) -> str:
-    """Strip query + userinfo from a URL for use in audit/source-attribute
-    contexts (avoid persisting tokens that may live in path/query)."""
+    """Strip query string + userinfo from a URL before persisting to audit or
+    source attributes. Defends against query-string tokens (e.g. standard
+    bearer params). Honest limitation (M2): tokens embedded in path segments
+    (rare custom auth schemes) are preserved — there is no general way to
+    strip those without losing auditability of the path."""
     try:
         p = urlparse(url)
         host = (p.hostname or "").lower()
