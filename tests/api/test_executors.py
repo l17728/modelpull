@@ -528,3 +528,79 @@ async def test_heartbeat_stores_accessible_base_paths(
         assert ex is not None
         # Still the same base_paths from the first heartbeat
         assert ex.capabilities.get("base_paths") == ["/srv/dlw"]
+
+
+# ── FU9: heartbeat adopts NULL-executor_id keys on accessible backends ────────
+
+@pytest.mark.slow
+async def test_heartbeat_adopts_orphan_local_keys(
+    client: AsyncClient, engine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat with accessible_base_paths → NULL-executor_id keys on that
+    backend get executor_id backfilled (FU9 adoption)."""
+    from sqlalchemy import select
+
+    from dlw.db.models.executor import Executor
+    from dlw.db.models.storage import StorageBackend
+    from dlw.db.models.storage_object import StoragePhysicalKey
+
+    reg = await register_test_executor(
+        client, enrollment_token=_ENROLL,
+        executor_id="ex-adopt-1", host_id="host-adopt",
+    )
+    ex_id = reg["executor_id"]
+
+    base_path = "/tmp/fu9-adopt-store"
+    cfg_bytes = json.dumps({
+        "bucket": "local-bucket", "base_path": base_path,
+        "backend_type": "local",
+    }).encode()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    local_storage_id = 9002  # avoids collision with 9001 used by dispatch test
+    async with factory() as s:
+        # FU9 guard requires executor.tenant_id is not None — set it on the row.
+        ex_row = await s.get(Executor, ex_id)
+        ex_row.tenant_id = 1
+        s.add(StorageBackend(
+            id=local_storage_id, tenant_id=1, name=f"local-adopt-{ex_id}",
+            backend_type="local", config_encrypted=cfg_bytes,
+        ))
+        # Seed a NULL-executor_id key on this local backend
+        s.add(StoragePhysicalKey(
+            tenant_id=1, storage_id=local_storage_id,
+            sha256="fa" * 32, storage_key="models/adopt/file.bin",
+            size=256, executor_id=None,
+        ))
+        await s.commit()
+
+    hb_body = json.dumps({
+        "health_score": 100, "parts_dir_bytes": 0,
+        "accessible_base_paths": [base_path],
+    }).encode()
+    r = await client.post(
+        f"/api/v1/executors/{ex_id}/heartbeat",
+        content=hb_body,
+        headers=signed_heartbeat_headers(reg, hb_body),
+    )
+    assert r.status_code == 200, r.text
+
+    # Verify the NULL key now has executor_id = ex_id
+    async with factory() as s:
+        row = (await s.execute(
+            select(StoragePhysicalKey)
+            .where(StoragePhysicalKey.storage_key == "models/adopt/file.bin")
+        )).scalar_one()
+        assert row.executor_id == ex_id
+
+    # Cleanup
+    async with factory() as s:
+        row = (await s.execute(
+            select(StoragePhysicalKey)
+            .where(StoragePhysicalKey.storage_key == "models/adopt/file.bin")
+        )).scalar_one_or_none()
+        if row:
+            await s.delete(row)
+        backend = await s.get(StorageBackend, local_storage_id)
+        if backend:
+            await s.delete(backend)
+        await s.commit()
