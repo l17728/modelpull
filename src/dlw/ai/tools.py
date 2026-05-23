@@ -7,12 +7,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from dlw.ai.sanitize import sanitize_external, sanitize_t2
+from dlw.ai.url_guard import UrlValidationError, validate_fetch_url
 from dlw.auth.principal import Principal
 from dlw.config import get_settings
 from dlw.db.models.task import DownloadTask
@@ -27,6 +29,7 @@ from dlw.services.hf_metadata import (
 )
 from dlw.services.quota_read import get_quota_snapshot
 from dlw.services.task_detail import events_for_task
+from dlw.services.url_fetch import FetchError, _http_get
 
 
 @dataclass
@@ -133,6 +136,56 @@ async def _hf_model_card(session: AsyncSession, principal: Principal, *,
             "warnings": res.warnings, "refused": res.refused}
 
 
+def _audit_safe_url(url: str) -> str:
+    """Strip query + userinfo from a URL for use in audit/source-attribute
+    contexts (avoid persisting tokens that may live in path/query)."""
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        port = f":{p.port}" if p.port and p.port != 443 else ""
+        return urlunparse((p.scheme, f"{host}{port}", p.path, "", "", ""))
+    except ValueError:
+        return "redacted"
+
+
+async def _fetch_user_content(session, principal, *, url: str) -> dict:
+    """SP4e follow-on B: arbitrary-egress AI tool. Disabled by default;
+    operator must set DLW_AI_FETCH_USER_CONTENT_ENABLED=true AND
+    DLW_AI_FETCH_USER_CONTENT_HOSTNAMES to a non-empty comma-separated list.
+    Honest threat model: DNS rebinding is NOT defended — the admin allowlist
+    is the boundary; operators MUST only whitelist hostnames they trust to
+    never resolve to internal IPs."""
+    s = get_settings()
+    if not s.ai_fetch_user_content_enabled:
+        return {"error": "fetch_user_content disabled by operator"}
+    allow = [h.strip() for h in s.ai_fetch_user_content_hostnames.split(",")
+             if h.strip()]
+    if not allow:
+        return {"error": "fetch_user_content disabled by operator "
+                         "(empty hostname allowlist)"}
+    try:
+        validated = await validate_fetch_url(url, allow=allow)
+    except UrlValidationError as e:
+        return {"error": f"url_rejected: {e}"}
+    try:
+        resp = await _http_get(
+            validated, timeout=s.ai_fetch_user_content_timeout_seconds,
+            max_bytes=s.ai_fetch_user_content_max_response_bytes)
+    except FetchError as e:
+        return {"error": f"fetch_failed: {e}"}
+    safe = _audit_safe_url(validated)
+    res = sanitize_t2(resp.text, source=f"fetch:{safe}")
+    return {
+        "url": safe,
+        "status_code": resp.status_code,
+        "content_type": resp.content_type,
+        "size_bytes": len(res.text),
+        "sanitized": res.text,
+        "warnings": res.warnings,
+        "refused": res.refused,
+    }
+
+
 READONLY_TOOLS: dict[str, Tool] = {
     "dlw_list_tasks": Tool(
         "dlw_list_tasks",
@@ -177,4 +230,12 @@ READONLY_TOOLS: dict[str, Tool] = {
             "repo_id": {"type": "string",
                         "pattern": r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$"}}},
         _hf_model_card),
+    "fetch_user_content": Tool(
+        "fetch_user_content",
+        "Fetch the body of an HTTPS URL the user provided. Returns sanitized text "
+        "(T2 trust, <=8 KiB). Operator-gated.",
+        {"type": "object", "required": ["url"], "properties": {
+            "url": {"type": "string", "format": "uri"}}},
+        _fetch_user_content,
+        external_fields=[]),
 }

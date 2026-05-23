@@ -116,6 +116,17 @@ class Settings(BaseSettings):
     ai_opencode_bin: str = Field(default="opencode")
     ai_max_tool_iters: int = Field(default=8, ge=1, le=50)
 
+    # SP4e follow-on B: fetch_user_content AI tool — arbitrary egress.
+    # DEFAULT OFF. Empty hostname list = effective disable.
+    # Max body capped at 8 KiB to match sanitize_t2's silent T2_MAX truncate
+    # (pre-review R1 I3 — larger caps were lies; sanitize would drop the rest).
+    ai_fetch_user_content_enabled: bool = Field(default=False)
+    ai_fetch_user_content_hostnames: str = Field(default="")
+    ai_fetch_user_content_max_response_bytes: int = Field(
+        default=8192, ge=512, le=8192)
+    ai_fetch_user_content_timeout_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user
