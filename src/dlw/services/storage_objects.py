@@ -107,6 +107,41 @@ async def record_physical_key(
             set_={"last_referenced_at": datetime.now(UTC)}))
 
 
+async def adopt_orphan_local_keys(
+    session: AsyncSession,
+    executor_id: str,
+    *,
+    accessible_storage_ids: frozenset[int],
+    limit: int,
+    tenant_id: int | None = None,
+) -> int:
+    """Heartbeat-driven backfill: set executor_id on NULL-owner physical keys
+    for backends this executor provably mounts. Caller commits.
+    Returns count of rows adopted."""
+    if not accessible_storage_ids:
+        return 0
+    filters = [
+        StoragePhysicalKey.executor_id.is_(None),
+        StoragePhysicalKey.storage_id.in_(accessible_storage_ids),
+    ]
+    if tenant_id is not None:
+        filters.append(StoragePhysicalKey.tenant_id == tenant_id)
+    ids: list[int] = (await session.execute(
+        select(StoragePhysicalKey.id)
+        .where(*filters)
+        .limit(max(1, limit))
+        .with_for_update(skip_locked=True)
+    )).scalars().all()
+    if not ids:
+        return 0
+    await session.execute(
+        update(StoragePhysicalKey)
+        .where(StoragePhysicalKey.id.in_(ids))
+        .values(executor_id=executor_id)
+    )
+    return len(ids)
+
+
 async def pressured_tenant_ids(
     session: AsyncSession, *, threshold: float = 0.9,
 ) -> frozenset[int]:

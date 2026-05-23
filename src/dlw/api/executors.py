@@ -165,6 +165,26 @@ async def post_heartbeat(
     paths = frozenset((ex.capabilities or {}).get("base_paths") or [])
     acc_ids = frozenset(await resolve_accessible_storage_ids(session, paths))
 
+    # FU9: adopt NULL-executor_id local keys on backends this executor mounts.
+    # Gated on both acc_ids being non-empty AND executor.tenant_id being set
+    # (prevents cross-tenant adoption when tenant_id is None).
+    if acc_ids and executor.tenant_id is not None:
+        from dlw.services.storage_objects import adopt_orphan_local_keys
+        _adopted = await adopt_orphan_local_keys(
+            session, executor.id,
+            accessible_storage_ids=acc_ids,
+            limit=s.gc_max_objects_per_tick,
+            tenant_id=executor.tenant_id,
+        )
+        if _adopted:
+            await write_audit(
+                session, action="storage.local.adopt",
+                resource_type="storage_physical_keys",
+                resource_id=executor.id, outcome="success",
+                tenant_id=executor.tenant_id, actor_user_id=None,
+                payload={"adopted": _adopted},
+            )
+
     if body.reclaimed_key_ids:
         await confirm_local_reclaim(
             session, executor.id, body.reclaimed_key_ids, audit=_audit,
