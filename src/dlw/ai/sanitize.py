@@ -56,6 +56,12 @@ def _has_mixed_script_word(text: str) -> bool:
 
 def _scan(text: str) -> tuple[str, list[str], bool]:
     warnings: list[str] = []
+    # SP4e-B pre-review I6: refuse literal boundary tags in body to prevent
+    # whitelisted-host attackers from emitting their own close tag and escaping
+    # the trust boundary in LLM context.
+    if "</external_content>" in text or "</external_user_content>" in text:
+        warnings.append("contains literal boundary tag; refusing")
+        return "", warnings, True
     text = unicodedata.normalize("NFKC", text)
     # Check Bidi overrides BEFORE stripping Cf chars (U+202E is Cf category).
     if _RTL_OVERRIDE_RE.search(text):
