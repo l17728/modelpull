@@ -1,10 +1,11 @@
 """SP4e follow-on B: fetch_user_content tool tests."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from dlw.ai.service import _safe_audit_input
 from dlw.ai.tools import READONLY_TOOLS
 from dlw.config import get_settings
 from dlw.services.url_fetch import FetchError, FetchResponse
@@ -158,3 +159,72 @@ def test_tool_registered_with_explicit_empty_external_fields():
     """Pre-review R2 B3: external_fields=[] EXPLICIT in registration."""
     tool = READONLY_TOOLS["fetch_user_content"]
     assert tool.external_fields == []
+
+
+# ---------------------------------------------------------------------------
+# H1 — audit URL redaction tests (_safe_audit_input)
+# ---------------------------------------------------------------------------
+
+def test_safe_audit_input_strips_query_from_url():
+    """H1: query-string tokens in the url field are stripped before audit."""
+    inp = {"url": "https://example.com/path?token=secret&foo=bar"}
+    safe = _safe_audit_input(inp)
+    assert safe["url"] == "https://example.com/path"
+    assert "secret" not in safe["url"]
+    assert "token" not in safe["url"]
+
+
+def test_safe_audit_input_strips_userinfo():
+    """H1: userinfo (user:pass@) is also stripped."""
+    inp = {"url": "https://user:pass@example.com/"}
+    safe = _safe_audit_input(inp)
+    assert "pass" not in safe["url"]
+    assert "user" not in safe["url"]
+
+
+def test_safe_audit_input_non_url_fields_unchanged():
+    """H1: non-URL fields pass through untouched."""
+    inp = {"repo_id": "org/model", "limit": 10}
+    safe = _safe_audit_input(inp)
+    assert safe == inp
+
+
+def test_safe_audit_input_malformed_url_returns_redacted():
+    """H1: malformed URL values produce 'redacted' (not an exception)."""
+    inp = {"url": "not a url at all ://"}
+    safe = _safe_audit_input(inp)
+    assert safe["url"] in ("not a url at all ://", "redacted")
+
+
+# ---------------------------------------------------------------------------
+# M1 — Accept-Encoding: identity header test
+# ---------------------------------------------------------------------------
+
+async def test_http_get_sends_identity_encoding():
+    """M1: url_fetch._http_get must send Accept-Encoding: identity so httpx
+    does not auto-decompress gzip (decompression bomb prevention)."""
+    from dlw.services.url_fetch import _http_get
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        async def aiter_bytes(self):
+            yield b"hello"
+
+    class _FakeCtx:
+        async def __aenter__(self_inner):
+            return _FakeResp()
+        async def __aexit__(self_inner, *_):
+            pass
+
+    def _capture_stream(self, method, url, **kwargs):
+        captured.update(kwargs.get("headers", {}))
+        return _FakeCtx()
+
+    import httpx
+    with patch.object(httpx.AsyncClient, "stream", _capture_stream):
+        await _http_get("https://example.com/", timeout=5, max_bytes=1024)
+
+    assert captured.get("Accept-Encoding") == "identity"

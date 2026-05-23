@@ -36,7 +36,12 @@ async def _http_get(url: str, *, timeout: float, max_bytes: int) -> FetchRespons
         try:
             async with client.stream(
                 "GET", url,
-                headers={"Accept": "text/*, application/json, application/xhtml+xml"},
+                headers={
+                    "Accept": "text/*, application/json, application/xhtml+xml",
+                    # M1: opt-out of compressed transfer to prevent decompression
+                    # amplification before our streaming cap kicks in.
+                    "Accept-Encoding": "identity",
+                },
             ) as resp:
                 ct = (resp.headers.get("content-type", "")
                       .split(";")[0].strip().lower())
