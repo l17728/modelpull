@@ -113,5 +113,21 @@
       "projects": "Projects", "serviceToken": "Service token" },
     "theme": "Theme", "themeLight": "Light", "themeDark": "Dark",
     "localeLabel": "Language", "controllerState": "Controller state"
+  },
+  "device": {
+    "heading": "Confirm device",
+    "intro": "A command-line tool is requesting access to your account. Confirm the code below to continue.",
+    "principalLabel": "Signing in as",
+    "codeLabel": "Device code",
+    "codePlaceholder": "XXXX-XXXX",
+    "codeRequired": "Device code is required",
+    "approve": "Approve",
+    "deny": "Deny",
+    "successApproved": "Device approved. You can close this tab and return to the CLI.",
+    "successDenied": "Device denied. The CLI session will receive an access_denied error.",
+    "errorInvalid": "Invalid or expired device code. Restart 'dlw login' to get a new one.",
+    "errorService": "Service tokens cannot approve a device. Sign in as a real user.",
+    "errorGeneric": "Approval failed. Please try again.",
+    "serviceWarning": "You are signed in with a service token. Sign in as a regular user to approve a device."
   }
 }

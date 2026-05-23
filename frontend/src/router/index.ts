@@ -40,6 +40,10 @@ export const routes: RouteRecordRaw[] = [
     path: '/settings', name: 'settings',
     component: () => import('@/pages/Settings.vue'),
   },
+  {
+    path: '/device', name: 'device',
+    component: () => import('@/pages/Device.vue'),
+  },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
