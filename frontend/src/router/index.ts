@@ -48,7 +48,7 @@ const router = createRouter({ history: createWebHistory(), routes })
 router.beforeEach((to) => {
   if (to.meta.public) return true
   const auth = useAuthStore()
-  if (!auth.isAuthenticated) return { path: '/login' }
+  if (!auth.isAuthenticated) return { path: '/login', query: { redirect: to.fullPath } }
   return true
 })
 
