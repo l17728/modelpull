@@ -127,6 +127,13 @@ class Settings(BaseSettings):
     ai_fetch_user_content_timeout_seconds: float = Field(
         default=15.0, ge=1.0, le=60.0)
 
+    # SP4e follow-on: web_search AI tool (Brave Search API, free tier 2000/mo).
+    # DEFAULT OFF. Empty api_key = effective disable.
+    ai_web_search_enabled: bool = Field(default=False)
+    ai_web_search_api_key: str = Field(default="")
+    ai_web_search_result_count: int = Field(default=5, ge=1, le=10)
+    ai_web_search_timeout_seconds: float = Field(default=10.0, ge=1.0, le=30.0)
+
     @property
     def db_url(self) -> str:
         auth = f"{self.db_user}:{self.db_password}" if self.db_password else self.db_user
