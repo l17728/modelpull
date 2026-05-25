@@ -78,6 +78,28 @@ class StubAgentRunner(AgentRunner):
             yield AgentEvent("assistant.message_delta",
                              {"text": "Please confirm the cancellation."})
             return
+        if any(k in low for k in ("web_search", "search the web", "搜索")):
+            # Strip leading trigger words to leave the bare query.
+            q = msg
+            for prefix in ("web_search", "search the web for",
+                           "search the web", "搜索"):
+                if prefix in low:
+                    idx = low.find(prefix)
+                    q = (msg[:idx] + msg[idx + len(prefix):]).strip(" :")
+                    break
+            q = q.strip() or msg
+            yield AgentEvent("tool_call",
+                             {"id": "call_ws", "tool": "web_search",
+                              "input": {"query": q},
+                              "requires_confirmation": False})
+            result = await call_tool("web_search", {"query": q})
+            yield AgentEvent("tool_result",
+                             {"id": "call_ws", "ok": "error" not in result,
+                              "output": result})
+            n = len(result.get("results", []))
+            yield AgentEvent("assistant.message_delta",
+                             {"text": f"Found {n} result(s) for '{q}'."})
+            return
         m_repo = _REPO_RE.search(msg)
         if m_repo and any(k in low for k in ("card", "模型卡", "readme")):
             repo = m_repo.group(0)

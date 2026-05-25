@@ -30,6 +30,7 @@ from dlw.services.hf_metadata import (
 from dlw.services.quota_read import get_quota_snapshot
 from dlw.services.task_detail import events_for_task
 from dlw.services.url_fetch import FetchError, _http_get
+from dlw.services.web_search import WebSearchError, search_brave
 
 
 @dataclass
@@ -189,6 +190,36 @@ async def _fetch_user_content(session, principal, *, url: str) -> dict:
     }
 
 
+async def _web_search(session, principal, *, query: str) -> dict:
+    """SP4e follow-on: Brave Search API (free tier 2000 queries/mo).
+    Disabled by default; operator must set DLW_AI_WEB_SEARCH_ENABLED=true
+    AND DLW_AI_WEB_SEARCH_API_KEY to a Brave key."""
+    s = get_settings()
+    if not s.ai_web_search_enabled:
+        return {"error": "web_search disabled by operator"}
+    if not s.ai_web_search_api_key:
+        return {"error": "web_search disabled by operator (no API key)"}
+    try:
+        results = await search_brave(
+            query, api_key=s.ai_web_search_api_key,
+            count=s.ai_web_search_result_count,
+            timeout=s.ai_web_search_timeout_seconds)
+    except WebSearchError as e:
+        return {"error": f"search_failed: {e}"}
+    items = []
+    for r in results:
+        safe_url = _audit_safe_url(r.url)
+        title_res = sanitize_t2(r.title, source=f"web-title:{safe_url}")
+        desc_res = sanitize_t2(r.description, source=f"web-desc:{safe_url}")
+        items.append({
+            "title": title_res.text,
+            "url": safe_url,
+            "description": desc_res.text,
+            "refused": title_res.refused or desc_res.refused,
+        })
+    return {"query": query, "results": items}
+
+
 READONLY_TOOLS: dict[str, Tool] = {
     "dlw_list_tasks": Tool(
         "dlw_list_tasks",
@@ -240,5 +271,14 @@ READONLY_TOOLS: dict[str, Tool] = {
         {"type": "object", "required": ["url"], "properties": {
             "url": {"type": "string", "format": "uri"}}},
         _fetch_user_content,
+        external_fields=[]),
+    "web_search": Tool(
+        "web_search",
+        "Search the web (Brave Search API). Returns up to 10 sanitized results "
+        "(T2 trust). Operator-gated: requires DLW_AI_WEB_SEARCH_ENABLED=true "
+        "and DLW_AI_WEB_SEARCH_API_KEY (free at https://brave.com/search/api/).",
+        {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string"}}},
+        _web_search,
         external_fields=[]),
 }
