@@ -124,6 +124,26 @@ def _build_parser() -> argparse.ArgumentParser:
     logout.add_argument("--context", default=None,
                         help="context to log out of (default: current)")
 
+    tok = sub.add_parser(
+        "token",
+        help="issue a system JWT (dev/admin only — requires system_jwt_secret)")
+    tok.add_argument("--user-id", type=int, default=1,
+                     help="integer user id embedded in sub claim (default: 1)")
+    tok.add_argument("--tenant-id", type=int, default=1,
+                     help="integer tenant id embedded in tid claim (default: 1)")
+    tok.add_argument("--role",
+                     choices=["system_admin", "tenant_admin",
+                               "tenant_operator", "tenant_viewer"],
+                     default="tenant_operator",
+                     help="role claim (default: tenant_operator)")
+    tok.add_argument("--project-ids", type=int, nargs="*", default=[],
+                     metavar="ID", help="project id(s) for project-scoped roles")
+    tok.add_argument("--days", type=int, default=7,
+                     help="token validity in days (default: 7)")
+    tok.add_argument("--secret", default=None,
+                     help="override system_jwt_secret (reads DLW_SYSTEM_JWT_SECRET"
+                          " / settings if omitted)")
+
     sub.add_parser("whoami", help="show the current principal")
     sub.add_parser("quota", help="show current tenant quota usage")
 

@@ -221,12 +221,39 @@ def _watch_sse(client, args, emit) -> int:
     return 1 if last.get("status") == "failed" else 0
 
 
+def _token_cmd(args: argparse.Namespace) -> int:
+    import time
+    from dlw.auth.principal import issue_system_jwt
+    secret = args.secret
+    if secret is None:
+        from dlw.config import get_settings
+        secret = get_settings().system_jwt_secret
+    ttl = args.days * 86400
+    tok = issue_system_jwt(
+        secret=secret,
+        user_id=args.user_id,
+        tenant_id=args.tenant_id,
+        role=args.role,
+        project_ids=args.project_ids,
+        ttl_seconds=ttl,
+    )
+    sys.stdout.write(tok + "\n")
+    exp = time.strftime("%Y-%m-%d %H:%M:%S UTC",
+                        time.gmtime(time.time() + ttl))
+    sys.stderr.write(
+        f"user_id={args.user_id}  tenant_id={args.tenant_id}"
+        f"  role={args.role}  expires={exp}\n")
+    return 0
+
+
 def run(args: argparse.Namespace, make_client: Callable,
         emit: Callable, emit_obj: Callable) -> int:
     if args.cmd == "login":
         return _login_cmd(args)
     if args.cmd == "logout":
         return _logout_cmd(args)
+    if args.cmd == "token":
+        return _token_cmd(args)
     if args.cmd == "context":
         return _context_cmd(args)
     if args.cmd == "config":
