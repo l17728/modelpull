@@ -173,16 +173,22 @@ class OpenCodeRunner(AgentRunner):
                   call_tool: CallTool) -> AsyncIterator[AgentEvent]:
         import asyncio
         import shutil
-        if shutil.which(self._bin) is None:
+        import sys
+        resolved = shutil.which(self._bin)
+        if resolved is None:
             raise AIBackendUnavailable(
                 f"opencode binary '{self._bin}' not found on PATH")
         # Pass model override if configured (DLW_AI_MODEL_NAME=provider/model).
         # Plain text output (no --format flag): simpler and more reliable than
         # --format json which can stall on some providers.
-        args = [self._bin, "run"]
+        args = [resolved, "run"]
         if self.model_name and self.model_name != "opencode":
             args += ["--model", self.model_name]
         args.append(ctx.user_message)
+        # On Windows, .cmd wrappers (npm-installed CLIs) cannot be launched
+        # directly by asyncio.create_subprocess_exec — wrap with cmd.exe /c.
+        if sys.platform == "win32" and resolved.lower().endswith(".cmd"):
+            args = ["cmd.exe", "/c"] + args
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
