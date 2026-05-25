@@ -176,8 +176,15 @@ class OpenCodeRunner(AgentRunner):
         if shutil.which(self._bin) is None:
             raise AIBackendUnavailable(
                 f"opencode binary '{self._bin}' not found on PATH")
+        # Pass model override if configured (DLW_AI_MODEL_NAME=provider/model).
+        # Plain text output (no --format flag): simpler and more reliable than
+        # --format json which can stall on some providers.
+        args = [self._bin, "run"]
+        if self.model_name and self.model_name != "opencode":
+            args += ["--model", self.model_name]
+        args.append(ctx.user_message)
         proc = await asyncio.create_subprocess_exec(
-            self._bin, "run", "--print", ctx.user_message,
+            *args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         if proc.stdout is None:
             raise AIBackendUnavailable("opencode stdout pipe unavailable")
@@ -191,11 +198,15 @@ class OpenCodeRunner(AgentRunner):
                 stderr_buf.append(line)
 
         drainer = asyncio.create_task(_drain_stderr())
+        # Regex to strip ANSI escape sequences from opencode's colored output.
+        _ANSI = re.compile(r"\x1b\[[0-9;]*[mGKHF]|\x1b\[[0-9;]*m")
         try:
             async for raw in proc.stdout:
-                line = raw.decode("utf-8", "replace").rstrip("\n")
-                if line:
-                    yield AgentEvent("assistant.message_delta", {"text": line})
+                line = _ANSI.sub("", raw.decode("utf-8", "replace").rstrip("\n"))
+                # Skip opencode UI header lines ("> build · <model>") and blank.
+                if not line or line.lstrip().startswith(">"):
+                    continue
+                yield AgentEvent("assistant.message_delta", {"text": line + "\n"})
         finally:
             rc = await proc.wait()
             await drainer
