@@ -172,55 +172,90 @@ class OpenCodeRunner(AgentRunner):
     async def run(self, ctx: AgentContext, *,
                   call_tool: CallTool) -> AsyncIterator[AgentEvent]:
         import asyncio
+        import queue
         import shutil
+        import subprocess
         import sys
+        import threading
+
         resolved = shutil.which(self._bin)
         if resolved is None:
             raise AIBackendUnavailable(
                 f"opencode binary '{self._bin}' not found on PATH")
-        # Pass model override if configured (DLW_AI_MODEL_NAME=provider/model).
-        # Plain text output (no --format flag): simpler and more reliable than
-        # --format json which can stall on some providers.
+        # Build command args.  On Windows, .cmd wrappers must be invoked via
+        # cmd.exe /c because subprocess cannot execute .cmd files directly.
         args = [resolved, "run"]
         if self.model_name and self.model_name != "opencode":
             args += ["--model", self.model_name]
         args.append(ctx.user_message)
-        # On Windows, .cmd wrappers (npm-installed CLIs) cannot be launched
-        # directly by asyncio.create_subprocess_exec — wrap with cmd.exe /c.
         if sys.platform == "win32" and resolved.lower().endswith(".cmd"):
             args = ["cmd.exe", "/c"] + args
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        if proc.stdout is None:
-            raise AIBackendUnavailable("opencode stdout pipe unavailable")
-        # Drain stderr concurrently to avoid a pipe-buffer deadlock.
-        stderr_buf: list[bytes] = []
 
-        async def _drain_stderr() -> None:
-            if proc.stderr is None:
-                return
-            async for line in proc.stderr:
-                stderr_buf.append(line)
-
-        drainer = asyncio.create_task(_drain_stderr())
-        # Regex to strip ANSI escape sequences from opencode's colored output.
+        # uvicorn on Windows intentionally uses SelectorEventLoop (for
+        # multiprocessing compatibility), which does not support
+        # asyncio.create_subprocess_exec.  Run the subprocess in a thread
+        # and stream output through an asyncio.Queue to stay non-blocking.
+        _SENTINEL = object()
+        line_queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
         _ANSI = re.compile(r"\x1b\[[0-9;]*[mGKHF]|\x1b\[[0-9;]*m")
-        try:
-            async for raw in proc.stdout:
-                line = _ANSI.sub("", raw.decode("utf-8", "replace").rstrip("\n"))
-                # Skip opencode UI header lines ("> build · <model>") and blank.
+
+        def _run_in_thread() -> None:
+            try:
+                proc = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=False,
+                )
+                # Stream stdout line-by-line; stderr drained in a sub-thread.
+                stderr_lines: list[bytes] = []
+
+                def _drain() -> None:
+                    if proc.stderr:
+                        for ln in proc.stderr:
+                            stderr_lines.append(ln)
+
+                drain_t = threading.Thread(target=_drain, daemon=True)
+                drain_t.start()
+                if proc.stdout:
+                    for raw in proc.stdout:
+                        loop.call_soon_threadsafe(
+                            line_queue.put_nowait,
+                            ("line", raw))
+                rc = proc.wait()
+                drain_t.join()
+                if rc != 0:
+                    err = b"".join(stderr_lines).decode("utf-8", "replace")
+                    loop.call_soon_threadsafe(
+                        line_queue.put_nowait,
+                        ("error", err[:500] or f"exit {rc}"))
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    line_queue.put_nowait,
+                    ("exc", exc))
+            finally:
+                loop.call_soon_threadsafe(line_queue.put_nowait, _SENTINEL)
+
+        thread = threading.Thread(target=_run_in_thread, daemon=True)
+        thread.start()
+
+        while True:
+            item = await line_queue.get()
+            if item is _SENTINEL:
+                break
+            kind, payload = item
+            if kind == "line":
+                line = _ANSI.sub("", payload.decode("utf-8", "replace").rstrip("\n"))
                 if not line or line.lstrip().startswith(">"):
                     continue
                 yield AgentEvent("assistant.message_delta", {"text": line + "\n"})
-        finally:
-            rc = await proc.wait()
-            await drainer
-            if rc != 0:
-                err = b"".join(stderr_buf).decode("utf-8", "replace")
+            elif kind == "error":
                 yield AgentEvent("error",
-                                 {"code": "opencode_failed",
-                                  "message": err[:500] or f"exit {rc}"})
+                                 {"code": "opencode_failed", "message": payload})
+            elif kind == "exc":
+                raise AIBackendUnavailable(
+                    f"opencode subprocess error: {payload}") from payload
 
 
 def build_runner(settings) -> AgentRunner:

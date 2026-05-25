@@ -161,7 +161,7 @@ async def run_chat(
         # On runner failure: emit a terminal `error` and return — do NOT
         # persist an empty assistant message or emit `done`.
         yield AgentEvent("error", {"code": "runner_failed",
-                                   "message": str(exc)})
+                                   "message": str(exc) or type(exc).__name__})
         return
 
     # 4. Persist the assistant message + close. Wrapped so a persistence
