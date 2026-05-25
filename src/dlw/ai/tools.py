@@ -20,6 +20,8 @@ from dlw.config import get_settings
 from dlw.db.models.task import DownloadTask
 from dlw.db.tenant_scope import tenant_filtered
 from dlw.schemas.task import TaskRead
+import httpx as _httpx
+
 from dlw.services.hf_metadata import (
     HfNetworkError,
     HfPrivateOrAuthRequired,
@@ -190,6 +192,58 @@ async def _fetch_user_content(session, principal, *, url: str) -> dict:
     }
 
 
+_MODELSCOPE_SEARCH_ENDPOINT = "https://modelscope.cn/api/v1/models"
+
+
+async def _search_modelscope_models(
+    session, principal, *, query: str, limit: int = 10
+) -> dict:
+    """Search ModelScope for publicly listed models matching *query*.
+
+    Calls the fixed, operator-independent ModelScope public REST endpoint —
+    no user-supplied URL, no SSRF risk. Results (name, description, download
+    count, tags) are T2-sanitized before being returned to the model.
+    """
+    limit = max(1, min(int(limit), 20))
+    try:
+        async with _httpx.AsyncClient(
+            follow_redirects=False, timeout=10.0, verify=True,
+        ) as _c:
+            resp = await _c.get(
+                _MODELSCOPE_SEARCH_ENDPOINT,
+                params={"Name": query, "PageNumber": 1,
+                        "PageSize": limit, "SortBy": "Downloads"},
+                headers={"Accept": "application/json",
+                         "Accept-Encoding": "identity",
+                         "User-Agent": "dlw-ai/1.0"},
+            )
+    except Exception as e:
+        return {"error": f"request_failed: {type(e).__name__}: {e}"}
+    if resp.status_code != 200:
+        return {"error": f"http_{resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"error": "invalid_json"}
+    models = (data.get("Data", {}) or {}).get("Models") or []
+    items = []
+    for m in models[:limit]:
+        raw_name = str(m.get("Name") or "")
+        raw_desc = str(m.get("ChineseName") or m.get("Name") or "")
+        tags = [str(t) for t in (m.get("Tags") or []) if t]
+        name_res = sanitize_t2(raw_name, source="modelscope:name")
+        desc_res = sanitize_t2(raw_desc, source="modelscope:desc")
+        items.append({
+            "id": f"{m.get('Path', '')}/{raw_name}".strip("/"),
+            "name": name_res.text,
+            "description": desc_res.text,
+            "downloads": m.get("Downloads") or 0,
+            "tags": tags[:10],
+            "url": f"https://modelscope.cn/models/{m.get('Path', '')}/{raw_name}".rstrip("/"),
+        })
+    return {"query": query, "total": len(items), "results": items}
+
+
 async def _web_search(session, principal, *, query: str) -> dict:
     """SP4e follow-on: Brave Search API (free tier 2000 queries/mo).
     Disabled by default; operator must set DLW_AI_WEB_SEARCH_ENABLED=true
@@ -280,5 +334,17 @@ READONLY_TOOLS: dict[str, Tool] = {
         {"type": "object", "required": ["query"], "properties": {
             "query": {"type": "string"}}},
         _web_search,
+        external_fields=[]),
+    "search_modelscope_models": Tool(
+        "search_modelscope_models",
+        "Search ModelScope (modelscope.cn) for publicly listed AI models. "
+        "Returns up to 20 results sorted by downloads: model id, description, "
+        "download count, and tags. Results are T2-sanitized external content.",
+        {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string",
+                      "description": "Keywords to search, e.g. 'qwen 7b chat'"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20,
+                      "description": "Max results to return (default 10)"}}},
+        _search_modelscope_models,
         external_fields=[]),
 }
