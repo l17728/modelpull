@@ -109,7 +109,7 @@ def _alembic(args: list[str], test_db_name: str) -> None:
 async def test_upgrade_head_creates_all_tables(
     engine: AsyncEngine, test_db_name: str
 ) -> None:
-    """alembic upgrade head produces the expected 9-table set."""
+    """alembic upgrade head produces the expected 24-table set."""
     _alembic(["upgrade", "head"], test_db_name)
     async with engine.connect() as conn:
         def _get_tables(sync_conn):
