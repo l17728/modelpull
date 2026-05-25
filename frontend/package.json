@@ -17,6 +17,7 @@
     "@tanstack/vue-query": "^5.59.0",
     "axios": "^1.7.7",
     "element-plus": "^2.8.4",
+    "marked": "^14.1.4",
     "pinia": "^2.2.4",
     "vue": "^3.5.10",
     "vue-i18n": "^9.14.0",

@@ -112,7 +112,11 @@
     "principal": { "user": "User", "tenant": "Tenant", "role": "Role",
       "projects": "Projects", "serviceToken": "Service token" },
     "theme": "Theme", "themeLight": "Light", "themeDark": "Dark",
-    "localeLabel": "Language", "controllerState": "Controller state"
+    "localeLabel": "Language", "controllerState": "Controller state",
+    "help": "Help", "helpBtn": "View User Manual", "helpDesc": "Usage guide, design overview and FAQ"
+  },
+  "help": {
+    "title": "User Manual", "loading": "Loading manual…", "error": "Failed to load manual, please try again"
   },
   "device": {
     "heading": "Confirm device",

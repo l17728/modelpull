@@ -4,6 +4,7 @@ import { useSessionStore } from '@/stores/session'
 import { useUiStore } from '@/stores/ui'
 import { useSystemHealth } from '@/composables/useSystemHealth'
 import HealthPill from '@/components/infra/HealthPill.vue'
+import HelpDrawer from '@/components/help/HelpDrawer.vue'
 
 const { t } = useI18n()
 const session = useSessionStore()
@@ -75,7 +76,25 @@ const { data: health } = useSystemHealth()
         <HealthPill :state="health?.controller_state ?? 'unknown'" />
       </div>
     </el-card>
+
+    <el-card class="card">
+      <h3>{{ t('settings.help') }}</h3>
+      <div class="row help-row">
+        <div class="help-desc">
+          {{ t('settings.helpDesc') }}
+        </div>
+        <el-button
+          type="primary"
+          data-test="help-open-btn"
+          @click="ui.toggleHelp()"
+        >
+          📖 {{ t('settings.helpBtn') }}
+        </el-button>
+      </div>
+    </el-card>
   </div>
+
+  <HelpDrawer />
 </template>
 
 <style scoped lang="scss">
@@ -86,5 +105,9 @@ const { data: health } = useSystemHealth()
   gap: 16px;
   margin-top: 8px;
   .lbl { min-width: 140px; color: var(--el-text-color-regular); }
+}
+.help-row {
+  align-items: flex-start;
+  .help-desc { flex: 1; color: var(--el-text-color-secondary); font-size: 13px; padding-top: 6px; }
 }
 </style>
