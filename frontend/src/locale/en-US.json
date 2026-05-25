@@ -1,9 +1,13 @@
 {
   "app": { "title": "modelpull", "logout": "Sign out" },
   "login": {
-    "heading": "Sign in to modelpull", "tokenLabel": "Bearer Token",
-    "tokenPlaceholder": "Paste a tenant-user JWT", "submit": "Sign in",
-    "tokenRequired": "Token is required", "oidc": "Sign in with OIDC"
+    "heading": "Sign in to modelpull",
+    "usernameLabel": "Username", "usernamePlaceholder": "Enter username",
+    "passwordLabel": "Password", "passwordPlaceholder": "Enter password",
+    "usernameRequired": "Username is required", "passwordRequired": "Password is required",
+    "submit": "Sign in", "oidc": "Sign in with OIDC",
+    "invalidCredentials": "Invalid username or password",
+    "mustChangePassword": "First login — please change your password in Settings"
   },
   "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task",
     "executors": "Executors", "audit": "Audit log",
@@ -113,7 +117,18 @@
       "projects": "Projects", "serviceToken": "Service token" },
     "theme": "Theme", "themeLight": "Light", "themeDark": "Dark",
     "localeLabel": "Language", "controllerState": "Controller state",
-    "help": "Help", "helpBtn": "View User Manual", "helpDesc": "Usage guide, design overview and FAQ"
+    "help": "Help", "helpBtn": "View User Manual", "helpDesc": "Usage guide, design overview and FAQ",
+    "changePassword": "Change password", "oldPassword": "Current password",
+    "newPassword": "New password", "confirmPassword": "Confirm new password",
+    "changePasswordBtn": "Change password", "passwordChanged": "Password changed",
+    "wrongOldPassword": "Current password is incorrect", "passwordTooShort": "Password must be at least 8 characters",
+    "passwordMismatch": "Passwords do not match",
+    "userManagement": "User management", "createUser": "Create user",
+    "usernameLabel": "Username", "initialPasswordLabel": "Initial password",
+    "tenantIdLabel": "Tenant ID", "roleLabel": "Role",
+    "resetPassword": "Reset password", "newPasswordFor": "New password for {username}",
+    "userCreated": "User created", "passwordReset": "Password reset",
+    "localAuthOnly": "(Local accounts only)"
   },
   "help": {
     "title": "User Manual", "loading": "Loading manual…", "error": "Failed to load manual, please try again"

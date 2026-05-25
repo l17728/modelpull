@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     )  # 'DLWC AKV1'
     leader_poll_interval_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
 
+    # Local username/password auth
+    admin_username: str = Field(default="admin")
+    admin_initial_password: str = Field(default="")
+
     # Phase 3 SP1 — multi-tenancy
     auth_dev_mode: bool = Field(default=False)
     system_jwt_secret: str = Field(default="dev-system-jwt-change-me")

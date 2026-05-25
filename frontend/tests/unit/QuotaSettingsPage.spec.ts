@@ -5,6 +5,12 @@ import ElementPlus from 'element-plus'
 import { createI18n } from 'vue-i18n'
 import en from '@/locale/en-US.json'
 
+vi.mock('vue-router', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('vue-router')>()),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}))
+
 const { quotaData, healthData } = vi.hoisted(() => ({
   quotaData: { value: null as unknown },
   healthData: { value: null as unknown },

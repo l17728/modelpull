@@ -24,13 +24,12 @@ def check_auth_startup_config(settings) -> None:
     if settings.system_jwt_secret == "dev-system-jwt-change-me":
         raise RuntimeError(
             "insecure system_jwt_secret in non-dev mode; set DLW_SYSTEM_JWT_SECRET")
-    if not settings.oidc_issuer:
-        raise RuntimeError("oidc_issuer required in non-dev mode")
-    from dlw.auth.oidc import parse_tenant_rules
-    for r in parse_tenant_rules(settings.auth_tenant_rules_json):
-        if r.match == "email_domain" and r.value == "*":
-            raise RuntimeError(
-                "wildcard email_domain tenant rule forbidden in non-dev mode")
+    if settings.oidc_issuer:
+        from dlw.auth.oidc import parse_tenant_rules
+        for r in parse_tenant_rules(settings.auth_tenant_rules_json):
+            if r.match == "email_domain" and r.value == "*":
+                raise RuntimeError(
+                    "wildcard email_domain tenant rule forbidden in non-dev mode")
 
 
 @asynccontextmanager
@@ -44,6 +43,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from dlw.services.recovery import run_recovery_routine
 
     factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+
+    # Local auth bootstrap — runs unconditionally so both active and standby
+    # can serve login requests immediately after startup.
+    from dlw.config import get_settings as _gs0
+    _bs_settings = _gs0()
+    if _bs_settings.admin_initial_password:
+        from dlw.services.local_auth import bootstrap_admin
+        async with factory() as _bs:
+            _created = await bootstrap_admin(
+                _bs, _bs_settings.admin_username,
+                _bs_settings.admin_initial_password)
+            if _created:
+                await _bs.commit()
+                logger.info("bootstrapped local admin user '%s'",
+                            _bs_settings.admin_username)
 
     # W3a auth bootstrap — UNCHANGED. Both active and standby need this ready.
     from dlw.auth.uvicorn_tls_patch import install_transport_scope_patch
@@ -367,6 +381,8 @@ def create_app() -> FastAPI:
     app.state.settings = _gs2()
     from dlw.api.auth import router as auth_router
     app.include_router(auth_router)
+    from dlw.api.local_auth import router as local_auth_router
+    app.include_router(local_auth_router)
     # SP5c MUST be registered BEFORE tasks_router so the static `/stream`
     # path wins over `/{task_id}` (FastAPI iterates routers in include order).
     from dlw.api.tasks_list_stream import router as tasks_list_stream_router

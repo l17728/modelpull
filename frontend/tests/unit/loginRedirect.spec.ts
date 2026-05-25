@@ -15,10 +15,25 @@ vi.mock('vue-router', async (importOriginal) => ({
   useRoute: () => ({ query: mockQuery }),
 }))
 
+vi.mock('axios', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('axios')>()
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      post: vi.fn().mockResolvedValue({
+        data: { access_token: 'fake-token', must_change_password: false },
+      }),
+    },
+  }
+})
+
 const i18n = createI18n({ legacy: false, locale: 'en-US', messages: { 'en-US': en } })
 function mountLogin() {
   return mount(Login, { global: { plugins: [ElementPlus, i18n] } })
 }
+
+type FormVM = { form: { username: string; password: string }; onSubmit: () => Promise<void> }
 
 describe('Login redirect-after-login (FU6-UI)', () => {
   beforeEach(() => {
@@ -30,49 +45,54 @@ describe('Login redirect-after-login (FU6-UI)', () => {
   test('honors same-origin /device?user_code=... redirect', async () => {
     mockQuery = { redirect: '/device?user_code=ABCD-1234' }
     const w = mountLogin()
-    await (w.vm as unknown as { form: { token: string } }).form
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/device?user_code=ABCD-1234')
   })
 
   test('rejects external https:// redirect, falls back to /', async () => {
     mockQuery = { redirect: 'https://attacker.example/' }
     const w = mountLogin()
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/')
   })
 
   test('rejects protocol-relative // redirect, falls back to /', async () => {
     mockQuery = { redirect: '//attacker.example/' }
     const w = mountLogin()
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/')
   })
 
   test('rejects /login redirect (loop defense), falls back to /', async () => {
     mockQuery = { redirect: '/login?redirect=/login' }
     const w = mountLogin()
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/')
   })
 
   test('rejects array-typed redirect (vue-router types it string|string[]|null)', async () => {
     mockQuery = { redirect: ['/a', '/b'] }
     const w = mountLogin()
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/')
   })
 
   test('no redirect query → defaults to /', async () => {
     mockQuery = {}
     const w = mountLogin()
-    ;(w.vm as unknown as { form: { token: string } }).form.token = 'tok'
-    await (w.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    ;(w.vm as unknown as FormVM).form.username = 'user'
+    ;(w.vm as unknown as FormVM).form.password = 'pass1234'
+    await (w.vm as unknown as FormVM).onSubmit()
     expect(replace).toHaveBeenCalledWith('/')
   })
 })

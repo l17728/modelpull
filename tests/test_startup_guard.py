@@ -25,9 +25,9 @@ def test_prod_insecure_jwt_secret_refused():
                                      oidc_issuer="https://idp"))
 
 
-def test_prod_missing_issuer_refused():
-    with pytest.raises(RuntimeError, match="oidc_issuer"):
-        check_auth_startup_config(_s(system_jwt_secret="strong", oidc_issuer=""))
+def test_prod_missing_issuer_allowed():
+    """Missing oidc_issuer is no longer refused; local auth is the alternative."""
+    check_auth_startup_config(_s(system_jwt_secret="strong", oidc_issuer=""))  # no raise
 
 
 def test_prod_wildcard_rule_refused():
