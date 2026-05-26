@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**企业内网 Part 3 — 凭证池 + envelope encryption**（Sprint 12）：
+- `services/credential_pool.py` 统一抽象层：`get_hf_token(tenant_id)` + `get_storage_credentials(...)` 中心化所有凭证查询，未来可换 Vault / Secrets Manager 后端
+- Fernet envelope encryption helpers：`encrypt_config` + `decrypt_config`，4 字节 magic prefix (`\x1bDLW`) 自动检测
+- 向后兼容：v2.0 plaintext rows 自动 passthrough；解密失败显式 `_CryptoError`，不静默腐蚀数据
+- `DLW_CONFIG_KEY` 热载（每次调用重读 env），key rotation 无需重启
+- 14 单测：round-trip / no-key-passthrough / plaintext-passthrough-with-key / wrong-key-raises / malformed-key-fallback / pool 默认 token / decrypts S3 config / fallback bucket / invalid JSON / singleton cache
+
 **企业内网 Part 2 — 反向 RPC 任务下发**（Sprint 11）：
 - 扩展 frame schema：`TaskAssignFrame` + `TaskAssignAckFrame`（pydantic discriminated union 自然加入）
 - `services/reverse_dispatcher.py`：per-executor pending map + `dispatch()` / `handle_ack()` / `on_session_established()` / `cancel()` / `pending_for()` API
