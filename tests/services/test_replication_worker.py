@@ -19,6 +19,11 @@ from dlw.db.models.replication import ReplicationJob
 from dlw.db.models.storage import StorageBackend
 from dlw.db.models.storage_object import StorageObject
 from dlw.db.models.tenant import Tenant
+from dlw.observability.metrics import (
+    REPLICATION_BYTES_TOTAL,
+    REPLICATION_JOBS_TOTAL,
+    _reset_for_tests,
+)
 from dlw.services.replication_worker import (
     ClientCtx,
     ExecuteJobResult,
@@ -104,8 +109,9 @@ async def _bootstrap(engine):
 
 @pytest.fixture(autouse=True)
 async def _per_test_cleanup(engine):
-    """Wipe replication_jobs + storage_objects between tests so they don't
-    leak state into each other (especially for cancel + retry races)."""
+    """Wipe replication_jobs + storage_objects + reset Prometheus
+    counters between tests so they don't leak state into each other."""
+    _reset_for_tests()
     yield
     f = async_sessionmaker(engine, expire_on_commit=False)
     async with f() as s:
@@ -499,3 +505,48 @@ async def test_claim_one_pending_returns_none_when_empty(factory):
         picked = await claim_one_pending(s)
         await s.commit()
     assert picked is None
+
+
+# 11. Prometheus metrics are bumped on terminal states
+
+async def test_metrics_succeeded_increments_counters(factory):
+    payload = b"metric-test-payload" * 50
+    obj = await _seed_source_object(factory, payload=payload)
+    job_id = await _seed_job(factory, source_object_id=obj.id)
+
+    client = StubClient(objects={("src-bucket", "src/key.bin"): payload})
+    await execute_job(
+        factory, job_id=job_id,
+        make_client=_make_client_factory(client),
+        bandwidth_mbps=0)
+
+    jobs_counter = REPLICATION_JOBS_TOTAL.labels(
+        tenant_id=str(_T_ID), status="succeeded")
+    assert jobs_counter._value.get() == 1.0  # type: ignore[attr-defined]
+
+    bytes_counter = REPLICATION_BYTES_TOTAL.labels(
+        tenant_id=str(_T_ID), target_storage_id=str(TGT_STORAGE_ID),
+        status="succeeded")
+    assert bytes_counter._value.get() == float(len(payload))  # type: ignore[attr-defined]
+
+
+async def test_metrics_skipped_existing_increments(factory):
+    payload = b"skip-metric"
+    src_obj = await _seed_source_object(factory, payload=payload)
+    async with factory() as s:
+        s.add(StorageObject(
+            tenant_id=_T_ID, storage_id=TGT_STORAGE_ID,
+            storage_key="dup/key", sha256=src_obj.sha256,
+            size=len(payload), refcount=1))
+        await s.commit()
+    job_id = await _seed_job(factory, source_object_id=src_obj.id)
+
+    client = StubClient(objects={("src-bucket", "src/key.bin"): payload})
+    await execute_job(
+        factory, job_id=job_id,
+        make_client=_make_client_factory(client),
+        bandwidth_mbps=0)
+
+    jobs_counter = REPLICATION_JOBS_TOTAL.labels(
+        tenant_id=str(_T_ID), status="skipped_existing")
+    assert jobs_counter._value.get() == 1.0  # type: ignore[attr-defined]

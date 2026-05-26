@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**跨地域复制（Part 3 — UI + 监控 + AI）**（Sprint 6）：
+- `observability/metrics.py` Prometheus foundation：3 个 metric — bytes/jobs Counter + duration Histogram
+- `api/metrics.py` `/metrics` route 配套已有 servicemonitor.yaml
+- `prometheus-client>=0.21` 新增依赖
+- 前端 `/replication` 页：list + status 过滤 + 创建对话框 + 取消
+- nav 入口（admin only 角色过滤）
+- AI 工具 `dlw_create_replication`（system_admin only，二次确认）
+- Grafana dashboard `deploy/grafana/replication-throughput.json` — 吞吐 / 成功率 / p50-p95 / 按 target 分组
+
 **跨地域复制（Part 2 — 真实字节传输 worker）**（Sprint 5）：
 - `services/replication_worker.py`：流式 read → sha 校验 → put target → 记录 StorageObject → 状态机
 - 3 次失败指数退避重试（sha 校验失败不重试 — 同一字节再读结果不变）

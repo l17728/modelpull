@@ -37,6 +37,10 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/QuotaPage.vue'),
   },
   {
+    path: '/replication', name: 'replication',
+    component: () => import('@/pages/Replication.vue'),
+  },
+  {
     path: '/settings', name: 'settings',
     component: () => import('@/pages/Settings.vue'),
   },

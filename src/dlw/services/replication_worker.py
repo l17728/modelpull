@@ -46,6 +46,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from dlw.db.models.replication import ReplicationJob
 from dlw.db.models.storage import StorageBackend
 from dlw.db.models.storage_object import StorageObject
+from dlw.observability.metrics import (
+    REPLICATION_BYTES_TOTAL,
+    REPLICATION_JOB_DURATION_SECONDS,
+    REPLICATION_JOBS_TOTAL,
+)
 from dlw.services.audit import write_audit
 from dlw.services.storage_client import (
     make_s3_client,
@@ -343,6 +348,28 @@ async def _finalize_success(
     return final_status
 
 
+def _record_terminal_metrics(
+    *, tenant_id: int, target_storage_id: int,
+    status: str, bytes_transferred: int, duration_seconds: float,
+) -> None:
+    """Update Prometheus counters when a job reaches a terminal state.
+
+    Cheap no-throw best-effort — any failure inside the metric library
+    is swallowed so a metric backend hiccup never aborts a successful
+    transfer's DB commit."""
+    try:
+        REPLICATION_JOBS_TOTAL.labels(
+            tenant_id=str(tenant_id), status=status).inc()
+        REPLICATION_BYTES_TOTAL.labels(
+            tenant_id=str(tenant_id),
+            target_storage_id=str(target_storage_id),
+            status=status).inc(bytes_transferred)
+        REPLICATION_JOB_DURATION_SECONDS.labels(
+            status=status).observe(duration_seconds)
+    except Exception:  # noqa: BLE001
+        logger.exception("metric increment failed; ignoring")
+
+
 async def execute_job(
     session_factory: async_sessionmaker, *, job_id: int,
     make_client: MakeClientFn | None = None,
@@ -361,13 +388,27 @@ async def execute_job(
     if make_client is None:
         make_client = default_make_client
 
+    # Wall clock start — used by metrics for the duration histogram.
+    import time as _time
+    _t_start = _time.monotonic()
+
     # Phase 1: claim
     async with session_factory() as session:
         result = await _claim_and_snapshot(session, job_id=job_id)
         await session.commit()
     snapshot, claim_status = result
     if snapshot is None:
-        # Short-circuited — terminal state already set by _claim_and_snapshot
+        # Short-circuited (skipped_existing / cancelled / failed before transfer).
+        # Best-effort: re-read the job to record metrics with its tenant.
+        async with session_factory() as s:
+            j = await s.get(ReplicationJob, job_id)
+            if j is not None and claim_status in (
+                    "skipped_existing", "cancelled", "failed"):
+                _record_terminal_metrics(
+                    tenant_id=j.tenant_id,
+                    target_storage_id=j.target_storage_id,
+                    status=claim_status, bytes_transferred=0,
+                    duration_seconds=_time.monotonic() - _t_start)
         return ExecuteJobResult(status=claim_status, bytes_transferred=0)
 
     # Phase 2: transfer (no DB session held)
@@ -402,6 +443,11 @@ async def execute_job(
             logger.info(
                 "replication job %d %s (%d bytes, attempt %d)",
                 snapshot.job_id, final_status, transferred, attempt)
+            _record_terminal_metrics(
+                tenant_id=snapshot.tenant_id,
+                target_storage_id=snapshot.target_storage_id,
+                status=final_status, bytes_transferred=transferred,
+                duration_seconds=_time.monotonic() - _t_start)
             return ExecuteJobResult(
                 status=final_status, bytes_transferred=transferred,
                 retries=attempt)
@@ -414,6 +460,11 @@ async def execute_job(
                     job.status = "cancelled"
                     job.completed_at = _now()
                 await session.commit()
+            _record_terminal_metrics(
+                tenant_id=snapshot.tenant_id,
+                target_storage_id=snapshot.target_storage_id,
+                status="cancelled", bytes_transferred=transferred,
+                duration_seconds=_time.monotonic() - _t_start)
             return ExecuteJobResult(
                 status="cancelled", bytes_transferred=transferred,
                 retries=attempt)
@@ -452,6 +503,11 @@ async def execute_job(
                 payload={"error": last_error or "unknown",
                           "attempts": MAX_RETRY})
         await session.commit()
+    _record_terminal_metrics(
+        tenant_id=snapshot.tenant_id,
+        target_storage_id=snapshot.target_storage_id,
+        status="failed", bytes_transferred=transferred,
+        duration_seconds=_time.monotonic() - _t_start)
     return ExecuteJobResult(
         status="failed", bytes_transferred=transferred,
         error_message=last_error, retries=MAX_RETRY)

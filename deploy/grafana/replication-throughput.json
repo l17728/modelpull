@@ -1,0 +1,149 @@
+{
+  "title": "DLW — Cross-region Replication",
+  "uid": "dlw-replication",
+  "tags": ["dlw", "v2.1", "replication"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"selected": true, "text": "Prometheus", "value": "Prometheus"},
+        "label": "Datasource"
+      },
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(dlw_replication_jobs_total, tenant_id)",
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "target",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(dlw_replication_bytes_total, target_storage_id)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Replication throughput (bytes/sec by status)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(dlw_replication_bytes_total{tenant_id=~\"$tenant\",target_storage_id=~\"$target\"}[5m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "Bps" }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Jobs completed per minute (by status)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(dlw_replication_jobs_total{tenant_id=~\"$tenant\"}[5m]) * 60)",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Job duration percentiles (p50 / p95)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(dlw_replication_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(dlw_replication_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Failed jobs (last 6h)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(increase(dlw_replication_jobs_total{status=\"failed\",tenant_id=~\"$tenant\"}[6h]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Skipped (deduped) jobs (last 6h)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(increase(dlw_replication_jobs_total{status=\"skipped_existing\",tenant_id=~\"$tenant\"}[6h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Cumulative bytes by target storage",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum by (target_storage_id) (dlw_replication_bytes_total{status=\"succeeded\",tenant_id=~\"$tenant\"})",
+          "legendFormat": "storage_id={{target_storage_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" }
+      }
+    }
+  ]
+}

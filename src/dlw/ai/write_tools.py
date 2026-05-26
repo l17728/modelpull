@@ -281,6 +281,45 @@ async def _set_tenant_quota(session: AsyncSession, principal: Principal, *,
             "quota_ai_tokens_month": tenant.quota_ai_tokens_month}
 
 
+async def _create_replication(session: AsyncSession, principal: Principal, *,
+                               source_object_id: int,
+                               target_storage_id: int) -> dict:
+    """v2.1 SP6 — Create a cross-region replication job. system_admin only.
+
+    Wraps services/replication.create_replication_job so all tenant + target
+    validation runs naturally. The actual byte copy is picked up by the
+    background worker_loop on the next poll tick."""
+    from dlw.services.replication import (
+        CreateJobRequest,
+        DuplicateJob,
+        InvalidTarget,
+        ObjectNotFound,
+        TargetNotFound,
+        create_replication_job,
+    )
+    if principal.role != "system_admin":
+        return {"error": "system_admin role required"}
+    try:
+        job = await create_replication_job(
+            session, tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id,
+            req=CreateJobRequest(
+                source_object_id=int(source_object_id),
+                target_storage_id=int(target_storage_id)))
+    except ObjectNotFound:
+        return {"error": "source_object not found in your tenant"}
+    except TargetNotFound:
+        return {"error": "target_storage not found or not visible"}
+    except InvalidTarget as e:
+        return {"error": "invalid_target", "message": str(e)}
+    except DuplicateJob as e:
+        return {"error": "duplicate_job", "message": str(e)}
+    await session.flush()
+    return {"job_id": job.id, "status": job.status,
+            "source_object_id": job.source_object_id,
+            "target_storage_id": job.target_storage_id}
+
+
 async def _reset_local_password(session: AsyncSession, principal: Principal, *,
                                  user_id: int, new_password: str) -> dict:
     """Reset a local user's password. system_admin only."""
@@ -391,6 +430,23 @@ WRITE_TOOLS: dict[str, WriteTool] = {
                         "source_blacklist": {"type": "array",
                                               "items": {"type": "string"}}}},
         _patch),
+    "dlw_create_replication": WriteTool(
+        "dlw_create_replication",
+        "v2.1: Create a cross-region replication job that copies one "
+        "storage_object to a different storage backend. system_admin "
+        "only. The byte transfer runs in the background worker (poll "
+        "tick is a few seconds) — this tool returns immediately after "
+        "the job is queued. Requires confirmation. Common workflow: "
+        "(1) dlw_list_storages to find source + target ids, (2) propose "
+        "this tool, (3) user confirms.",
+        {"type": "object",
+         "required": ["source_object_id", "target_storage_id"],
+         "properties": {
+             "source_object_id": {"type": "integer",
+                                   "description": "id of the existing storage_object to copy"},
+             "target_storage_id": {"type": "integer",
+                                    "description": "id of the destination storage backend"}}},
+        _create_replication),
     "dlw_set_tenant_quota": WriteTool(
         "dlw_set_tenant_quota",
         "Set tenant quota limits (bytes/month, concurrent tasks, storage "

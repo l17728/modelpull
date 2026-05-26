@@ -65,6 +65,40 @@ export interface QuotaCurrent {
   sla_tier?: 'critical' | 'standard' | 'bulk'
 }
 
+/** v2.1 SP4-6 — cross-region replication job. */
+export type ReplicationJobStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'skipped_existing'
+
+export interface ReplicationJob {
+  id: number
+  tenant_id: number
+  source_object_id: number
+  target_storage_id: number
+  status: ReplicationJobStatus
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  bytes_transferred: number
+  retry_count: number
+  error_message: string | null
+}
+
+export interface ReplicationJobsResponse {
+  items: ReplicationJob[]
+}
+
+export const REPLICATION_TERMINAL: ReadonlySet<ReplicationJobStatus> = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'skipped_existing',
+])
+
 export interface TaskCreateBody {
   repo_id: string
   revision: string

@@ -26,6 +26,7 @@ dependencies = [
     "cryptography>=43,<44",
     "pyjwt[crypto]>=2.9,<3.0",
     "argon2-cffi>=23.1,<24.0",
+    "prometheus-client>=0.21,<0.23",
 ]
 
 [dependency-groups]

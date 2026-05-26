@@ -452,7 +452,18 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
      http://controller:8001/api/v1/replication/1/cancel
 ```
 
-**当前状态**：Sprint 4 + Sprint 5 已完成 — 数据模型 + REST + 实际字节传输 worker。Sprint 6（前端 UI + 监控）尚未交付。
+**当前状态**：Sprint 4 + 5 + 6 已完成 — 数据模型 + REST + worker + 前端 UI + Prometheus + AI 工具。
+
+**Web UI**：admin / tenant_admin 用户左侧侧边栏可看到「跨地域复制」入口（`/replication`），支持列表 + 状态筛选 + 创建 + 取消。
+
+**AI 助手**：通过自然语言"把 object 123 复制到 storage 7"会触发 `dlw_create_replication` 写工具（system_admin only），二次确认后入队。
+
+**监控**：
+- Prometheus scrape endpoint `/metrics` 暴露 3 个指标：
+  - `dlw_replication_bytes_total{tenant_id,target_storage_id,status}` Counter
+  - `dlw_replication_jobs_total{tenant_id,status}` Counter
+  - `dlw_replication_job_duration_seconds{status}` Histogram
+- Grafana dashboard：`deploy/grafana/replication-throughput.json`（吞吐 / 成功率 / p50-p95 / 按 target 分组）
 
 **启用后台 worker**（仅 system_admin 配置）：
 
@@ -548,4 +559,4 @@ asyncio.run(main())
 
 ---
 
-*本手册最后更新：2026-05-27（v2.1 Sprint 1/3/4/5 — SLA 分级、Physical GC、跨地域复制 REST + worker）。如有问题请通过 AI 助手提问，或联系系统管理员。*
+*本手册最后更新：2026-05-27（v2.1 Sprint 1/3/4/5/6 — SLA 分级、Physical GC、跨地域复制全栈）。如有问题请通过 AI 助手提问，或联系系统管理员。*

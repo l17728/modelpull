@@ -12,6 +12,9 @@ export const NAV_ITEMS: NavItem[] = [
   { route: 'executors', labelKey: 'nav.executors', icon: 'Monitor' },
   { route: 'audit', labelKey: 'nav.audit', icon: 'Document' },
   { route: 'quota', labelKey: 'nav.quota', icon: 'DataLine' },
+  // v2.1 SP6 — replication console; admin-only so most tenants never see it.
+  { route: 'replication', labelKey: 'nav.replication', icon: 'Refresh',
+    roles: ['system_admin', 'tenant_admin'] },
   { route: 'settings', labelKey: 'nav.settings', icon: 'Setting' },
 ]
 

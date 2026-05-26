@@ -12,7 +12,34 @@
   "nav": {
     "dashboard": "概览", "tasks": "任务", "createTask": "新建任务",
     "executors": "执行节点", "audit": "审计日志",
-    "quota": "配额", "settings": "设置", "docs": "文档", "help": "帮助"
+    "quota": "配额", "replication": "跨地域复制",
+    "settings": "设置", "docs": "文档", "help": "帮助"
+  },
+  "common": {
+    "actions": "操作",
+    "confirm": "确认",
+    "cancel": "取消"
+  },
+  "replication": {
+    "heading": "跨地域复制",
+    "allStatuses": "全部状态",
+    "createButton": "新建任务",
+    "createTitle": "新建复制任务",
+    "sourceObjectId": "源对象 ID",
+    "targetStorageId": "目标存储 ID",
+    "bothIdsRequired": "两个 ID 均必填",
+    "created": "复制任务已入队",
+    "createFailed": "复制任务创建失败",
+    "cancelConfirmTitle": "取消复制？",
+    "cancelConfirmBody": "确认取消复制任务 #{id}？传输中的字节将被丢弃。",
+    "cancelled": "已取消复制",
+    "cancelFailed": "取消失败",
+    "empty": "暂无复制任务。",
+    "col": {
+      "id": "ID", "source": "源对象", "target": "目标存储",
+      "status": "状态", "bytes": "已传输", "retry": "重试",
+      "created": "创建时间", "error": "错误"
+    }
   },
   "docs": {
     "title": "文档中心",

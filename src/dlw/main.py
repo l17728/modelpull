@@ -399,6 +399,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health_router)
+    from dlw.api.metrics import router as metrics_router
+    app.include_router(metrics_router)
     from dlw.config import get_settings as _gs2
     app.state.settings = _gs2()
     from dlw.api.auth import router as auth_router
