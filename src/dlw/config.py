@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     ai_model_name: str = Field(default="stub-model")
     ai_opencode_bin: str = Field(default="opencode")
     ai_max_tool_iters: int = Field(default=8, ge=1, le=50)
+    # SP4f: inject the skills MANIFEST.md into opencode prompts so the
+    # underlying LLM can shell-out to `dlw` CLI / curl instead of guessing.
+    # ~1500-2000 tokens per turn; disable if running tiny models or if a
+    # future opencode version exposes MCP natively.
+    ai_opencode_inject_skills: bool = Field(default=True)
 
     # SP4e follow-on B: fetch_user_content AI tool — arbitrary egress.
     # DEFAULT OFF. Empty hostname list = effective disable.

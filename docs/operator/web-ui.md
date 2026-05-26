@@ -617,7 +617,26 @@ promoted from a Settings card to a permanent sidebar footer item using
 when the main column scrolls (previously the aside grew with content
 and pushed Help below the fold).
 
-**MCP / opencode follow-on still open**: the OpenCodeRunner's tool
-bridge remains the SP4a deferred item — the new tools above are
-visible to the **stub** runner today and will be visible to opencode /
-Claude once the MCP bridge lands.
+**Skills bridge to opencode** (shipped — no MCP server needed):
+`OpenCodeRunner` now prepends a generated MANIFEST.md (`ai/opencode_skills.py`)
+to every turn that lists all 18 tools with shell-command recipes. The
+underlying LLM (Claude via opencode) sees the catalog and invokes tools
+by shelling out to the `dlw` CLI (`dlw show <id>`, `dlw submit <repo>`,
+`dlw cancel <id>` ...) or `curl` against the REST endpoints. Auth flows
+through `$DLW_BEARER_TOKEN` in the subprocess env.
+
+- Manifest is ~2600 tokens, generated from `READONLY_TOOLS` + `WRITE_TOOLS`
+  (single source of truth) — adding a tool to either registry surfaces
+  it in opencode automatically.
+- `ai_opencode_inject_skills: True` is the default; flip to False to
+  disable for tiny-context models or once opencode gets native MCP.
+- Decision-chain UI gap: opencode streams plain text (no
+  `tool_call` / `tool_result` events), so the SP4f chronological steps
+  panel stays empty for opencode-backed turns. The shell commands the
+  LLM runs ARE visible inline in the streamed reply, so the user still
+  sees what was invoked — but a future iteration will parse opencode's
+  output for "Running: dlw ..." lines and synthesize tool events so the
+  decision-chain panel populates the same way as for the stub runner.
+- True MCP server still on the roadmap for parity with non-opencode
+  MCP-aware clients (Claude Desktop, etc.), but no longer blocking
+  modelpull's own opencode integration.

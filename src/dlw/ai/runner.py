@@ -161,13 +161,28 @@ class StubAgentRunner(AgentRunner):
 class OpenCodeRunner(AgentRunner):
     """`opencode` CLI subprocess. Live backend; binary must be on PATH.
     Exact flags resolved at deploy time against the installed version.
-    Raises AIBackendUnavailable if the binary is missing; tool dispatch via
-    MCP is a follow-on (SP4a streams stdout as message deltas for plain Q&A)."""
+    Raises AIBackendUnavailable if the binary is missing.
+
+    Skills-style tool bridge (SP4f): prepends a generated MANIFEST.md
+    listing all READONLY_TOOLS + WRITE_TOOLS with shell-command recipes
+    so opencode/Claude can pick and invoke tools via bash, no MCP server
+    needed. See ai/opencode_skills.py for the generator."""
 
     def __init__(self, settings):
         self.backend_name = "opencode"
         self.model_name = getattr(settings, "ai_model_name", "opencode")
         self._bin = getattr(settings, "ai_opencode_bin", "opencode")
+        # Skills toggle — operator can disable the manifest if it bloats
+        # the prompt or if a future opencode version supports MCP natively.
+        self._inject_skills = getattr(
+            settings, "ai_opencode_inject_skills", True)
+        self._skills_manifest = None
+
+    def _get_skills_manifest(self) -> str:
+        if self._skills_manifest is None:
+            from dlw.ai.opencode_skills import build_skills_manifest
+            self._skills_manifest = build_skills_manifest()
+        return self._skills_manifest
 
     async def run(self, ctx: AgentContext, *,
                   call_tool: CallTool) -> AsyncIterator[AgentEvent]:
@@ -187,7 +202,22 @@ class OpenCodeRunner(AgentRunner):
         args = [resolved, "run"]
         if self.model_name and self.model_name != "opencode":
             args += ["--model", self.model_name]
-        args.append(ctx.user_message)
+        # SP4f: prepend the tool catalog so the model can pick + shell-out
+        # to dlw CLI / curl. Wrapped in a clear delimiter so the model
+        # can distinguish "here's how to act" from "user's actual question".
+        if self._inject_skills:
+            manifest = self._get_skills_manifest()
+            payload = (
+                "<system_instructions>\n"
+                f"{manifest}\n"
+                "</system_instructions>\n\n"
+                "<user_message>\n"
+                f"{ctx.user_message}\n"
+                "</user_message>"
+            )
+        else:
+            payload = ctx.user_message
+        args.append(payload)
         if sys.platform == "win32" and resolved.lower().endswith(".cmd"):
             args = ["cmd.exe", "/c"] + args
 
