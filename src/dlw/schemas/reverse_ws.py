@@ -96,9 +96,55 @@ class TaskAssignAckFrame(BaseModel):
     assignment_id: str
 
 
+# Sprint 13 — Live Console: whitelisted command channel + log streaming.
+
+# Whitelist of commands the controller may send. Adding anything to this
+# list is a SECURITY review event — these are RCE-shaped primitives.
+WHITELIST_COMMANDS = ("status", "drain", "restart")
+
+
+class CommandFrame(BaseModel):
+    """Server → executor. command MUST be one of WHITELIST_COMMANDS;
+    enforced both at the call site (dispatcher) and at frame
+    construction. command_id is a fresh UUID per send, echoed in
+    CommandResultFrame."""
+    type: Literal["command"] = "command"
+    command_id: str
+    command: str  # validated against WHITELIST_COMMANDS at dispatcher
+
+    @classmethod
+    def validate_command(cls, command: str) -> None:
+        if command not in WHITELIST_COMMANDS:
+            raise ValueError(
+                f"command {command!r} not in whitelist {WHITELIST_COMMANDS}")
+
+
+class CommandResultFrame(BaseModel):
+    """Executor → server. ok=True means the command completed
+    successfully. output is the captured stdout (capped to ~64KB by the
+    executor before sending — UI displays it in an xterm widget)."""
+    type: Literal["command_result"] = "command_result"
+    command_id: str
+    ok: bool
+    output: str = ""
+    error: str = ""
+
+
+class ConsoleOutputFrame(BaseModel):
+    """Executor → server, unsolicited. Streams a chunk of executor
+    stdout for relay to the admin UI's live-console widget. stream is
+    'stdout' or 'stderr'; text is utf-8 (executor strips control chars
+    other than newlines)."""
+    type: Literal["console_output"] = "console_output"
+    stream: Literal["stdout", "stderr"] = "stdout"
+    text: str
+
+
 # Discriminated union — pydantic v2 picks the right subtype by `type`.
 AnyFrame = Annotated[
     Union[HelloFrame, HelloAckFrame, HeartbeatFrame, HeartbeatAckFrame,
-          TaskAssignFrame, TaskAssignAckFrame, ErrorFrame],
+          TaskAssignFrame, TaskAssignAckFrame,
+          CommandFrame, CommandResultFrame, ConsoleOutputFrame,
+          ErrorFrame],
     Field(discriminator="type"),
 ]

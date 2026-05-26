@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**企业内网 Part 4 — Live Console**（Sprint 13）：
+- `schemas/reverse_ws.py` 新增 3 个 frame：`CommandFrame` / `CommandResultFrame` / `ConsoleOutputFrame`
+- `WHITELIST_COMMANDS = ("status", "drain", "restart")` — 添加项需安全评审（注释明示）
+- `reverse_dispatcher.send_command()` 双层白名单检查（dispatcher 层 + frame 层 `validate_command` helper），离线 executor → `CommandUnknownExecutor` 异常
+- `api/admin_console.py`：`POST /api/v1/admin/executors/{id}/command`（system_admin only，404 offline / 422 not-whitelisted / 403 wrong-role）+ `GET /api/v1/admin/reverse-ws/sessions`（列出 live 连接，executor 选择器用）
+- 14 单测：每个白名单 cmd parametrized 测试 + 非白名单拒绝（防御深度）+ command_id 保留 + REST 404/422/403 + sessions 列表
+
 **企业内网 Part 3 — 凭证池 + envelope encryption**（Sprint 12）：
 - `services/credential_pool.py` 统一抽象层：`get_hf_token(tenant_id)` + `get_storage_credentials(...)` 中心化所有凭证查询，未来可换 Vault / Secrets Manager 后端
 - Fernet envelope encryption helpers：`encrypt_config` + `decrypt_config`，4 字节 magic prefix (`\x1bDLW`) 自动检测

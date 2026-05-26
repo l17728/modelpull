@@ -34,10 +34,22 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from dlw.schemas.reverse_ws import TaskAssignFrame
+from dlw.schemas.reverse_ws import (
+    WHITELIST_COMMANDS,
+    CommandFrame,
+    TaskAssignFrame,
+)
 from dlw.services.reverse_ws_registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+
+class CommandUnknownExecutor(LookupError):
+    """No live session for the requested executor_id (Sprint 13)."""
+
+
+class CommandNotWhitelisted(ValueError):
+    """Command outside the WHITELIST_COMMANDS tuple (Sprint 13)."""
 
 
 @dataclass
@@ -185,6 +197,39 @@ class ReverseDispatcher:
     async def total_pending(self) -> int:
         async with self._lock:
             return sum(len(m) for m in self._pending.values())
+
+    # ----- Sprint 13 — Live Console command channel ----------------------
+    # Commands are fire-and-forget at the dispatcher level: we don't track
+    # pending state because the admin caller waits synchronously for the
+    # response over the same WS (Sprint 14 may add a result-correlation
+    # map). Whitelist is enforced HERE so a future caller can't bypass it
+    # by constructing a CommandFrame manually.
+
+    async def send_command(
+        self, *, executor_id: str, command: str, command_id: str | None = None,
+    ) -> str:
+        """Send a whitelisted command to a connected executor. Returns
+        the command_id so the caller can correlate with CommandResultFrame
+        (when result correlation lands in Sprint 14)."""
+        if command not in WHITELIST_COMMANDS:
+            raise CommandNotWhitelisted(
+                f"command {command!r} not in whitelist {WHITELIST_COMMANDS}")
+        session = await get_registry().get(executor_id)
+        if session is None:
+            raise CommandUnknownExecutor(executor_id)
+        cid = command_id or str(uuid.uuid4())
+        frame = CommandFrame(command_id=cid, command=command)
+        try:
+            await session.websocket.send_text(frame.model_dump_json())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "reverse_dispatcher: send_command(%s, %s) failed: %s",
+                executor_id, command, e)
+            raise
+        logger.info(
+            "reverse_dispatcher: sent command %r (id=%s) to %s",
+            command, cid, executor_id)
+        return cid
 
     def _reset_for_tests(self) -> None:
         self._pending.clear()
