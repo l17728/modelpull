@@ -9,17 +9,24 @@ import os
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 _K_CANDIDATES = int(os.environ.get("DLW_SCHEDULER_CANDIDATES", "16"))
 _DISK_SAFETY_MARGIN_BYTES = int(
     os.environ.get("DLW_DISK_SAFETY_MARGIN_BYTES", str(200 * 1024 * 1024))
 )
+# v2.1 SP1: gate the SLA-tier-weighted ordering behind a flag so it can be
+# rolled out and rolled back independently of code deploys. When False the
+# scheduler keeps the v2.0 created_at-only ordering for backward compat.
+_SLA_TIER_ENABLED = os.environ.get("DLW_SLA_TIER_ENABLED", "true").lower() in (
+    "1", "true", "yes")
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dlw.db.models.executor import Executor
 from dlw.db.models.task import DownloadTask, FileSubTask
+from dlw.db.models.tenant import Tenant
 from dlw.services.quota import record_usage
+from dlw.services.sla_tier import TIER_BULK, TIER_CRITICAL, TIER_STANDARD
 from dlw.services.source_blacklist import blacklist_file
 from dlw.services.storage_objects import deref_subtask, record_object, record_physical_key
 
@@ -72,15 +79,53 @@ async def claim_one_subtask(
     GiB = 1024 ** 3
     free_bytes = (e_self.disk_free_gb or 0) * GiB - (e_self.parts_dir_bytes or 0)
 
-    stmt = (
-        select(FileSubTask)
-        .where(FileSubTask.status.in_(("pending", "inherit")))
-        .where(~same_host_holds)
-        .where(parent_active)           # W2b2 NEW
-        .order_by(FileSubTask.created_at)
-        .limit(_K_CANDIDATES)
-        .with_for_update(skip_locked=True)
-    )
+    # v2.1 SP1: weighted ordering. When SLA enabled we JOIN to the parent
+    # task (so we can read priority) and tenant (so we can read sla_tier),
+    # then sort by (tier_weight × (priority+1)) DESC. The JOIN to
+    # DownloadTask doubles as the v2b2 "parent_active" filter, replacing
+    # the EXISTS subquery that would auto-correlate-conflict with the new
+    # outer reference to DownloadTask.
+    if _SLA_TIER_ENABLED:
+        from dlw.services.sla_tier import BULK_STARVATION_TIMEOUT_SECONDS
+        from sqlalchemy import func as _f
+        wait_seconds = _f.extract(
+            "epoch", _f.now() - FileSubTask.created_at)
+        # Starvation guard: pending too long → effective tier x2 for ordering.
+        starvation_bump = case(
+            (wait_seconds > BULK_STARVATION_TIMEOUT_SECONDS, 2),
+            else_=1,
+        )
+        tier_weight_sql = case(
+            (Tenant.sla_tier == TIER_CRITICAL, 4),
+            (Tenant.sla_tier == TIER_STANDARD, 2),
+            (Tenant.sla_tier == TIER_BULK, 1),
+            else_=2,                    # unknown / NULL defaults to standard
+        ) * starvation_bump
+        order_score = (
+            tier_weight_sql * (DownloadTask.priority + 1)
+        ).label("order_score")
+        stmt = (
+            select(FileSubTask)
+            .join(DownloadTask, DownloadTask.id == FileSubTask.task_id)
+            .join(Tenant, Tenant.id == DownloadTask.tenant_id)
+            .where(FileSubTask.status.in_(("pending", "inherit")))
+            .where(~same_host_holds)
+            .where(DownloadTask.status.in_(
+                ("pending", "scheduling", "downloading")))
+            .order_by(order_score.desc(), FileSubTask.created_at)
+            .limit(_K_CANDIDATES)
+            .with_for_update(of=FileSubTask, skip_locked=True)
+        )
+    else:
+        stmt = (
+            select(FileSubTask)
+            .where(FileSubTask.status.in_(("pending", "inherit")))
+            .where(~same_host_holds)
+            .where(parent_active)
+            .order_by(FileSubTask.created_at)
+            .limit(_K_CANDIDATES)
+            .with_for_update(skip_locked=True)
+        )
     candidates = (await session.execute(stmt)).scalars().all()
     for sub in candidates:
         size = sub.file_size or 0

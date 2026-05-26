@@ -57,6 +57,20 @@ async def check_quota_for_new_task(
         raise QuotaExceeded("concurrent_tasks")
     if tenant.quota_storage_gb and snap.storage_gb_used >= tenant.quota_storage_gb:
         raise QuotaExceeded("storage")
+    # v2.1 SP1: tier-aware admission control. Even when below hard quota,
+    # reject bulk tasks once the tenant is near its concurrent ceiling so
+    # critical/standard work always has headroom. Uses sla_tier on the
+    # tenant; default "standard" leaves the rejection threshold at >99%.
+    # Disabled when quota_concurrent is 0 (unlimited) — there's no
+    # meaningful "busy fraction" to compute.
+    import os
+    if (os.environ.get("DLW_SLA_TIER_ENABLED", "true").lower() in
+            ("1", "true", "yes")
+            and tenant.quota_concurrent):
+        from dlw.services.sla_tier import admission_decision
+        busy = live_concurrent / tenant.quota_concurrent
+        if not admission_decision(tenant.sla_tier or "standard", busy):
+            raise QuotaExceeded(f"admission_denied_{tenant.sla_tier or 'standard'}")
 
 
 async def record_usage(
