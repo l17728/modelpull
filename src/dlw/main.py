@@ -460,6 +460,8 @@ def create_app() -> FastAPI:
     app.include_router(admin_gc_router)
     from dlw.api.replication import router as replication_router
     app.include_router(replication_router)
+    from dlw.api.reverse_ws import router as reverse_ws_router
+    app.include_router(reverse_ws_router)
     # SP5c MUST be registered BEFORE tasks_router so the static `/stream`
     # path wins over `/{task_id}` (FastAPI iterates routers in include order).
     from dlw.api.tasks_list_stream import router as tasks_list_stream_router

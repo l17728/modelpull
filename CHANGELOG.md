@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**企业内网 Part 1 — 反向 WSS protocol + handshake**（Sprint 10）：
+- `schemas/reverse_ws.py` JSON-line frame 定义（PROTOCOL_VERSION="1.0"）：Hello / HelloAck / Heartbeat / HeartbeatAck / Error，pydantic discriminated union
+- `services/reverse_ws_registry.py` 内存 session 注册：reconnect-wins（新 session 替代旧的，旧 socket 自动 close）+ last-write-wins 防止 stale unregister 误删新 session
+- `api/reverse_ws.py` `/api/v1/exec/reverse-ws` FastAPI WebSocket endpoint：JWT auth via `?token=...&executor_id=...`、handshake (Hello → HelloAck)、heartbeat loop、protocol-version mismatch / executor-id mismatch 错误处理
+- 15 单测：frame 序列化 / JWT 验证 happy + 4 失败模式 / registry register-evict-reconnect / heartbeat touch / wrong-session 拒绝 / PROTOCOL_VERSION pinned
+- WS endpoint 集成测试因 Windows TestClient + asyncio proactor 竞态在本地 skip；Linux CI 真验证
+
 **自适应优化 Part 3 — Online replan loop**（Sprint 9）：
 - `services/replan_loop.py` shadow / apply 双模：默认 shadow（log + metric，不写库），第二层 `DLW_ADAPTIVE_OPTIMIZER_APPLY` 开启才真正 UPDATE source_id
 - 双层 feature flag：`DLW_ADAPTIVE_OPTIMIZER_ENABLED`（默认 false，loop 不跑）+ `DLW_ADAPTIVE_OPTIMIZER_APPLY`（默认 false，只 shadow）— 生产灰度安全
