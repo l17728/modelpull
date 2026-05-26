@@ -4,6 +4,11 @@
 > 适用：v2.0 GA Phase 3 起；初次部署或新 tenant 接入时使用。
 > 估时：30-60 min（取决于 IdP 类型）。
 
+> **备选方案（2026-05 起）**：如果你的部署**没有可用的 OIDC IdP**（离线 / 气隙
+> 网络 / POC 验证），可以改用**本地用户名密码认证**，跳过本文档 — 见末尾的
+> [附：local auth 备选](#附local-auth-备选不依赖-oidc) 章节。OIDC 仍是企业部署
+> 的推荐方案；local auth 适合受限网络场景。
+
 ---
 
 ## 0. 决策：选 IdP
@@ -289,3 +294,51 @@ psql -h localhost -U postgres dlw -c \
 - OIDC + JWT 协议：[`02-protocol.md`](../v2.0/02-protocol.md) §1
 - CLI auth：[`11-cli-and-sdk-spec.md`](../v2.0/11-cli-and-sdk-spec.md) §2.2
 - 数据模型：[`01-architecture.md`](../v2.0/01-architecture.md) §4.1
+
+---
+
+## 附：local auth 备选（不依赖 OIDC）
+
+如果你没有可用 OIDC IdP 或只是 POC 验证，可用本地用户名/密码认证。功能限制：
+没有 SSO、没有 IdP 单点登出、不支持基于 IdP claims 的自动 tenant routing — 但
+其他能力（多租户隔离、casbin RBAC、审计、device flow CLI）都正常。
+
+**首次启动 bootstrap admin**：
+
+```bash
+# DLW_ADMIN_INITIAL_PASSWORD 仅在首次启动有效；admin 已存在时静默跳过
+DLW_AUTH_DEV_MODE=true \
+DLW_ADMIN_USERNAME=admin \
+DLW_ADMIN_INITIAL_PASSWORD=ChangeMe-Strong-Pass-32+chars \
+DLW_SYSTEM_JWT_SECRET=$(openssl rand -hex 32) \
+uv run uvicorn dlw.main:app --port 8001
+```
+
+启动日志会出现 `bootstrapped local admin user 'admin'`。
+
+**配置 alembic head**：用户表迁移 `a1b2c3d4e5f6_local_credentials.py` 必须先
+跑：`uv run alembic upgrade head`。
+
+**接口** (`/api/v1/auth/local/*`):
+
+| Endpoint | 角色 | 用途 |
+|----------|------|------|
+| `POST /login` | 公开 | username/password → access_token (JWT, 1h TTL) + must_change_password 标志 |
+| `POST /password` | 任何已登录用户 | 改自己的密码（需要 old + new） |
+| `POST /users` | system_admin | 新建用户（指定 tenant_id + role + 初始密码） |
+| `GET /users` | system_admin | 列出所有本地用户 |
+| `POST /users/{id}/reset` | system_admin | 重置某用户的密码（用户下次登录需改密） |
+
+**前端**：登录页（`/login`）已替换为 username/password 表单，OIDC 按钮保留；
+Settings → "修改密码" 卡片所有用户可用，"用户管理" 卡片 system_admin 可见。
+
+**AI 助手集成**：local auth 也是 AI 助手 `dlw_create_local_user` /
+`dlw_reset_local_password` 写工具的底层 — 详见 [`MANUAL.md` § AI 助手](../../MANUAL.md)。
+
+**Startup guard**：在非 dev 模式下，必须满足以下任一条件，否则 controller 会
+拒绝启动：
+- 配置了 OIDC（`DLW_OIDC_ISSUER` 非空），或
+- 用了 local auth 且 `DLW_SYSTEM_JWT_SECRET` ≠ 默认占位值
+
+**何时回到 OIDC**：上线企业部署、需要 SSO / SCIM / IdP-driven onboarding 时，
+配置 OIDC 后两套机制可同时启用（local auth 作为 break-glass admin 通道）。

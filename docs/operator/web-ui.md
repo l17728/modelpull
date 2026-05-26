@@ -543,3 +543,81 @@ arbitrary-egress tools (need an egress allowlist and admin enable); and a
 non-bypassable structural sanitization choke point (today each external
 tool calls the sanitizer itself — correct for the tools that exist, with a
 declarative choke point tracked as a follow-on).
+
+## UI-SP4f — AI Copilot tool expansion + decision-chain transparency (2026-05)
+
+Fifth AI slice: the read-only MVP's 4 tools + SP4b's 2 write tools have
+grown to **18 total** (11 read + 7 write), and every reply now surfaces
+the AI's full decision path so users can verify a fact came from a real
+tool call rather than model hallucination.
+
+**Tools added** (all tenant-scoped; same audit + confirm gates):
+
+- **Read**: `dlw_list_storages` (so the AI can pick a valid `storage_id`
+  before proposing `dlw_create_task`); `search_huggingface_models` and
+  `search_modelscope_models` (keyword search the two model registries;
+  preferred over `web_search` when the user mentions HF / ModelScope).
+- **Write** (every requires user confirmation via SP4b's gate):
+  `dlw_delete_task` (terminal-only), `dlw_retry_task` (creates a new
+  task with the same params), `dlw_upgrade_task` (creates a new task at
+  a new revision — unchanged files inherit via the SP3 `diff_and_dedup`
+  mechanism), `dlw_patch_task` (mutates priority / source_strategy /
+  source_blacklist on non-terminal tasks; backed by the new
+  `services/task_patch.py` with `SELECT FOR UPDATE` for concurrent-patch
+  safety), `dlw_create_local_user` / `dlw_reset_local_password` /
+  `dlw_set_tenant_quota` (system_admin only; the last two are backed by
+  `services/tenant_quota.py` which audit-logs only-on-change).
+- **`dlw_create_task` smoothing**: `revision` defaults to `"main"`;
+  `storage_id` auto-resolves to the tenant's `is_default=true` backend
+  if omitted — so end-to-end "下载 deepseek-ai/DeepSeek-R1" becomes a
+  one-shot tool call.
+- **`web_search` is now default-on** at the config level
+  (`ai_web_search_enabled: True`); without an API key the tool still
+  no-ops with a clear "no API key" error, so flipping the flag is
+  harmless absent credentials. Tool description tells the LLM the
+  intended priority: domain tools (HF / ModelScope / internal) → 
+  `web_search` → model knowledge.
+
+**New REST endpoints** (the AI tools delegate to these):
+
+- `PATCH /api/v1/tasks/{id}` — mutates the same fields as
+  `dlw_patch_task`; tenant-scoped; rejects terminal tasks with `409
+  TASK_TERMINAL`; rejects invalid strategy with `422 INVALID_PATCH`.
+- `PUT /api/v1/tenants/{id}/quota` — system_admin only; writes an
+  audit log entry with `{field: {before, after}}` payload.
+
+**Decision-chain UI** (`CopilotMessageBubble.vue`,
+`CopilotToolsHelp.vue`, `CopilotToolCard.vue`):
+
+- Assistant replies are rendered as Markdown (`marked` with
+  `<script>/<iframe>/<object>/<embed>/<style>` strip as a
+  defense-in-depth on top of the existing T2 sanitizer).
+- A **source-attribution badge** appears under every reply, colored
+  per category: `💭 from model knowledge (may be outdated)` (warning) /
+  `🤗 via Hugging Face` (success) / `🔍 via ModelScope` (primary) /
+  `🌐 via web search` (primary) / `📊 via internal data` (success) /
+  red `⚠ tool call failed` if any tool returned `ok: false`. The
+  badge is driven by which tools the runner actually emitted, so it's
+  factually grounded — a reply with only the model badge means **no
+  tool was called and the answer should not be trusted at face value**.
+- A **decision-chain panel** sits ABOVE the reply, rendering the
+  `assistant.thinking` and `tool_call`/`tool_result` events in
+  emit-time order (previously `assistant.thinking` was dropped by the
+  composable). Each tool entry is a collapsible card showing the tool
+  name + summarized input args + status tag + one-line result summary;
+  click to expand the full input/output JSON.
+- A **tools-help panel** (default expanded) above the message list
+  lists all 18 tools with category tag (read / write / external),
+  one-line description, and an example question — so users know what
+  to ask.
+
+**Sidebar refactor** (companion to SP4f): the **Help** menu item was
+promoted from a Settings card to a permanent sidebar footer item using
+`position: sticky` so it stays anchored to the viewport bottom even
+when the main column scrolls (previously the aside grew with content
+and pushed Help below the fold).
+
+**MCP / opencode follow-on still open**: the OpenCodeRunner's tool
+bridge remains the SP4a deferred item — the new tools above are
+visible to the **stub** runner today and will be visible to opencode /
+Claude once the MCP bridge lands.
