@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**生产部署 + load test 运维交付物**（Sprint 15）：
+- `deploy/loadtest/locustfile.py` + README：4 个 user types（BrowsingUser 60% / SubmittingUser 20% / AdminUser 15% / AIUser 5%），加权混合 read + write 流量，7-day 压测脚本，4 个 acceptance gate（availability / latency / throughput / no data loss）
+- `deploy/runbooks/chaos-drill.md`：4 个 chaos 场景（pull PG / 拔 S3 region / kill active controller / mass executor disconnect），每个都有 pass criterion + rollback
+- `docs/operator/post-mortem-template.md`：blameless 事故复盘模板（severity 矩阵、timeline、action items 类型分类）
+- `docs/operator/v21-production-deployment.md`：4 步部署清单 + 7-day 渐进式 feature flag 启用计划 + T+24h 验证 + 通讯节奏
+- `docs/operator/sla-slo.md` § 3 容量基线增 4 项 v2.1 新指标（反向 WSS 并发 / replication 吞吐 / sampler 写入率 / optimizer solve p95）+ Sprint 15 压测填回链接
+- 实际 7-day 压测 + 容量基线填回 = 运维侧任务，不在 codebase commit 范围
+
 **跨特性集成测试**（Sprint 14）：
 - `tests/integration/test_v21_cross_feature.py` 12 场景跨 v2.1 5 大特性叠加：
   - SLA × admission control：critical 永不拒、standard 99% 拒、bulk 90% 拒

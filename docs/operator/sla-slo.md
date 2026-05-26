@@ -35,16 +35,25 @@
 
 ---
 
-## 3. 容量基线（design-based，尚未实测验证）
+## 3. 容量基线
+
+> **Sprint 15 capacity drill** — 用 `deploy/loadtest/locustfile.py` +
+> `deploy/runbooks/chaos-drill.md` 跑 7-day 压测把所有 ❓ 替换成实测值
+> + locust run ID。流程见 `docs/operator/v21-production-deployment.md`
+> § "Verification (T+24h)"。
 
 | 维度 | 设计基线 | 实测验证状态 |
 |------|---------|-------------|
-| 单 controller 并发 task | ≤ 500 | ❓ 待压测 |
-| 单 controller 并发 executor | ≤ 100 | ❓ 待压测 |
+| 单 controller 并发 task | ≤ 500 | ❓ 待 Sprint 15 压测填回 |
+| 单 controller 并发 executor | ≤ 100 | ❓ 待 Sprint 15 压测填回 |
 | 单 task 子分片数 | ≤ 10000 | ✅ 单测覆盖 |
 | 单 task 字节数 | ≤ 5 TB | ✅ chunk 调度算法可扩展 |
 | 租户数 | ≤ 1000 | ❓ casbin 在该规模延迟未实测 |
 | PG TPS | ≤ 5000 wpps | 见 `docs/perf-baselines/p-005-pg-tps.md`（仅 baseline） |
+| **v2.1 新增 — 反向 WSS 并发** | ≤ 200 sessions / controller | ❓ 待 Sprint 15 压测填回 |
+| **v2.1 新增 — replication 吞吐** | ≤ 100 MB/s/tenant | ❓ 受 `DLW_REPLICATION_BANDWIDTH_MBPS` 限速 |
+| **v2.1 新增 — chunk_throughput_sample 写入率** | ≤ 1000 rows/s sustained | ❓ 待 Sprint 15 压测填回 |
+| **v2.1 新增 — optimizer.solve() 延迟** | p95 < 100 ms (100 chunks × 10 ex × 5 src) | ✅ 单测验证 ~10 ms |
 
 ---
 
