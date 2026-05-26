@@ -387,6 +387,8 @@ def create_app() -> FastAPI:
     app.include_router(tenants_router)
     from dlw.api.admin_gc import router as admin_gc_router
     app.include_router(admin_gc_router)
+    from dlw.api.replication import router as replication_router
+    app.include_router(replication_router)
     # SP5c MUST be registered BEFORE tasks_router so the static `/stream`
     # path wins over `/{task_id}` (FastAPI iterates routers in include order).
     from dlw.api.tasks_list_stream import router as tasks_list_stream_router

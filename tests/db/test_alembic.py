@@ -65,6 +65,7 @@ EXPECTED_TABLES = {
     "local_credentials",
     "projects",
     "quota_snapshots",
+    "replication_jobs",
     "source_blacklist",
     "source_speed_samples",
     "storage_backends",
