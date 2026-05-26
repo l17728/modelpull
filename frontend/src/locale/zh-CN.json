@@ -31,6 +31,45 @@
     "confirm": {
       "title": "AI 想执行 {tool}", "approve": "确认",
       "reject": "取消", "modify": "修改", "modifyHint": "JSON 格式错误"
+    },
+    "toolCard": {
+      "running": "执行中…", "success": "成功", "failed": "失败",
+      "input": "输入参数", "output": "返回结果",
+      "itemsCount": "{n} 条", "resultsCount": "{n} 条结果",
+      "totalCount": "共 {n} 条", "fieldsCount": "{n} 个字段"
+    },
+    "tools": {
+      "title": "可用工具", "hint": "点击展开",
+      "intro": "AI 可以调用以下工具获取真实数据，而不是依赖训练记忆。点击展开查看每个工具的用途和示例提问。",
+      "footnote": "外部 (🌐 / 🔍) 工具需要管理员启用；如未启用，AI 只能依据训练数据回答，可能产生幻觉。",
+      "example": "示例",
+      "cat": { "read": "读取", "write": "写入", "external": "外部" },
+      "descs": {
+        "dlw_list_tasks": "列出你的下载任务，可按状态过滤。",
+        "dlw_get_task": "按 id 查询单个任务的详细信息。",
+        "dlw_get_task_events": "查询某任务的最近事件（状态变更、错误）。",
+        "dlw_quota_current": "查询当前租户的配额使用情况（流量/存储/并发）。",
+        "hf_api_metadata": "Hugging Face：查询仓库的结构化元数据（sha、文件列表）。",
+        "hf_model_card": "Hugging Face：获取仓库的 README / 模型卡片。",
+        "search_modelscope_models": "在 modelscope.cn 上按关键词搜索模型（按下载量排序）。",
+        "web_search": "通过 Brave 搜索引擎搜索网页（需管理员启用）。",
+        "fetch_user_content": "抓取允许列表内的 HTTPS URL 内容（需管理员启用）。",
+        "dlw_create_task": "新建一个下载任务（需要确认）。",
+        "dlw_cancel_task": "取消正在运行的任务（需要确认）。"
+      },
+      "examples": {
+        "dlw_list_tasks": "列出本周失败的任务。",
+        "dlw_get_task": "查看任务 abcd-1234 的详情。",
+        "dlw_get_task_events": "任务 abcd-1234 为什么失败？",
+        "dlw_quota_current": "本月配额我用了多少？",
+        "hf_api_metadata": "meta-llama/Llama-3-8B 这个模型有多大？",
+        "hf_model_card": "Qwen/Qwen2-7B 的模型卡片说了什么？",
+        "search_modelscope_models": "在 ModelScope 上找一个 Qwen 7B 对话模型。",
+        "web_search": "今年发布的最新 DeepSeek 模型是什么？",
+        "fetch_user_content": "总结 https://example.com/blog/post 这篇文章。",
+        "dlw_create_task": "把 meta-llama/Llama-3-8B 下载到默认项目。",
+        "dlw_cancel_task": "取消任务 abcd-1234。"
+      }
     }
   },
   "dashboard": {

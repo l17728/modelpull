@@ -4,6 +4,8 @@ import { useI18n } from 'vue-i18n'
 import { useUiStore } from '@/stores/ui'
 import { useCopilot } from '@/composables/useCopilot'
 import CopilotConfirmCard from '@/components/copilot/CopilotConfirmCard.vue'
+import CopilotToolCard from '@/components/copilot/CopilotToolCard.vue'
+import CopilotToolsHelp from '@/components/copilot/CopilotToolsHelp.vue'
 
 const { t } = useI18n()
 const ui = useUiStore()
@@ -58,6 +60,7 @@ async function onSend() {
         class="messages"
         data-test="copilot-messages"
       >
+        <CopilotToolsHelp />
         <div
           v-if="!copilot.messages.value.length"
           class="empty"
@@ -71,7 +74,10 @@ async function onSend() {
           :class="m.role"
           :data-test="`copilot-msg-${m.role}`"
         >
-          <div class="bubble">
+          <div
+            v-if="m.text"
+            class="bubble"
+          >
             {{ m.text }}
           </div>
           <el-alert
@@ -82,24 +88,14 @@ async function onSend() {
             show-icon
             data-test="copilot-quota-alert"
           />
-          <div
+          <CopilotToolCard
             v-for="card in m.toolCards"
             :key="card.id"
-            class="tool-card"
-            data-test="copilot-tool-card"
-          >
-            <div class="tool-name">
-              🛠 {{ card.tool }}
-              <el-tag
-                v-if="card.ok !== undefined"
-                size="small"
-                :type="card.ok ? 'success' : 'danger'"
-              >
-                {{ card.ok ? 'ok' : 'err' }}
-              </el-tag>
-            </div>
-            <pre class="tool-out">{{ JSON.stringify(card.output ?? card.input, null, 2) }}</pre>
-          </div>
+            :tool="card.tool"
+            :input="card.input"
+            :output="card.output"
+            :ok="card.ok"
+          />
           <CopilotConfirmCard
             v-if="m.pendingConfirm"
             :pending="m.pendingConfirm"
@@ -143,8 +139,5 @@ async function onSend() {
 .msg.user { align-items: flex-end; }
 .bubble { padding: 8px 12px; border-radius: 8px; background: var(--dlw-surface); max-width: 90%; white-space: pre-wrap; }
 .msg.user .bubble { background: var(--el-color-primary-light-8); }
-.tool-card { border: 1px solid var(--dlw-border); border-radius: 6px; padding: 6px 8px; font-size: 12px; }
-.tool-name { font-weight: 600; display: flex; gap: 6px; align-items: center; }
-.tool-out { margin: 4px 0 0; max-height: 160px; overflow: auto; white-space: pre-wrap; }
 .composer { display: flex; gap: var(--dlw-space-2); align-items: flex-end; }
 </style>

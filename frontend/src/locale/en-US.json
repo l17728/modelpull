@@ -30,6 +30,45 @@
     "confirm": {
       "title": "AI wants to run {tool}", "approve": "Confirm",
       "reject": "Cancel", "modify": "Modify", "modifyHint": "Invalid JSON"
+    },
+    "toolCard": {
+      "running": "running…", "success": "ok", "failed": "failed",
+      "input": "Input", "output": "Output",
+      "itemsCount": "{n} item(s)", "resultsCount": "{n} result(s)",
+      "totalCount": "total: {n}", "fieldsCount": "{n} field(s)"
+    },
+    "tools": {
+      "title": "Available tools", "hint": "click to expand",
+      "intro": "The AI can call these tools to fetch real data instead of relying on its training memory. Click a tool to see what it does and an example question.",
+      "footnote": "External (🌐 / 🔍) tools are operator-gated; if disabled, the AI must answer from training data only and may hallucinate.",
+      "example": "Example",
+      "cat": { "read": "read", "write": "write", "external": "external" },
+      "descs": {
+        "dlw_list_tasks": "List your download tasks, optionally filtered by status.",
+        "dlw_get_task": "Get details for one task by id.",
+        "dlw_get_task_events": "Get recent events for a task (state transitions, errors).",
+        "dlw_quota_current": "Your tenant's current quota usage (bytes/storage/concurrency).",
+        "hf_api_metadata": "Hugging Face: structured metadata (sha, file list) for a repo.",
+        "hf_model_card": "Hugging Face: fetch the README/model card of a repo.",
+        "search_modelscope_models": "Search modelscope.cn for models by keyword (sorted by downloads).",
+        "web_search": "Search the web via Brave (operator-gated).",
+        "fetch_user_content": "Fetch the body of an allow-listed HTTPS URL (operator-gated).",
+        "dlw_create_task": "Create a new download task (requires confirmation).",
+        "dlw_cancel_task": "Cancel a running task (requires confirmation)."
+      },
+      "examples": {
+        "dlw_list_tasks": "List my failed tasks from this week.",
+        "dlw_get_task": "Show me task abcd-1234.",
+        "dlw_get_task_events": "Why did task abcd-1234 fail?",
+        "dlw_quota_current": "How much of my quota have I used this month?",
+        "hf_api_metadata": "How big is the model meta-llama/Llama-3-8B?",
+        "hf_model_card": "What is the model card for Qwen/Qwen2-7B?",
+        "search_modelscope_models": "Find a Qwen 7B chat model on ModelScope.",
+        "web_search": "What's the latest DeepSeek model released this year?",
+        "fetch_user_content": "Summarize https://example.com/blog/post.",
+        "dlw_create_task": "Download meta-llama/Llama-3-8B to the default project.",
+        "dlw_cancel_task": "Cancel task abcd-1234."
+      }
     }
   },
   "dashboard": {
