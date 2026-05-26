@@ -39,12 +39,48 @@ REPLICATION_JOB_DURATION_SECONDS = Histogram(
     buckets=(0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800, 3600),
 )
 
+# ---------------------------------------------------------------------------
+# Adaptive optimizer (Sprint 9)
+
+OPTIMIZER_SOLVE_DURATION_SECONDS = Histogram(
+    "dlw_optimizer_solve_duration_seconds",
+    "Wall time for one optimizer.solve() call. Sub-second buckets so we "
+    "can see if the LPT heuristic stops fitting the workload.",
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0),
+)
+
+REPLAN_CHUNK_MOVES_TOTAL = Counter(
+    "dlw_replan_chunk_moves_total",
+    "Cumulative chunks the replan loop moved to a different source. "
+    "'shadow' counts moves the loop COMPUTED but did NOT apply (feature "
+    "flag off); 'apply' counts moves actually persisted.",
+    labelnames=("mode",),
+)
+
 
 def _reset_for_tests() -> None:
     """Reset all counters in this module. Tests that assert on metric
     values use this in an autouse fixture so a previous test's bumps
-    don't poison the next assertion."""
+    don't poison the next assertion.
+
+    Labeled metrics (Counter/Histogram with labelnames=) keep their
+    children in `_metrics`; unlabeled metrics use `_sum` / `_value` /
+    `_buckets` directly. Handle both."""
     for metric in (REPLICATION_BYTES_TOTAL,
                    REPLICATION_JOBS_TOTAL,
-                   REPLICATION_JOB_DURATION_SECONDS):
-        metric._metrics.clear()  # type: ignore[attr-defined]
+                   REPLICATION_JOB_DURATION_SECONDS,
+                   OPTIMIZER_SOLVE_DURATION_SECONDS,
+                   REPLAN_CHUNK_MOVES_TOTAL):
+        children = getattr(metric, "_metrics", None)
+        if children is not None:
+            children.clear()
+            continue
+        # Unlabeled — zero its internal state. Counter has _value,
+        # Histogram has _sum + _buckets.
+        if hasattr(metric, "_value"):
+            metric._value.set(0)  # type: ignore[attr-defined]
+        if hasattr(metric, "_sum"):
+            metric._sum.set(0)  # type: ignore[attr-defined]
+        if hasattr(metric, "_buckets"):
+            for b in metric._buckets:  # type: ignore[attr-defined]
+                b.set(0)

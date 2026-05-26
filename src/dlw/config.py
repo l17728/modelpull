@@ -135,6 +135,14 @@ class Settings(BaseSettings):
     throughput_sample_retention_days: int = Field(
         default=7, ge=1, le=365)
 
+    # v2.1 Sprint 9 — Online replan loop. Master switch is OFF until the
+    # shadow logs validate the optimizer in your environment. APPLY is a
+    # SECOND switch — even when the loop is on, default is shadow-only.
+    adaptive_optimizer_enabled: bool = Field(default=False)
+    adaptive_optimizer_apply: bool = Field(default=False)
+    adaptive_optimizer_interval_seconds: float = Field(
+        default=30.0, ge=5.0, le=600.0)
+
     # UI-SP4a — AI Copilot
     ai_backend: str = Field(default="stub")   # stub (CI/tests) | opencode (only live backend)
     ai_model_name: str = Field(default="stub-model")

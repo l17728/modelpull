@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**自适应优化 Part 3 — Online replan loop**（Sprint 9）：
+- `services/replan_loop.py` shadow / apply 双模：默认 shadow（log + metric，不写库），第二层 `DLW_ADAPTIVE_OPTIMIZER_APPLY` 开启才真正 UPDATE source_id
+- 双层 feature flag：`DLW_ADAPTIVE_OPTIMIZER_ENABLED`（默认 false，loop 不跑）+ `DLW_ADAPTIVE_OPTIMIZER_APPLY`（默认 false，只 shadow）— 生产灰度安全
+- 只移动 status='pending' 的 chunk；UPDATE WHERE 里再过一次 status='pending' 防 solve→apply 之间的 race
+- 2 Prometheus metric：`dlw_optimizer_solve_duration_seconds` (Histogram) + `dlw_replan_chunk_moves_total{mode}` (Counter)
+- lifespan 接入：跟 replication / GC / sampler 同 pattern，_on_step_down 取消
+- 10 单测：no-pending / no-capacity / shadow-doesnt-write / apply-persists / running-skipped / already-optimal-no-move / metrics shadow+apply / solve_seconds reported / env-flag respected
+
 **自适应优化 Part 2 — Optimizer + Capacity matrix**（Sprint 8）：
 - `services/optimizer.py` LPT (Longest Processing Time) heuristic + 局部交换打磨；solve() 接口与未来 highspy/LP 后端兼容
 - 决策点：选纯 Python heuristic 而非 highspy 新依赖 — Graham 1969 保证 makespan ≤ 4/3 倍最优；100×10×5 < 10ms（plan 预算 1s）

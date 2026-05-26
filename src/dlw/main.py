@@ -169,6 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     replication_worker_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     throughput_flush_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     throughput_retention_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    replan_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _gc_loop() -> None:
         from dlw.services.audit import write_audit
@@ -287,6 +288,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             factory,
             retention_days=s.throughput_sample_retention_days)
 
+    async def _replan_loop_runner() -> None:
+        # The loop itself reads the ENABLED + APPLY env vars on each tick,
+        # so a deploy can flip them without restart. We start the loop
+        # unconditionally — its first action is to check the flag.
+        from dlw.services.replan_loop import replan_loop
+        s = _gs()
+        await replan_loop(
+            factory, interval_seconds=s.adaptive_optimizer_interval_seconds)
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -309,6 +319,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _throughput_flush_loop_runner())
         throughput_retention_task_holder["t"] = asyncio.create_task(
             _throughput_retention_loop_runner())
+        replan_task_holder["t"] = asyncio.create_task(_replan_loop_runner())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -368,7 +379,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pass
             replication_worker_task_holder["t"] = None
         for holder in (throughput_flush_task_holder,
-                        throughput_retention_task_holder):
+                        throughput_retention_task_holder,
+                        replan_task_holder):
             tt = holder["t"]
             if tt is not None:
                 tt.cancel()
