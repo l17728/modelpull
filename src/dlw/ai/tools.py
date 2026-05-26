@@ -192,7 +192,66 @@ async def _fetch_user_content(session, principal, *, url: str) -> dict:
     }
 
 
+_HUGGINGFACE_SEARCH_ENDPOINT = "https://huggingface.co/api/models"
 _MODELSCOPE_SEARCH_ENDPOINT = "https://modelscope.cn/api/v1/models"
+
+
+async def _search_huggingface_models(
+    session, principal, *, query: str, limit: int = 10,
+    sort: str = "lastModified",
+) -> dict:
+    """Search Hugging Face for publicly listed models matching *query*.
+
+    Calls the fixed huggingface.co public REST endpoint (no SSRF risk).
+    `sort` is one of: lastModified (default), downloads, likes, trendingScore.
+    Returns model id, downloads, likes, last-modified, pipeline_tag and tags.
+    """
+    limit = max(1, min(int(limit), 20))
+    valid_sort = {"lastModified", "downloads", "likes", "trendingScore"}
+    if sort not in valid_sort:
+        sort = "lastModified"
+    s = get_settings()
+    headers = {"Accept": "application/json",
+               "Accept-Encoding": "identity",
+               "User-Agent": "dlw-ai/1.0"}
+    if s.hf_token:
+        headers["Authorization"] = f"Bearer {s.hf_token}"
+    try:
+        async with _httpx.AsyncClient(
+            follow_redirects=False, timeout=10.0, verify=True,
+        ) as _c:
+            resp = await _c.get(
+                _HUGGINGFACE_SEARCH_ENDPOINT,
+                params={"search": query, "sort": sort,
+                        "direction": -1, "limit": limit,
+                        "full": "false"},
+                headers=headers,
+            )
+    except Exception as e:
+        return {"error": f"request_failed: {type(e).__name__}: {e}"}
+    if resp.status_code != 200:
+        return {"error": f"http_{resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"error": "invalid_json"}
+    models = data if isinstance(data, list) else []
+    items = []
+    for m in models[:limit]:
+        raw_id = str(m.get("id") or m.get("modelId") or "")
+        tags = [str(t) for t in (m.get("tags") or []) if t]
+        id_res = sanitize_t2(raw_id, source="hf:id")
+        items.append({
+            "id": id_res.text,
+            "downloads": m.get("downloads") or 0,
+            "likes": m.get("likes") or 0,
+            "last_modified": m.get("lastModified") or "",
+            "pipeline_tag": m.get("pipeline_tag") or "",
+            "tags": tags[:10],
+            "url": f"https://huggingface.co/{raw_id}" if raw_id else "",
+        })
+    return {"query": query, "sort": sort,
+            "total": len(items), "results": items}
 
 
 async def _search_modelscope_models(
@@ -328,18 +387,39 @@ READONLY_TOOLS: dict[str, Tool] = {
         external_fields=[]),
     "web_search": Tool(
         "web_search",
-        "Search the web (Brave Search API). Returns up to 10 sanitized results "
-        "(T2 trust). Operator-gated: requires DLW_AI_WEB_SEARCH_ENABLED=true "
-        "and DLW_AI_WEB_SEARCH_API_KEY (free at https://brave.com/search/api/).",
+        "FALLBACK web search via Brave Search API. Use ONLY when a more "
+        "specific tool above does not cover the query (e.g. cross-site news, "
+        "non-HF/ModelScope topics). For Hugging Face questions prefer "
+        "search_huggingface_models; for ModelScope prefer search_modelscope_models. "
+        "Returns up to 10 T2-sanitized results. Default-on, but requires "
+        "DLW_AI_WEB_SEARCH_API_KEY (free at https://brave.com/search/api/).",
         {"type": "object", "required": ["query"], "properties": {
             "query": {"type": "string"}}},
         _web_search,
         external_fields=[]),
+    "search_huggingface_models": Tool(
+        "search_huggingface_models",
+        "PREFER THIS over web_search when the user asks about Hugging Face "
+        "models (list/search by keyword, find latest, find top downloaded). "
+        "Calls huggingface.co's public API directly. Returns up to 20 results "
+        "with model id, downloads, likes, last_modified, pipeline_tag, tags. "
+        "Sort options: lastModified (default — for 'latest'), downloads, likes, "
+        "trendingScore. Results are T2-sanitized.",
+        {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string",
+                      "description": "Keywords or org/name prefix, e.g. 'deepseek', 'qwen 7b'"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20,
+                      "description": "Max results (default 10)"},
+            "sort": {"type": "string",
+                     "enum": ["lastModified", "downloads", "likes", "trendingScore"],
+                     "description": "Sort order (default lastModified)"}}},
+        _search_huggingface_models,
+        external_fields=[]),
     "search_modelscope_models": Tool(
         "search_modelscope_models",
-        "Search ModelScope (modelscope.cn) for publicly listed AI models. "
-        "Returns up to 20 results sorted by downloads: model id, description, "
-        "download count, and tags. Results are T2-sanitized external content.",
+        "PREFER THIS over web_search when the user asks about ModelScope "
+        "(modelscope.cn) models. Returns up to 20 results sorted by downloads: "
+        "model id, description, download count, and tags. T2-sanitized.",
         {"type": "object", "required": ["query"], "properties": {
             "query": {"type": "string",
                       "description": "Keywords to search, e.g. 'qwen 7b chat'"},

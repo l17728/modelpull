@@ -132,13 +132,23 @@ function toggleLocale() {
   background: var(--dlw-surface);
   border-right: 1px solid var(--dlw-border);
   transition: width 0.2s;
+  /* Pin sidebar to viewport so the Help footer is always visible,
+     even when main content scrolls past the fold. */
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
 .aside-inner {
   display: flex; flex-direction: column;
   height: 100%;
+  overflow-y: auto;
 }
-.main-menu { flex: 1; }
-.aside-footer { border-top: 1px solid var(--dlw-border); }
+.main-menu { flex: 1; border-right: 0; }
+.aside-footer {
+  border-top: 1px solid var(--dlw-border);
+  flex-shrink: 0;
+  .el-menu { border-right: 0; }
+}
 .brand {
   display: flex; align-items: center; gap: var(--dlw-space-2);
   padding: var(--dlw-space-3); font-weight: 600;

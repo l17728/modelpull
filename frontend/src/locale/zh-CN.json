@@ -49,8 +49,8 @@
     },
     "tools": {
       "title": "可用工具", "hint": "点击展开",
-      "intro": "AI 可以调用以下工具获取真实数据，而不是依赖训练记忆。点击展开查看每个工具的用途和示例提问。",
-      "footnote": "外部 (🌐 / 🔍) 工具需要管理员启用；如未启用，AI 只能依据训练数据回答，可能产生幻觉。",
+      "intro": "AI 会根据你的问题选合适的工具：先用领域专用工具（Hugging Face / ModelScope / 系统内部），再用 web_search 兜底，最后才回退到模型记忆。",
+      "footnote": "web_search 需要管理员配置 DLW_AI_WEB_SEARCH_API_KEY 才能真实运行；未配置时 AI 只能用模型记忆，可能过时。",
       "example": "示例",
       "cat": { "read": "读取", "write": "写入", "external": "外部" },
       "descs": {
@@ -60,6 +60,7 @@
         "dlw_quota_current": "查询当前租户的配额使用情况（流量/存储/并发）。",
         "hf_api_metadata": "Hugging Face：查询仓库的结构化元数据（sha、文件列表）。",
         "hf_model_card": "Hugging Face：获取仓库的 README / 模型卡片。",
+        "search_huggingface_models": "在 huggingface.co 上按关键词搜索模型（最新 / 最多下载 / 最多 likes）。",
         "search_modelscope_models": "在 modelscope.cn 上按关键词搜索模型（按下载量排序）。",
         "web_search": "通过 Brave 搜索引擎搜索网页（需管理员启用）。",
         "fetch_user_content": "抓取允许列表内的 HTTPS URL 内容（需管理员启用）。",
@@ -73,6 +74,7 @@
         "dlw_quota_current": "本月配额我用了多少？",
         "hf_api_metadata": "meta-llama/Llama-3-8B 这个模型有多大？",
         "hf_model_card": "Qwen/Qwen2-7B 的模型卡片说了什么？",
+        "search_huggingface_models": "Hugging Face 上 deepseek 最新的模型有哪些？",
         "search_modelscope_models": "在 ModelScope 上找一个 Qwen 7B 对话模型。",
         "web_search": "今年发布的最新 DeepSeek 模型是什么？",
         "fetch_user_content": "总结 https://example.com/blog/post 这篇文章。",

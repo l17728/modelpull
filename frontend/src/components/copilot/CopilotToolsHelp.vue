@@ -18,6 +18,7 @@ const TOOLS: ToolItem[] = [
   { name: 'dlw_quota_current', icon: '📊', category: 'read' },
   { name: 'hf_api_metadata', icon: '🤗', category: 'external' },
   { name: 'hf_model_card', icon: '🤗', category: 'external' },
+  { name: 'search_huggingface_models', icon: '🤗', category: 'external' },
   { name: 'search_modelscope_models', icon: '🔍', category: 'external' },
   { name: 'web_search', icon: '🌐', category: 'external' },
   { name: 'fetch_user_content', icon: '🌐', category: 'external' },

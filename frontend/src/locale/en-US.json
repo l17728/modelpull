@@ -48,8 +48,8 @@
     },
     "tools": {
       "title": "Available tools", "hint": "click to expand",
-      "intro": "The AI can call these tools to fetch real data instead of relying on its training memory. Click a tool to see what it does and an example question.",
-      "footnote": "External (🌐 / 🔍) tools are operator-gated; if disabled, the AI must answer from training data only and may hallucinate.",
+      "intro": "The AI picks a tool based on your question: domain-specific tools first (Hugging Face / ModelScope / internal data), web_search as fallback, and model knowledge as last resort.",
+      "footnote": "web_search needs DLW_AI_WEB_SEARCH_API_KEY to actually run; without it the AI falls back to model knowledge and the answer may be outdated.",
       "example": "Example",
       "cat": { "read": "read", "write": "write", "external": "external" },
       "descs": {
@@ -59,6 +59,7 @@
         "dlw_quota_current": "Your tenant's current quota usage (bytes/storage/concurrency).",
         "hf_api_metadata": "Hugging Face: structured metadata (sha, file list) for a repo.",
         "hf_model_card": "Hugging Face: fetch the README/model card of a repo.",
+        "search_huggingface_models": "Search huggingface.co for models by keyword (latest / top downloads / likes).",
         "search_modelscope_models": "Search modelscope.cn for models by keyword (sorted by downloads).",
         "web_search": "Search the web via Brave (operator-gated).",
         "fetch_user_content": "Fetch the body of an allow-listed HTTPS URL (operator-gated).",
@@ -72,6 +73,7 @@
         "dlw_quota_current": "How much of my quota have I used this month?",
         "hf_api_metadata": "How big is the model meta-llama/Llama-3-8B?",
         "hf_model_card": "What is the model card for Qwen/Qwen2-7B?",
+        "search_huggingface_models": "What are the latest deepseek models on Hugging Face?",
         "search_modelscope_models": "Find a Qwen 7B chat model on ModelScope.",
         "web_search": "What's the latest DeepSeek model released this year?",
         "fetch_user_content": "Summarize https://example.com/blog/post.",
