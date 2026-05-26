@@ -1,8 +1,14 @@
-"""AgentRunner abstraction + backends (UI-SP4a).
+"""AgentRunner abstraction + backends.
+
+modelpull only integrates with **opencode** as the live AI backend. The
+`stub` backend is for CI/tests. Whichever LLM opencode is configured to
+use (Claude, GPT-4, local, etc.) is opencode's own concern; modelpull
+just shells out to `opencode run` and parses its stdout.
 
 stub      — deterministic, scripted; CI/tests; no secret, no subprocess.
 opencode  — `opencode` CLI subprocess (live backend; binary must be on PATH).
-claude_code / openai_compat — structural only in SP4a (raise AIBackendUnavailable).
+
+Any other `ai_backend` value raises AIBackendUnavailable.
 """
 from __future__ import annotations
 
@@ -165,8 +171,9 @@ class OpenCodeRunner(AgentRunner):
 
     Skills-style tool bridge (SP4f): prepends a generated MANIFEST.md
     listing all READONLY_TOOLS + WRITE_TOOLS with shell-command recipes
-    so opencode/Claude can pick and invoke tools via bash, no MCP server
-    needed. See ai/opencode_skills.py for the generator."""
+    so opencode (whichever LLM it is configured against) can pick and
+    invoke tools via bash, no MCP server needed. See ai/opencode_skills.py
+    for the generator."""
 
     def __init__(self, settings):
         self.backend_name = "opencode"

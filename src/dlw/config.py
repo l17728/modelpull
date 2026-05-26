@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     gc_quota_pressure_threshold: float = Field(default=0.9, gt=0.0, le=1.0)
 
     # UI-SP4a — AI Copilot
-    ai_backend: str = Field(default="stub")   # stub | opencode | claude_code | openai_compat
+    ai_backend: str = Field(default="stub")   # stub (CI/tests) | opencode (only live backend)
     ai_model_name: str = Field(default="stub-model")
     ai_opencode_bin: str = Field(default="opencode")
     ai_max_tool_iters: int = Field(default=8, ge=1, le=50)

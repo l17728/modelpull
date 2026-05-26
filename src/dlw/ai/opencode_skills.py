@@ -2,9 +2,10 @@
 tool registry to the opencode CLI subprocess.
 
 The OpenCodeRunner prepends this manifest to the user's message so the
-underlying LLM (Claude via opencode) sees a catalog of available actions
-plus the exact shell command to invoke each one. This avoids implementing
-a full MCP server while still giving real backends access to the tools.
+LLM that opencode is configured against (whichever one — modelpull does
+not care) sees a catalog of available actions plus the exact shell
+command to invoke each one. This avoids implementing a full MCP server
+while still giving real backends access to the tools.
 
 Single source of truth: READONLY_TOOLS + WRITE_TOOLS registries. If you
 add a tool there, it shows up in the manifest automatically — no parallel

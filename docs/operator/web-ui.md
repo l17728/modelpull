@@ -409,12 +409,14 @@ granted to tenant_admin/operator/viewer (read-only this slice).
 - `stub` (default) — deterministic, scripted; drives CI/tests with no
   secret and no subprocess. Exercises the full pipeline (persistence,
   tool execution, audit, SSE framing).
-- `opencode` — the user-selected live backend: spawns the `opencode`
-  CLI subprocess (binary on PATH; `DLW_AI_OPENCODE_BIN` overrides).
-  Streams stdout as message deltas for plain Q&A; the MCP tool bridge
-  is a follow-on.
-- `claude_code` / `openai_compat` — recognized but not yet wired
-  (raise `AIBackendUnavailable` → 503); structural extension points.
+- `opencode` — the only live backend. modelpull spawns the `opencode`
+  CLI as a subprocess (binary on PATH; `DLW_AI_OPENCODE_BIN` overrides)
+  and parses its stdout. Whichever underlying LLM opencode is configured
+  to use is opencode's own concern; modelpull is LLM-agnostic. As of
+  SP4f the Skills bridge (`ai/opencode_skills.py`) makes tools available
+  via opencode's bash without a separate MCP server.
+
+Any other `ai_backend` value raises `AIBackendUnavailable` → 503.
 
 **Tools** (read-only, in-process, tenant-scoped, audited
 `ai.tool.*` with `payload.actor_kind="ai_copilot"`):
@@ -620,10 +622,12 @@ and pushed Help below the fold).
 **Skills bridge to opencode** (shipped — no MCP server needed):
 `OpenCodeRunner` now prepends a generated MANIFEST.md (`ai/opencode_skills.py`)
 to every turn that lists all 18 tools with shell-command recipes. The
-underlying LLM (Claude via opencode) sees the catalog and invokes tools
-by shelling out to the `dlw` CLI (`dlw show <id>`, `dlw submit <repo>`,
-`dlw cancel <id>` ...) or `curl` against the REST endpoints. Auth flows
-through `$DLW_BEARER_TOKEN` in the subprocess env.
+LLM that the operator's opencode instance is configured against —
+modelpull is LLM-agnostic; opencode's own config decides — sees the
+catalog and invokes tools by shelling out to the `dlw` CLI
+(`dlw show <id>`, `dlw submit <repo>`, `dlw cancel <id>` ...) or
+`curl` against the REST endpoints. Auth flows through
+`$DLW_BEARER_TOKEN` in the subprocess env.
 
 - Manifest is ~2600 tokens, generated from `READONLY_TOOLS` + `WRITE_TOOLS`
   (single source of truth) — adding a tool to either registry surfaces

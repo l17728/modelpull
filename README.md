@@ -355,7 +355,7 @@ flowchart LR
 ### 🤖 AI Copilot（v2.0 已落地）
 
 - 嵌入式聊天抽屉：自然语言驱动 modelpull（任务查询/创建/取消/重试/升级/补丁、HF/ModelScope 模型搜索、租户配额管理…）
-- 后端：opencode 无头模式 + Anthropic Claude；stub backend 用于 CI/测试
+- 后端：**opencode 无头模式**（modelpull 只对接 opencode CLI；opencode 内部用什么 LLM 由 opencode 自己的配置决定）；stub backend 用于 CI/测试
 - 工具桥：**Skills bridge**（不依赖 MCP）— 18 个工具（11 read + 7 write）按生成的 manifest 投喂给 LLM，LLM 自动按用户问题挑工具、shell out 调 `dlw` CLI 或 curl REST 端点；写操作必须用户在前端确认卡片点「确认」才执行；所有动作进 audit log；完整决策链（thinking + tool_call + tool_result）按时序显示在助手回复上方
 - 示例 query：「Hugging Face 上最新的 deepseek 是什么」/「下载 deepseek-ai/DeepSeek-R1」/「任务 abcd-1234 为什么失败？」
 
