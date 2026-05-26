@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**自适应优化 Part 1 — 吞吐采样基础**（Sprint 7）：
+- 新表 `chunk_throughput_sample` (executor_id, source_id, file_type, bytes, duration_ms)
+- `services/throughput_sampler.py` 异步批量缓冲：deque + 5s flush_loop，无阻塞 hot path
+- bounded buffer（max 10k）防 OOM；CancelledError 路径有 final-flush 不丢样本
+- retention_tick：7 天保留，daily loop 清理
+- 接入点：`api/subtasks.py post_report` succeeded 时记 sample（file_type 从文件名 ext 推断）
+- Lifespan: `DLW_THROUGHPUT_SAMPLER_ENABLED`（默认 ON）+ flush + retention 两个后台 task
+- 11 单测覆盖：record / drop-malformed / bounded / drain / flush_loop cancellation / final-flush / retention
+
 **跨地域复制（Part 3 — UI + 监控 + AI）**（Sprint 6）：
 - `observability/metrics.py` Prometheus foundation：3 个 metric — bytes/jobs Counter + duration Histogram
 - `api/metrics.py` `/metrics` route 配套已有 servicemonitor.yaml

@@ -3,6 +3,7 @@
 from dlw.db.models.ai import AIConversation, AIMessage, AITokenUsage, AIToolCall
 from dlw.db.models.audit import AuditLog
 from dlw.db.models.casbin_rule import CasbinRule
+from dlw.db.models.chunk_throughput import ChunkThroughputSample
 from dlw.db.models.device_auth import DeviceAuthSession
 from dlw.db.models.executor import Executor
 from dlw.db.models.executor_status_history import ExecutorStatusHistory
@@ -17,7 +18,8 @@ from dlw.db.models.usage import QuotaSnapshot, UsageRecord
 
 __all__ = [
     "AIConversation", "AIMessage", "AIToolCall", "AITokenUsage",
-    "AuditLog", "CasbinRule", "DeviceAuthSession", "DownloadTask", "Executor",
+    "AuditLog", "CasbinRule", "ChunkThroughputSample",
+    "DeviceAuthSession", "DownloadTask", "Executor",
     "ExecutorStatusHistory", "FileSubTask", "LocalCredential", "Project", "QuotaSnapshot",
     "ReplicationJob", "SourceBlacklist", "SourceSpeedSample", "StorageBackend", "StorageObject",
     "StoragePhysicalKey", "SubtaskChunk", "SubtaskObjectRef",

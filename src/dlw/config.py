@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     # uplink. Override per tenant in a future Sprint 6.
     replication_bandwidth_mbps: float = Field(default=100.0, gt=0.0)
 
+    # v2.1 Sprint 7 — chunk throughput sampler (feeds Sprint 8 LP solver).
+    # The flush loop is cheap (1 bulk INSERT every 5s); on by default so
+    # the LP has data to train on the day it lands. Disable for ephemeral
+    # / CI controllers that don't need sampling.
+    throughput_sampler_enabled: bool = Field(default=True)
+    throughput_sampler_flush_interval_seconds: float = Field(
+        default=5.0, ge=0.5, le=60.0)
+    throughput_sample_retention_days: int = Field(
+        default=7, ge=1, le=365)
+
     # UI-SP4a — AI Copilot
     ai_backend: str = Field(default="stub")   # stub (CI/tests) | opencode (only live backend)
     ai_model_name: str = Field(default="stub-model")

@@ -167,6 +167,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     physical_gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     replication_worker_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    throughput_flush_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    throughput_retention_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _gc_loop() -> None:
         from dlw.services.audit import write_audit
@@ -266,6 +268,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             poll_interval_seconds=s.replication_worker_poll_interval_seconds,
             bandwidth_mbps=s.replication_bandwidth_mbps)
 
+    async def _throughput_flush_loop_runner() -> None:
+        from dlw.services.throughput_sampler import flush_loop
+        s = _gs()
+        if not s.throughput_sampler_enabled:
+            logger.info("throughput_sampler.flush_loop: disabled by config")
+            return
+        await flush_loop(
+            factory,
+            interval_seconds=s.throughput_sampler_flush_interval_seconds)
+
+    async def _throughput_retention_loop_runner() -> None:
+        from dlw.services.throughput_sampler import retention_loop
+        s = _gs()
+        if not s.throughput_sampler_enabled:
+            return
+        await retention_loop(
+            factory,
+            retention_days=s.throughput_sample_retention_days)
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -284,6 +305,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         physical_gc_task_holder["t"] = asyncio.create_task(_physical_gc_loop())
         replication_worker_task_holder["t"] = asyncio.create_task(
             _replication_worker_loop())
+        throughput_flush_task_holder["t"] = asyncio.create_task(
+            _throughput_flush_loop_runner())
+        throughput_retention_task_holder["t"] = asyncio.create_task(
+            _throughput_retention_loop_runner())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -342,6 +367,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             replication_worker_task_holder["t"] = None
+        for holder in (throughput_flush_task_holder,
+                        throughput_retention_task_holder):
+            tt = holder["t"]
+            if tt is not None:
+                tt.cancel()
+                try:
+                    await asyncio.wait_for(tt, timeout=2)
+                except (TimeoutError, asyncio.CancelledError):
+                    pass
+                holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,
