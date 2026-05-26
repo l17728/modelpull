@@ -13,7 +13,12 @@ const loading = ref(false)
 const loadError = ref(false)
 
 async function loadManual() {
-  if (html.value) return
+  // Always re-fetch on open: MANUAL.md is small (~17KB), the controller
+  // re-reads it from disk every request, and in dev the file changes
+  // often. The old "cache forever in this session" guard meant restarting
+  // the controller with updated docs left users staring at stale content
+  // until they hard-refreshed the browser. Network cache (ETag / 304)
+  // can re-add a true cache later if the file ever grows huge.
   loading.value = true
   loadError.value = false
   try {
