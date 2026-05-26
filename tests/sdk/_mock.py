@@ -42,7 +42,7 @@ def make_mock_transport() -> httpx.MockTransport:
                 "tenant_id": 1, "bytes_used_month": 0,
                 "bytes_quota_month": 1000, "storage_gb_used": 0,
                 "storage_gb_quota": 1024, "concurrent_tasks": 0,
-                "concurrent_quota": 10})
+                "concurrent_quota": 10, "sla_tier": "standard"})
         if request.method == "GET" and path == "/api/v1/executors":
             items = [{"id": "ex-1", "status": "healthy", "health_score": 100,
                       "epoch": 1, "host_id": "h1", "tenant_id": 1,

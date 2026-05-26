@@ -5,6 +5,7 @@ inspect the last-run summary without waiting for the cron loop."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,8 @@ from dlw.services.physical_gc import (
     PhysicalGCDisabled,
     gc_run_once,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin/gc", tags=["admin-gc"])
 
@@ -49,6 +52,9 @@ async def post_gc_run(
     to restrict to a single tenant; omitted means tombstone-cleanup
     across all tenants."""
     if principal.role != "system_admin":
+        logger.warning(
+            "admin_gc.role_denied user_id=%s role=%s",
+            principal.user_id, principal.role)
         raise HTTPException(status_code=403, detail="system_admin role required")
     tenant_id = (body or {}).get("tenant_id")
     deleter = DefaultObjectStoreDeleter(_factory_for_deleter())
@@ -79,6 +85,9 @@ async def get_gc_status(
     query) so it's safe to call from monitoring even when the DB is
     under load."""
     if principal.role != "system_admin":
+        logger.warning(
+            "admin_gc.role_denied user_id=%s role=%s",
+            principal.user_id, principal.role)
         raise HTTPException(status_code=403, detail="system_admin role required")
     async with _LAST_RUN_LOCK:
         return dict(_LAST_RUN)

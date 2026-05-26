@@ -101,7 +101,8 @@ async def test_quota_current_shape(session):
     assert set(out.keys()) == {
         "tenant_id", "bytes_used_month", "bytes_quota_month",
         "storage_gb_used", "storage_gb_quota",
-        "concurrent_tasks", "concurrent_quota"}
+        "concurrent_tasks", "concurrent_quota",
+        "sla_tier"}  # v2.1 SP1 — added to snapshot
     assert out["tenant_id"] == 1
     assert out["bytes_used_month"] == 42
 

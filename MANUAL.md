@@ -279,6 +279,26 @@ pending → running → completed
 
 ---
 
+### SLA 服务等级（v2.1）
+
+每个租户有一个 **SLA 等级**（sla_tier），决定调度优先级和资源准入：
+
+| 等级 | 调度权重 | 准入控制 | 适用场景 |
+|------|---------|---------|---------|
+| `critical` | ×4（优先） | 永不被拒 | 生产关键业务 |
+| `standard` | ×2 | 系统繁忙 > 99% 时拒 | 普通业务（默认） |
+| `bulk` | ×1（最低） | 系统繁忙 > 90% 时拒 | 批量回灌、离线分析 |
+
+**查看自己的等级**：「设置」页面会显示当前租户的 sla_tier。
+
+**修改等级**：仅 `system_admin` 可改，所有变更进审计日志：
+- UI：管理员在「设置」页面下拉选择
+- REST：`PUT /api/v1/tenants/{id}/sla` body `{"sla_tier": "critical"}`
+
+**饿死保护**：bulk 等级的任务如果等待超过 30 分钟，调度权重自动 ×2 强制上浮，避免被永远抢占。
+
+---
+
 ### 审计日志
 
 审计日志页面（导航栏「**审计**」）记录所有操作行为：
@@ -380,6 +400,60 @@ AI 助手（右上角「🤖 AI 助手」）是集成在界面中的智能对话
 
 存储层按文件内容哈希（SHA256）进行物理去重。即使两个不同的任务下载了同一个文件（哈希相同），存储上只保留一份物理文件，节省磁盘空间。
 
+### Physical GC（v2.1，管理员）
+
+去重保留的物理文件在所有引用任务被删除后会变为 **tombstone**（引用计数为 0），但默认不会立即从存储中真正删除 — 留给运维一个手动反悔窗口。
+
+**Physical GC** 是一个后台任务，可由管理员手动触发，会：
+
+1. **Phase 1（tombstone 清理）**：扫描所有 `refcount = 0` 且 `created_at < cutoff` 的物理键，调用存储驱动真正 unlink/DeleteObject。
+2. **Phase 2（LRU 驱逐）**：如果某租户的存储用量超过 90% × `quota_storage_gb`，按 `last_referenced_at` 最旧优先选取候选并驱逐到 90% 以下。
+
+**启用与触发**（仅 `system_admin`）：
+
+```bash
+# 全局开关（默认关闭，避免误删）
+export DLW_PHYSICAL_GC_ENABLED=true
+
+# 手动触发一次 GC
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     http://controller:8001/api/v1/admin/gc/run
+
+# 仅清理某个租户
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -d '{"tenant_id": 5}' \
+     http://controller:8001/api/v1/admin/gc/run
+
+# 查看上次执行结果
+curl -H "Authorization: Bearer $TOKEN" \
+     http://controller:8001/api/v1/admin/gc/status
+```
+
+每次驱逐都写审计日志（action=`physical_gc.evict`），包含对象 ID / 大小 / 原因。
+
+### 跨地域复制（v2.1，REST-only）
+
+> Sprint 6 前端 UI 上线之前，跨地域复制仅通过 REST 接口可用，建议由管理员或自动化脚本触发。
+
+支持把某个 `storage_object` 复制到另一个 `storage_backend`（典型场景：把上海集群下载好的 model 推到深圳的 S3 桶）。
+
+```bash
+# 创建复制任务（任何认证用户均可，仅限本租户的对象）
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -d '{"source_object_id": 123, "target_storage_id": 7}' \
+     http://controller:8001/api/v1/replication
+
+# 列出本租户的所有复制任务
+curl -H "Authorization: Bearer $TOKEN" \
+     "http://controller:8001/api/v1/replication?status=pending"
+
+# 取消尚未跑完的任务
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     http://controller:8001/api/v1/replication/1/cancel
+```
+
+**当前状态**：Sprint 4 已完成数据模型 + REST CRUD；Sprint 5（真实字节传输 worker）尚未交付，提交后任务会停留在 `pending`。
+
 ### 命令行 SDK
 
 如果需要在脚本或 CI/CD 中集成，可以使用 Python SDK：
@@ -456,4 +530,4 @@ asyncio.run(main())
 
 ---
 
-*本手册最后更新：2026-05-26。如有问题请通过 AI 助手提问，或联系系统管理员。*
+*本手册最后更新：2026-05-26（v2.1 Sprint 1/3/4 — SLA 分级、Physical GC、跨地域复制 REST）。如有问题请通过 AI 助手提问，或联系系统管理员。*

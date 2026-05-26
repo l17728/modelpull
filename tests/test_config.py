@@ -74,9 +74,16 @@ def test_settings_leader_poll_interval_rejects_above_max() -> None:
 
 
 def test_sp1_auth_settings_defaults(monkeypatch):
-    from dlw.config import get_settings
-    get_settings.cache_clear()
-    s = get_settings()
+    from dlw.config import Settings
+    # Defensive: skip both .env file AND DLW_* shell vars so the test
+    # exercises the true defaults. Without this, a developer-local
+    # `.env` with DLW_AUTH_DEV_MODE=true silently flips the assertion.
+    # CI is clean of both, but local pytest must work in either case.
+    for name in ("DLW_AUTH_DEV_MODE", "DLW_SYSTEM_JWT_SECRET",
+                 "DLW_SYSTEM_ADMIN_TOKEN", "DLW_OIDC_ISSUER",
+                 "DLW_AUTH_TENANT_RULES_JSON"):
+        monkeypatch.delenv(name, raising=False)
+    s = Settings(_env_file=None)
     assert s.auth_dev_mode is False
     assert s.system_jwt_secret == "dev-system-jwt-change-me"
     assert s.system_admin_token == ""
@@ -84,7 +91,6 @@ def test_sp1_auth_settings_defaults(monkeypatch):
     assert s.oidc_redirect_url.endswith("/api/v1/auth/callback")
     assert s.auth_tenant_rules_json == "[]"
     assert not hasattr(s, "bearer_token")
-    get_settings.cache_clear()
 
 
 def test_sp1_auth_settings_env_override(monkeypatch):

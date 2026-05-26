@@ -3,11 +3,15 @@
 PUT /api/v1/tenants/{id}/quota — set quota limits, audit-logged."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dlw.auth.principal import Principal, require_principal
 from dlw.db.session import get_engine
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
@@ -30,6 +34,9 @@ async def put_tenant_sla_tier(
         InvalidTier, TenantNotFound, TierPatch, set_tenant_sla_tier,
     )
     if principal.role != "system_admin":
+        logger.warning(
+            "tenants_api.role_denied user_id=%s role=%s tenant_id=%s",
+            principal.user_id, principal.role, tenant_id)
         raise HTTPException(status_code=403, detail="system_admin role required")
     tier = body.get("sla_tier")
     if tier is None:
@@ -60,6 +67,9 @@ async def put_tenant_quota(
         InvalidQuota, TenantNotFound, TenantQuotaPatch, set_tenant_quota,
     )
     if principal.role != "system_admin":
+        logger.warning(
+            "tenants_api.role_denied user_id=%s role=%s tenant_id=%s",
+            principal.user_id, principal.role, tenant_id)
         raise HTTPException(status_code=403, detail="system_admin role required")
     patch = TenantQuotaPatch(
         quota_bytes_month=body.get("quota_bytes_month"),

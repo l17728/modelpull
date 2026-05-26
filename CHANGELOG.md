@@ -12,6 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (2026-05-26 — v2.1 Sprint 1/3/4)
+
+**SLA 分级**（Sprint 1）：
+- `tenants.sla_tier` 列（enum: critical/standard/bulk，默认 standard）
+- Scheduler 加权排序：tier_weight × (priority+1)，bulk 30 分钟饿死保护 ×2
+- Admission control：busy > 90% 拒 bulk，> 99% 拒 standard
+- `PUT /api/v1/tenants/{id}/sla` REST（仅 system_admin，审计）
+- `/quota/current` 返回 `sla_tier` 字段
+- Settings UI：管理员可下拉修改，普通用户只读 tag
+
+**Physical GC**（Sprint 3）：
+- 替换 v2.0 的骨架为真实现：tombstone 清理 + LRU 驱逐
+- `POST /api/v1/admin/gc/run`（手动触发）+ `GET /admin/gc/status`
+- 全局开关 `DLW_PHYSICAL_GC_ENABLED`（默认 false）
+- 每次驱逐写审计日志（action=`physical_gc.evict`）
+
+**跨地域复制（Part 1 — 数据模型 + REST）**（Sprint 4）：
+- 新表 `replication_jobs`（partial unique 防同 (object,target) 重复挂起）
+- `services/replication.py`：create / list / get / cancel + 6 异常
+- `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
+- Sprint 5（真实字节传输 worker）未开始 — 创建的任务停留在 pending
+
 ### Added (2026-05-26 — AI assistant capabilities + local auth)
 
 **Local username/password auth** (alternative to OIDC for air-gapped deployments):
