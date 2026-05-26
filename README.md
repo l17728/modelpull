@@ -10,13 +10,13 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 ![Status](https://img.shields.io/badge/status-Phase%201%2F2%2F3%20shipped-brightgreen)
 ![Version](https://img.shields.io/badge/spec-v2.0-blue)
-![Tests](https://img.shields.io/badge/tests-427%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1000%2B%20passing-brightgreen)
 [![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
 一个**分布式 HuggingFace 模型权重下载系统**：控制器编排、多下载器并行、多源加速、多租户隔离、增量去重，写入 S3 兼容对象存储。面向 **团队 / 平台 / 大模型 / 多机 / 国内多源 / 企业内网** 场景。
 
 📌 **不做的事**：单机小模型下载 — [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) 已经够用。
-📌 **做的事**：多机分布式 + 多源加速 + 多租户 + 增量去重 + CLI/SDK + 企业内网部署（v2.1）+ AI Copilot（v2.1）。
+📌 **做的事**：多机分布式 + 多源加速 + 多租户 + 增量去重 + CLI/SDK + AI Copilot（v2.0 已落地）+ 企业内网部署（v2.1 路线图）。
 
 📚 设计权威（~28000 行 / 14 章）：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md) ｜ 软件架构/交互流程/独特设计见 [👇 软件架构](#-软件架构) / [👇 独特软件设计](#-独特软件设计)。
 
@@ -414,7 +414,7 @@ modelpull/
 │   │   ├── 09-migration.md                      v1.x → v2.0 迁移
 │   │   ├── 10-frontend-wireframes.md            9 个核心页面 wireframe
 │   │   ├── 11-cli-and-sdk-spec.md               dlw CLI + Python SDK 规范
-│   │   ├── 12-ai-copilot.md                     AI Copilot 嵌入聊天 + MCP 工具（v2.1）
+│   │   ├── 12-ai-copilot.md                     AI Copilot 嵌入聊天 + MCP 工具（设计稿；实现已演化为 SP4f Skills bridge）
 │   │   ├── 13-adaptive-download-optimization.md 在线运筹优化 + 子分片 + S3 多 executor 协作（v2.1）
 │   │   └── 14-enterprise-network-and-rate-limit.md 内网部署 / 限速探测 / 凭证池 / 别名 / Console（v2.1）
 │   └── archive/                                 v1.x 历史版本（已 superseded）
@@ -520,7 +520,7 @@ modelpull/
 | 版本 | 内容 | 状态 |
 |------|------|------|
 | **v2.0** | 单租户基座 → 分布式正确性 → 多租户 + 多源 → 增量去重 → CLI/SDK | ✅ **已实现并合并**（Phase 1/2/3，PR #1–#18） |
-| v2.1 | AI Copilot first-class + 自适应下载运筹优化 + 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）+ 跨地域复制 + SLA 分级 | 📐 设计完成，待实现 |
+| v2.1 | 自适应下载运筹优化 + 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）+ 跨地域复制 + SLA 分级 | 📐 设计完成，待实现 |
 | v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 | 📐 设计 |
 | v2.3 | 多 controller cluster（按 tenant 分片）| 📐 设计 |
 
@@ -540,7 +540,6 @@ modelpull/
 
 🚧 **待开始（v2.1+，设计已完成）**：
 
-- AI Copilot 嵌入式聊天 + MCP 工具
 - 自适应在线运筹优化（子分片重规划）
 - 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Live Console）
 - 物理字节 GC + quota/LRU 驱逐（Phase 4）

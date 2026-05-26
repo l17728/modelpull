@@ -1,8 +1,17 @@
 # 12 — AI Copilot（嵌入式聊天 + 无头 Agent）
 
+> **⚠️ 实施演化注记（2026-05-26）**：本设计稿描述了 **MCP server 沙箱进程** 作为 AI 工具桥接机制。
+> 真实实施沿着 UI-SP4a → SP4b → SP4d → SP4e → SP4f 五个 sub-project 落地，**最终演化为 Skills bridge
+> 方案**（`src/dlw/ai/opencode_skills.py` + `opencode_marker_parser.py`）：用 manifest MD 描述工具 +
+> shell out 调 `dlw` CLI / curl，opencode 作为唯一 live backend，无需独立 MCP 进程。
+> MCP server 已从路线图删除 — 详见 `docs/operator/web-ui.md` § UI-SP4f、`CHANGELOG.md` Removed (2026-05-26)。
+> 本文保留作为**设计阶段的历史记录**（v2.0.13 冻结），反映当时的架构选择；当前实现遵循 web-ui.md SP4f。
+> 不变量 37（MCP 沙箱进程不继承敏感凭证）作为冻结约束保留，但已无运行代码绑定。
+
 > 角色：让用户用自然语言驱动 modelpull —— "下载 DeepSeek 最新发布的模型" / "我团队上周下了哪些模型？" / "对比 Qwen3-72B 和 Llama-3.1-70B 的文件大小"。
 > 范围：架构 / 协议 / 工具清单 / 安全 / 配额 / UX / 测试。
 > 引入版本：**v2.1 first-class feature**（非 v2.0 阻塞项；Phase 4 可灰度小流量）。
+> **实施版本：v2.0 Phase 4 末已 ship**（SP4a~SP4f；MCP 路径未落地，演化为 Skills bridge）。
 
 ---
 

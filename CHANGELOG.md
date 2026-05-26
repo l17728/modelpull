@@ -58,6 +58,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   user-visible reply.
 - Config: `ai_opencode_inject_skills: True` (default).
 
+### Docs polish (2026-05-26 — late)
+
+- `README.md` / `README_en.md`: test badge 427 → 1000+; AI Copilot
+  marked as v2.0 shipped (was misleadingly tagged v2.1); v2.1 roadmap
+  row no longer lists AI Copilot or MCP tools
+- `docs/v2.0/12-ai-copilot.md`: top-of-doc banner clarifying the
+  MCP-based design described inside was superseded by the SP4f Skills
+  bridge during implementation — doc preserved as frozen historical
+  design record; invariant 37 stays as historical constraint but no
+  longer binds runtime code
+- New `docs/operator/runbook-ai-assistant.md` — covers 5-layer
+  diagnosis flow and 6 high-frequency failures (network error, stub
+  mode confusion, opencode missing, empty decision-chain UI, single-
+  tool failure, AI token quota exhausted)
+- New `docs/operator/runbook-local-auth.md` — covers admin password
+  recovery (with and without a second admin), bootstrap failures
+  (incl. the pk_users sequence collision), user mis-deletion,
+  OIDC ↔ local auth migration, startup-guard failure modes, audit
+  trail queries
+- New `docs/operator/sla-slo.md` — internal SLO baseline (controller
+  availability, API latency, AI response time, scheduling delay,
+  multi-source acceleration ratio, RTO/RPO) + incident severity
+  levels + honest "why this is a baseline, not a commitment" section
+
 ### Removed (2026-05-26)
 
 - **MCP server from roadmap**: the original v2.1 plan was to expose

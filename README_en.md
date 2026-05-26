@@ -221,7 +221,7 @@ See [ROADMAP.md](./ROADMAP.md) for current phase status.
 | Version | Content |
 |---------|---------|
 | **v2.0** (design complete) | Single-tenant → distributed → multi-tenant + multi-source → production hardening (4 phases / 15 weeks) |
-| v2.1 | **AI Copilot first-class** + **adaptive optimization** + **enterprise intranet** + cross-region replication + SLA tiers + offline export bundle |
+| v2.1 | **adaptive optimization** + **enterprise intranet** + cross-region replication + SLA tiers + offline export bundle |
 | v2.2+ | Active-active controller / federated cross-cluster / PRC self-hosted LLM / Sigstore verification / model online quantization |
 
 ---
