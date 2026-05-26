@@ -166,6 +166,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
     physical_gc_task_holder: dict[str, asyncio.Task | None] = {"t": None}
+    replication_worker_task_holder: dict[str, asyncio.Task | None] = {"t": None}
 
     async def _gc_loop() -> None:
         from dlw.services.audit import write_audit
@@ -254,6 +255,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception:
                 logger.exception("physical gc tick failed; retrying")
 
+    async def _replication_worker_loop() -> None:
+        from dlw.services.replication_worker import worker_loop
+        s = _gs()
+        if not s.replication_worker_enabled:
+            logger.info("replication_worker_loop: disabled by config")
+            return
+        await worker_loop(
+            factory,
+            poll_interval_seconds=s.replication_worker_poll_interval_seconds,
+            bandwidth_mbps=s.replication_bandwidth_mbps)
+
     def _set_state(s: str) -> None:
         app.state.controller_state = s
 
@@ -270,6 +282,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         rebalance_task_holder["t"] = asyncio.create_task(_rebalance_loop())
         gc_task_holder["t"] = asyncio.create_task(_gc_loop())
         physical_gc_task_holder["t"] = asyncio.create_task(_physical_gc_loop())
+        replication_worker_task_holder["t"] = asyncio.create_task(
+            _replication_worker_loop())
 
     async def _on_step_down() -> None:
         t = sweep_task_holder["t"]
@@ -320,6 +334,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             physical_gc_task_holder["t"] = None
+        rt = replication_worker_task_holder["t"]
+        if rt is not None:
+            rt.cancel()
+            try:
+                await asyncio.wait_for(rt, timeout=2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            replication_worker_task_holder["t"] = None
 
     leader_task = asyncio.create_task(run_leader_loop(
         elector=elector,

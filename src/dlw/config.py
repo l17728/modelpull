@@ -114,6 +114,17 @@ class Settings(BaseSettings):
     gc_max_objects_per_tick: int = Field(default=1000, ge=1, le=100000)
     gc_quota_pressure_threshold: float = Field(default=0.9, gt=0.0, le=1.0)
 
+    # v2.1 Sprint 5 — Cross-region replication byte transfer worker.
+    # DEFAULT OFF — flipping this on without a real S3 target lets pending
+    # jobs claim themselves and immediately fail on the first GetObject.
+    replication_worker_enabled: bool = Field(default=False)
+    replication_worker_poll_interval_seconds: float = Field(
+        default=5.0, ge=1.0, le=600.0)
+    # Per-tenant ceiling in decimal MB/s (8 Mbit/s ≈ 1 MB/s). Conservative
+    # default so a single misconfigured job can't saturate the controller's
+    # uplink. Override per tenant in a future Sprint 6.
+    replication_bandwidth_mbps: float = Field(default=100.0, gt=0.0)
+
     # UI-SP4a — AI Copilot
     ai_backend: str = Field(default="stub")   # stub (CI/tests) | opencode (only live backend)
     ai_model_name: str = Field(default="stub-model")

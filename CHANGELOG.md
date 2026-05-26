@@ -32,7 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - 新表 `replication_jobs`（partial unique 防同 (object,target) 重复挂起）
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
-- Sprint 5（真实字节传输 worker）未开始 — 创建的任务停留在 pending
+
+**跨地域复制（Part 2 — 真实字节传输 worker）**（Sprint 5）：
+- `services/replication_worker.py`：流式 read → sha 校验 → put target → 记录 StorageObject → 状态机
+- 3 次失败指数退避重试（sha 校验失败不重试 — 同一字节再读结果不变）
+- 中途取消感知：每 chunk 进度回调查 `status='cancelled'`，立即 abort 不写 target
+- skip_existing：通过 `(tenant_id, storage_id, sha256)` UniqueConstraint 自然处理 — phase 1 主动查 + phase 3 抓 IntegrityError 兜底并发竞争
+- 限速：按 `DLW_REPLICATION_BANDWIDTH_MBPS`（默认 100 MB/s）token-bucket-equiv
+- lifespan worker loop：`DLW_REPLICATION_WORKER_ENABLED`（默认 false）+ FOR UPDATE SKIP LOCKED 选 pending
+- `tests/services/test_replication_worker.py`：12 用例，stub client 注入，无真 S3 依赖
 
 ### Added (2026-05-26 — AI assistant capabilities + local auth)
 

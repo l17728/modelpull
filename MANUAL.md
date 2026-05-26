@@ -452,7 +452,25 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
      http://controller:8001/api/v1/replication/1/cancel
 ```
 
-**当前状态**：Sprint 4 已完成数据模型 + REST CRUD；Sprint 5（真实字节传输 worker）尚未交付，提交后任务会停留在 `pending`。
+**当前状态**：Sprint 4 + Sprint 5 已完成 — 数据模型 + REST + 实际字节传输 worker。Sprint 6（前端 UI + 监控）尚未交付。
+
+**启用后台 worker**（仅 system_admin 配置）：
+
+```bash
+# 开启 worker（默认关闭，避免在没有真 S3 target 时空转）
+export DLW_REPLICATION_WORKER_ENABLED=true
+# 可选：每 tenant 限速（默认 100 MB/s，decimal MB）
+export DLW_REPLICATION_BANDWIDTH_MBPS=50
+# 可选：worker 轮询间隔（默认 5 秒）
+export DLW_REPLICATION_WORKER_POLL_INTERVAL_SECONDS=10
+```
+
+worker 启用后会自动从 `pending` 队列取任务执行：
+1. 同 sha 已在 target → `skipped_existing`
+2. 流式 read source → 内存 buffer → put target，每 chunk 更新 `bytes_transferred`
+3. 完成后插入 target StorageObject 行（dedup 唯一约束自动处理并发竞争）
+4. 失败重试 3 次（指数退避 1s / 2s），sha 校验失败不重试
+5. 中途取消（`POST /api/v1/replication/{id}/cancel`）：下次 chunk 进度回调会感知并立即停止，不写入 target
 
 ### 命令行 SDK
 
@@ -530,4 +548,4 @@ asyncio.run(main())
 
 ---
 
-*本手册最后更新：2026-05-26（v2.1 Sprint 1/3/4 — SLA 分级、Physical GC、跨地域复制 REST）。如有问题请通过 AI 助手提问，或联系系统管理员。*
+*本手册最后更新：2026-05-27（v2.1 Sprint 1/3/4/5 — SLA 分级、Physical GC、跨地域复制 REST + worker）。如有问题请通过 AI 助手提问，或联系系统管理员。*
