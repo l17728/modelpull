@@ -8,8 +8,6 @@ import { useUiStore } from '@/stores/ui'
 import { useSystemHealth } from '@/composables/useSystemHealth'
 import { client } from '@/api/client'
 import HealthPill from '@/components/infra/HealthPill.vue'
-import HelpDrawer from '@/components/help/HelpDrawer.vue'
-
 const { t } = useI18n()
 const route = useRoute()
 const session = useSessionStore()
@@ -366,25 +364,7 @@ onMounted(() => {
         </el-table-column>
       </el-table>
     </el-card>
-
-    <el-card class="card">
-      <h3>{{ t('settings.help') }}</h3>
-      <div class="row help-row">
-        <div class="help-desc">
-          {{ t('settings.helpDesc') }}
-        </div>
-        <el-button
-          type="primary"
-          data-test="help-open-btn"
-          @click="ui.toggleHelp()"
-        >
-          📖 {{ t('settings.helpBtn') }}
-        </el-button>
-      </div>
-    </el-card>
   </div>
-
-  <HelpDrawer />
 
   <!-- Create user dialog -->
   <el-dialog
@@ -519,10 +499,6 @@ onMounted(() => {
   gap: 16px;
   margin-top: 8px;
   .lbl { min-width: 140px; color: var(--el-text-color-regular); }
-}
-.help-row {
-  align-items: flex-start;
-  .help-desc { flex: 1; color: var(--el-text-color-secondary); font-size: 13px; padding-top: 6px; }
 }
 .pw-form { max-width: 360px; }
 .sub { font-size: 12px; font-weight: 400; color: var(--el-text-color-secondary); margin-left: 8px; }

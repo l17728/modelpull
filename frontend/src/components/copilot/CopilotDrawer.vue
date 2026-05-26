@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useUiStore } from '@/stores/ui'
 import { useCopilot } from '@/composables/useCopilot'
 import CopilotConfirmCard from '@/components/copilot/CopilotConfirmCard.vue'
+import CopilotMessageBubble from '@/components/copilot/CopilotMessageBubble.vue'
 import CopilotToolCard from '@/components/copilot/CopilotToolCard.vue'
 import CopilotToolsHelp from '@/components/copilot/CopilotToolsHelp.vue'
 
@@ -74,12 +75,12 @@ async function onSend() {
           :class="m.role"
           :data-test="`copilot-msg-${m.role}`"
         >
-          <div
-            v-if="m.text"
-            class="bubble"
-          >
-            {{ m.text }}
-          </div>
+          <CopilotMessageBubble
+            v-if="m.text || m.role === 'user'"
+            :role="m.role"
+            :text="m.text"
+            :tool-cards="m.toolCards"
+          />
           <el-alert
             v-if="m.quotaExceeded"
             :title="t('copilot.quotaExceeded')"
@@ -137,7 +138,5 @@ async function onSend() {
 .empty { color: var(--dlw-text-soft); text-align: center; padding: var(--dlw-space-4); }
 .msg { display: flex; flex-direction: column; gap: 4px; }
 .msg.user { align-items: flex-end; }
-.bubble { padding: 8px 12px; border-radius: 8px; background: var(--dlw-surface); max-width: 90%; white-space: pre-wrap; }
-.msg.user .bubble { background: var(--el-color-primary-light-8); }
 .composer { display: flex; gap: var(--dlw-space-2); align-items: flex-end; }
 </style>

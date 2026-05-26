@@ -12,7 +12,7 @@
   "nav": {
     "dashboard": "概览", "tasks": "任务", "createTask": "新建任务",
     "executors": "执行节点", "audit": "审计日志",
-    "quota": "配额", "settings": "设置"
+    "quota": "配额", "settings": "设置", "help": "帮助"
   },
   "shell": {
     "theme": "主题", "language": "语言", "commandHint": "命令面板 (Ctrl/⌘+K)",
@@ -37,6 +37,15 @@
       "input": "输入参数", "output": "返回结果",
       "itemsCount": "{n} 条", "resultsCount": "{n} 条结果",
       "totalCount": "共 {n} 条", "fieldsCount": "{n} 个字段"
+    },
+    "source": {
+      "model": "来自模型训练记忆（可能过时）",
+      "web": "来自网页搜索",
+      "modelscope": "来自 ModelScope 搜索",
+      "fetch": "来自 URL 抓取",
+      "hf": "来自 Hugging Face",
+      "internal": "来自系统内部数据",
+      "toolFailed": "某次工具调用失败"
     },
     "tools": {
       "title": "可用工具", "hint": "点击展开",
@@ -159,7 +168,6 @@
       "projects": "项目", "serviceToken": "服务 token" },
     "theme": "主题", "themeLight": "浅色", "themeDark": "深色",
     "localeLabel": "语言", "controllerState": "控制器状态",
-    "help": "帮助", "helpBtn": "查看用户手册", "helpDesc": "软件使用说明、设计思路与常见问题解答",
     "changePassword": "修改密码", "oldPassword": "当前密码",
     "newPassword": "新密码", "confirmPassword": "确认新密码",
     "changePasswordBtn": "确认修改", "passwordChanged": "密码修改成功",

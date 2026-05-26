@@ -11,7 +11,7 @@
   },
   "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task",
     "executors": "Executors", "audit": "Audit log",
-    "quota": "Quota", "settings": "Settings" },
+    "quota": "Quota", "settings": "Settings", "help": "Help" },
   "shell": {
     "theme": "Theme", "language": "Language",
     "commandHint": "Command palette (Ctrl/⌘+K)", "tenant": "Tenant", "role": "Role"
@@ -36,6 +36,15 @@
       "input": "Input", "output": "Output",
       "itemsCount": "{n} item(s)", "resultsCount": "{n} result(s)",
       "totalCount": "total: {n}", "fieldsCount": "{n} field(s)"
+    },
+    "source": {
+      "model": "from model knowledge (may be outdated)",
+      "web": "via web search",
+      "modelscope": "via ModelScope search",
+      "fetch": "via URL fetch",
+      "hf": "via Hugging Face",
+      "internal": "via internal data",
+      "toolFailed": "a tool call failed"
     },
     "tools": {
       "title": "Available tools", "hint": "click to expand",
@@ -156,7 +165,6 @@
       "projects": "Projects", "serviceToken": "Service token" },
     "theme": "Theme", "themeLight": "Light", "themeDark": "Dark",
     "localeLabel": "Language", "controllerState": "Controller state",
-    "help": "Help", "helpBtn": "View User Manual", "helpDesc": "Usage guide, design overview and FAQ",
     "changePassword": "Change password", "oldPassword": "Current password",
     "newPassword": "New password", "confirmPassword": "Confirm new password",
     "changePasswordBtn": "Change password", "passwordChanged": "Password changed",
