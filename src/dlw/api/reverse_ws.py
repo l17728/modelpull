@@ -37,7 +37,9 @@ from dlw.schemas.reverse_ws import (
     HeartbeatFrame,
     HelloAckFrame,
     HelloFrame,
+    TaskAssignAckFrame,
 )
+from dlw.services.reverse_dispatcher import get_dispatcher
 from dlw.services.reverse_ws_registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -127,7 +129,18 @@ async def reverse_ws_endpoint(
     await _send_frame(websocket, HelloAckFrame(
         session_id=session.session_id))
 
-    # Main loop: heartbeat-only in Sprint 10
+    # Sprint 11: tell the dispatcher a fresh session is up so it can
+    # resend any assignments queued during the executor's downtime.
+    try:
+        await get_dispatcher().on_session_established(executor_id=executor_id)
+    except Exception:  # noqa: BLE001
+        # Resending pending assignments is best-effort; a transient
+        # send failure must NOT take the new session down.
+        logger.exception(
+            "reverse_ws: dispatcher.on_session_established failed; "
+            "continuing with handshake")
+
+    # Main loop: heartbeat + task_assign_ack (Sprint 11)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -143,6 +156,11 @@ async def reverse_ws_endpoint(
                     executor_id=executor_id,
                     session_id=session.session_id)
                 await _send_frame(websocket, HeartbeatAckFrame())
+            elif ftype == TaskAssignAckFrame.model_fields["type"].default:
+                aid = obj.get("assignment_id")
+                if isinstance(aid, str):
+                    await get_dispatcher().handle_ack(
+                        executor_id=executor_id, assignment_id=aid)
             elif ftype == ErrorFrame.model_fields["type"].default:
                 # Client signaled it's leaving; honor by ending the loop
                 logger.info(
@@ -150,9 +168,9 @@ async def reverse_ws_endpoint(
                     executor_id, obj.get("code"))
                 break
             else:
-                # Sprint 11+ frames will land here — log and ignore for now
+                # Sprint 12+ frames will land here — log and ignore for now
                 logger.debug(
-                    "reverse_ws: ignoring frame type=%r in Sprint 10", ftype)
+                    "reverse_ws: ignoring frame type=%r in Sprint 11", ftype)
 
     except WebSocketDisconnect:
         logger.info("reverse_ws: %s disconnected", executor_id)

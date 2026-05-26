@@ -72,10 +72,33 @@ class ErrorFrame(BaseModel):
     message: str = ""
 
 
-# Discriminated union of every Sprint 10 frame the controller might see.
-# Pydantic v2 picks the right subtype by the `type` discriminator field.
+# Sprint 11 — reverse RPC: controller pushes task assignments over the
+# already-established WSS, executor acks.
+
+class TaskAssignFrame(BaseModel):
+    """Server → executor. assignment_id is a fresh UUID per push; the
+    executor echoes it in TaskAssignAck so the controller can clear
+    pending state. payload is the same JSON shape executors got from the
+    legacy POST /poll AssignmentResponse — Sprint 11 wraps, doesn't
+    redesign, so executors can switch transports without re-implementing
+    task execution."""
+    type: Literal["task_assign"] = "task_assign"
+    assignment_id: str
+    payload: dict
+
+
+class TaskAssignAckFrame(BaseModel):
+    """Executor → server. Means 'I received the assignment and have it
+    queued'. NOT 'I have completed the task' — completion goes through
+    the existing /subtasks/{id}/report REST path (or a future ReportFrame
+    in Sprint 12)."""
+    type: Literal["task_assign_ack"] = "task_assign_ack"
+    assignment_id: str
+
+
+# Discriminated union — pydantic v2 picks the right subtype by `type`.
 AnyFrame = Annotated[
     Union[HelloFrame, HelloAckFrame, HeartbeatFrame, HeartbeatAckFrame,
-          ErrorFrame],
+          TaskAssignFrame, TaskAssignAckFrame, ErrorFrame],
     Field(discriminator="type"),
 ]

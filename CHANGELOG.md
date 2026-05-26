@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**企业内网 Part 2 — 反向 RPC 任务下发**（Sprint 11）：
+- 扩展 frame schema：`TaskAssignFrame` + `TaskAssignAckFrame`（pydantic discriminated union 自然加入）
+- `services/reverse_dispatcher.py`：per-executor pending map + `dispatch()` / `handle_ack()` / `on_session_established()` / `cancel()` / `pending_for()` API
+- At-least-once 语义：dispatch 时 executor 离线则只入队；send_text 失败仍保留 pending；下次 handshake 完成时 endpoint 调 `on_session_established()` 自动重发所有 pending
+- WS endpoint 接入：on session up → resend; 主循环新增 `task_assign_ack` frame 路由到 `dispatcher.handle_ack()`
+- 11 单测：dispatch live/offline / handle_ack 清 pending / unknown ack no-op / reconnect 重发 N pending / send failure 保留 pending / multi-executor isolation / cancel / total_pending
+
 **企业内网 Part 1 — 反向 WSS protocol + handshake**（Sprint 10）：
 - `schemas/reverse_ws.py` JSON-line frame 定义（PROTOCOL_VERSION="1.0"）：Hello / HelloAck / Heartbeat / HeartbeatAck / Error，pydantic discriminated union
 - `services/reverse_ws_registry.py` 内存 session 注册：reconnect-wins（新 session 替代旧的，旧 socket 自动 close）+ last-write-wins 防止 stale unregister 误删新 session
