@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**跨特性集成测试**（Sprint 14）：
+- `tests/integration/test_v21_cross_feature.py` 12 场景跨 v2.1 5 大特性叠加：
+  - SLA × admission control：critical 永不拒、standard 99% 拒、bulk 90% 拒
+  - Replication × GC：active replication 的源对象不被 tombstone candidates 误选
+  - Replication target dedup：UniqueConstraint 防止 worker 重复写
+  - throughput sampler → optimizer 端到端：seed samples + capacity matrix + solve → faster source wins
+  - reverse-WSS + dispatcher + console 全链路：register → dispatch → command（顺序帧）
+  - reconnect 后 dispatcher resends + command 继续生效
+  - command 对离线 executor 直接抛出
+  - credential pool envelope round-trip + legacy plaintext 兼容
+
 **企业内网 Part 4 — Live Console**（Sprint 13）：
 - `schemas/reverse_ws.py` 新增 3 个 frame：`CommandFrame` / `CommandResultFrame` / `ConsoleOutputFrame`
 - `WHITELIST_COMMANDS = ("status", "drain", "restart")` — 添加项需安全评审（注释明示）
