@@ -18,6 +18,37 @@ async def _session() -> AsyncSession:
         yield s
 
 
+@router.put("/{tenant_id}/sla")
+async def put_tenant_sla_tier(
+    tenant_id: int,
+    body: dict,
+    principal: Principal = Depends(require_principal),
+    session: AsyncSession = Depends(_session),
+) -> dict:
+    """v2.1 SP1: set the tenant's sla_tier. system_admin only."""
+    from dlw.services.sla_tier import (
+        InvalidTier, TenantNotFound, TierPatch, set_tenant_sla_tier,
+    )
+    if principal.role != "system_admin":
+        raise HTTPException(status_code=403, detail="system_admin role required")
+    tier = body.get("sla_tier")
+    if tier is None:
+        raise HTTPException(status_code=422,
+                            detail={"code": "MISSING_FIELD", "field": "sla_tier"})
+    try:
+        tenant = await set_tenant_sla_tier(
+            session, tenant_id=tenant_id, actor_user_id=principal.user_id,
+            patch=TierPatch(sla_tier=str(tier)))
+    except InvalidTier as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_TIER", "message": str(e)}) from e
+    except TenantNotFound as e:
+        raise HTTPException(status_code=404, detail="tenant not found") from e
+    await session.commit()
+    return {"tenant_id": tenant.id, "sla_tier": tenant.sla_tier}
+
+
 @router.put("/{tenant_id}/quota")
 async def put_tenant_quota(
     tenant_id: int,

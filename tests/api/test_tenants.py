@@ -88,3 +88,45 @@ async def test_put_quota_negative_value_422(client):
                           headers={"Authorization": f"Bearer {_token()}"})
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "INVALID_QUOTA"
+
+
+# ---------------------------------------------------------------------------
+# v2.1 SP1 — PUT /tenants/{id}/sla
+# ---------------------------------------------------------------------------
+
+async def test_put_sla_tier_system_admin_succeeds(client):
+    r = await client.put("/api/v1/tenants/55/sla",
+                          json={"sla_tier": "critical"},
+                          headers={"Authorization": f"Bearer {_token()}"})
+    assert r.status_code == 200
+    assert r.json()["sla_tier"] == "critical"
+
+
+async def test_put_sla_tier_non_admin_rejected(client):
+    r = await client.put("/api/v1/tenants/55/sla",
+                          json={"sla_tier": "bulk"},
+                          headers={"Authorization": f"Bearer {_token(role='tenant_admin')}"})
+    assert r.status_code == 403
+
+
+async def test_put_sla_tier_invalid_value_422(client):
+    r = await client.put("/api/v1/tenants/55/sla",
+                          json={"sla_tier": "platinum"},
+                          headers={"Authorization": f"Bearer {_token()}"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "INVALID_TIER"
+
+
+async def test_put_sla_tier_missing_field_422(client):
+    r = await client.put("/api/v1/tenants/55/sla",
+                          json={},
+                          headers={"Authorization": f"Bearer {_token()}"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "MISSING_FIELD"
+
+
+async def test_put_sla_tier_nonexistent_tenant_404(client):
+    r = await client.put("/api/v1/tenants/99999/sla",
+                          json={"sla_tier": "standard"},
+                          headers={"Authorization": f"Bearer {_token()}"})
+    assert r.status_code == 404
