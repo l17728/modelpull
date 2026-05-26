@@ -175,12 +175,11 @@ Built-in drivers: HuggingFace · hf-mirror.com · ModelScope · WiseModel · Ope
 - K8s Operator + ModelDownload CRD
 - Incremental / diff downloads
 
-### 🤖 AI Copilot (v2.1)
-- Embedded chat panel: `Ctrl+K` to open, natural-language driven
-- Backend: Claude Code / OpenCode headless, or Anthropic SDK direct
-- MCP server exposing `dlw_*` tools + trusted `web_fetch`
-- All write operations require user confirmation; everything audit-logged
-- Example queries: "download the latest DeepSeek V3" / "what tasks failed last week?"
+### 🤖 AI Copilot (v2.0 shipped)
+- Embedded chat drawer: natural-language driven (task ops, HF/ModelScope search, quota mgmt…)
+- Backend: opencode headless + Anthropic Claude; stub backend for CI/tests
+- Tool bridge: **Skills bridge** (no MCP server) — 18 tools (11 read + 7 write) fed to the LLM via a generated manifest; the LLM picks the right tool from the user's question and shells out to `dlw` CLI or curl. Writes require an in-UI confirmation card; everything audit-logged; full decision chain (thinking + tool_call + tool_result) shown chronologically above the reply.
+- Example queries: "what's the latest deepseek on Hugging Face?" / "download deepseek-ai/DeepSeek-R1" / "why did task abcd-1234 fail?"
 
 ### 📐 Adaptive download optimization (v2.1)
 - Formalized as: `minimize makespan + α × switch_cost`

@@ -637,6 +637,12 @@ through `$DLW_BEARER_TOKEN` in the subprocess env.
   sees what was invoked — but a future iteration will parse opencode's
   output for "Running: dlw ..." lines and synthesize tool events so the
   decision-chain panel populates the same way as for the stub runner.
-- True MCP server still on the roadmap for parity with non-opencode
-  MCP-aware clients (Claude Desktop, etc.), but no longer blocking
-  modelpull's own opencode integration.
+- **MCP server removed from roadmap** (2026-05-26): the original SP4a
+  plan was to expose tools via a sandboxed MCP server (inv 37). The
+  Skills-bridge approach above achieves the same end (LLM discovers +
+  invokes tools without modelpull-specific code in the LLM client) at
+  a fraction of the engineering cost and without MCP-over-stdio's known
+  Windows / SelectorEventLoop hazards. The v2.0 design doc
+  (`docs/v2.0/12-ai-copilot.md`) and invariant 37 are historical
+  records of the earlier design choice; new work targets the Skills
+  bridge, not an MCP server.

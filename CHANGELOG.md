@@ -44,6 +44,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/task_patch.py` — state-machine check + `SELECT FOR UPDATE`
 - `services/tenant_quota.py` — only-on-change audit logging
 
+**Skills bridge for opencode (SP4f)**:
+- `ai/opencode_skills.py` — generates a MANIFEST.md catalog of all 18
+  tools (with shell-command recipes) and the OpenCodeRunner prepends it
+  to every turn. The underlying LLM sees the catalog, picks tools by
+  matching the user's question against descriptions, and invokes them
+  by shelling out to `dlw` CLI / curl. No MCP server needed.
+- `ai/opencode_marker_parser.py` — parses `[[dlw_tool name=... input=...]]`
+  / `[[dlw_tool_result name=... ok=...]]` markers that the LLM prints
+  around each invocation, converts them into `tool_call` / `tool_result`
+  events so the decision-chain UI lights up for opencode the same way
+  it does for the stub runner. Marker lines are stripped from the
+  user-visible reply.
+- Config: `ai_opencode_inject_skills: True` (default).
+
+### Removed (2026-05-26)
+
+- **MCP server from roadmap**: the original v2.1 plan was to expose
+  tools through a sandboxed MCP subprocess (invariant 37). Replaced by
+  the SP4f Skills bridge which achieves the same end (LLM discovers +
+  invokes tools without modelpull-specific code in the LLM client) at
+  a fraction of the engineering cost and without MCP-over-stdio's known
+  Windows / SelectorEventLoop hazards. The v2.0 design doc
+  (`docs/v2.0/12-ai-copilot.md`) and invariant 37 remain as historical
+  records of the earlier choice; no new work targets MCP.
+
 ### Added (2026-05-07 — design v2.0.13 frozen)
 - 3 轮多 agent review（共 15 reviewer 视角）找出 ~150 项问题，全部分 6 PR 修复
 - `tools/lint_invariants.py` + 9 个 pytest 单测（CI 集成）

@@ -270,6 +270,13 @@ class OpenCodeRunner(AgentRunner):
         thread = threading.Thread(target=_run_in_thread, daemon=True)
         thread.start()
 
+        # SP4f: per-turn marker parser that converts [[dlw_tool ...]] /
+        # [[dlw_tool_result ...]] lines from the LLM's stdout into
+        # tool_call / tool_result events so the decision-chain UI lights
+        # up for opencode the same way as for the stub backend.
+        from dlw.ai.opencode_marker_parser import MarkerParser
+        marker_parser = MarkerParser()
+
         while True:
             item = await line_queue.get()
             if item is _SENTINEL:
@@ -279,7 +286,14 @@ class OpenCodeRunner(AgentRunner):
                 line = _ANSI.sub("", payload.decode("utf-8", "replace").rstrip("\n"))
                 if not line or line.lstrip().startswith(">"):
                     continue
-                yield AgentEvent("assistant.message_delta", {"text": line + "\n"})
+                parsed = marker_parser.feed(line)
+                if parsed.tool_call is not None:
+                    yield AgentEvent("tool_call", parsed.tool_call)
+                elif parsed.tool_result is not None:
+                    yield AgentEvent("tool_result", parsed.tool_result)
+                elif parsed.text is not None:
+                    yield AgentEvent("assistant.message_delta",
+                                     {"text": parsed.text + "\n"})
             elif kind == "error":
                 yield AgentEvent("error",
                                  {"code": "opencode_failed", "message": payload})

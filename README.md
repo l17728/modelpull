@@ -352,13 +352,12 @@ flowchart LR
 - K8s Operator + ModelDownload CRD
 - 增量 / 差分下载（仅下变化文件）
 
-### 🤖 AI Copilot（v2.1）
+### 🤖 AI Copilot（v2.0 已落地）
 
-- 嵌入式聊天面板：`Ctrl+K` 打开，自然语言驱动 modelpull
-- 后端：Claude Code / OpenCode 无头模式，或 Anthropic SDK 直连
-- 工具协议：MCP server 暴露 `dlw_*` 工具 + `web_fetch` 受信源
-- 写操作必须用户确认；所有动作进 audit log
-- 示例 query：「下载 DeepSeek 最新发布的 V3」/「我哪些任务上周失败了？为什么？」/「对比 Qwen3-72B 和 Llama-3.1-70B」
+- 嵌入式聊天抽屉：自然语言驱动 modelpull（任务查询/创建/取消/重试/升级/补丁、HF/ModelScope 模型搜索、租户配额管理…）
+- 后端：opencode 无头模式 + Anthropic Claude；stub backend 用于 CI/测试
+- 工具桥：**Skills bridge**（不依赖 MCP）— 18 个工具（11 read + 7 write）按生成的 manifest 投喂给 LLM，LLM 自动按用户问题挑工具、shell out 调 `dlw` CLI 或 curl REST 端点；写操作必须用户在前端确认卡片点「确认」才执行；所有动作进 audit log；完整决策链（thinking + tool_call + tool_result）按时序显示在助手回复上方
+- 示例 query：「Hugging Face 上最新的 deepseek 是什么」/「下载 deepseek-ai/DeepSeek-R1」/「任务 abcd-1234 为什么失败？」
 
 ### 📐 自适应下载运筹优化（v2.1）
 
