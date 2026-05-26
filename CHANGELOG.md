@@ -10,9 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased — design v2.0.13 frozen, 2026-05-07]
+## [Unreleased]
 
-### Added
+### Added (2026-05-26 — AI assistant capabilities + local auth)
+
+**Local username/password auth** (alternative to OIDC for air-gapped deployments):
+- New `local_credentials` table + Alembic migration `a1b2c3d4e5f6`
+- 5 REST endpoints under `/api/v1/auth/local/*` (login, CRUD users, change/reset password)
+- Bootstrap via `DLW_ADMIN_INITIAL_PASSWORD` on first startup
+- Frontend Login + Settings updated (Change Password card + User Management for admin)
+
+**AI assistant tool expansion** (now 11 read + 7 write = 18 tools):
+- New READ: `dlw_list_storages`, `search_huggingface_models`, `search_modelscope_models`
+- New WRITE (each requires user confirmation):
+  - `dlw_delete_task`, `dlw_retry_task`, `dlw_upgrade_task`, `dlw_patch_task`
+  - `dlw_create_local_user`, `dlw_reset_local_password`, `dlw_set_tenant_quota` (system_admin)
+- `dlw_create_task` smoothing: revision defaults to `main`, storage_id auto-picks is_default
+- Tool descriptions teach LLM priority: domain tools → web_search → model fallback
+- `web_search` default-on (still no-ops without `DLW_AI_WEB_SEARCH_API_KEY`)
+
+**AI assistant UI transparency**:
+- Markdown rendering for assistant replies (via `marked`, with HTML sanitization)
+- Source attribution badge per reply (`💭 model knowledge` / `🤗 Hugging Face` / etc.)
+- Decision chain panel ABOVE reply — chronological thinking + tool calls with inputs and result summaries
+- Tools-help panel (default expanded) lists all 18 tools with examples
+- Help item moved from Settings to sticky sidebar footer (visible on all pages)
+
+**New REST endpoints**:
+- `PATCH /api/v1/tasks/{id}` (priority / source_strategy / source_blacklist)
+- `PUT /api/v1/tenants/{id}/quota` (system_admin only)
+
+**Services**:
+- `services/task_patch.py` — state-machine check + `SELECT FOR UPDATE`
+- `services/tenant_quota.py` — only-on-change audit logging
+
+### Added (2026-05-07 — design v2.0.13 frozen)
 - 3 轮多 agent review（共 15 reviewer 视角）找出 ~150 项问题，全部分 6 PR 修复
 - `tools/lint_invariants.py` + 9 个 pytest 单测（CI 集成）
 - `docs/operator/onboard-first-executor.md` — mTLS bootstrap 流程（解决 FEAS-03 chicken-and-egg）

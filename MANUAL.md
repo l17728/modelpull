@@ -298,31 +298,63 @@ pending → running → completed
 
 ### AI 助手
 
-AI 助手（右上角「🤖 AI 助手」）是集成在界面中的智能对话助手，可以：
+AI 助手（右上角「🤖 AI 助手」）是集成在界面中的智能对话助手。打开抽屉后顶部
+的 **🛠 可用工具** 面板（默认展开）会列出所有可调用工具及示例提问。
 
-**查询类（只读，无需确认）：**
-- 列出我的任务 / 查询某个任务状态
-- 查询配额用量
-- 获取模型的 HuggingFace 元数据和模型卡
-- 搜索网络获取最新信息（需管理员启用 `DLW_AI_WEB_SEARCH_ENABLED`）
+**优先级顺序**：AI 会根据你的问题先尝试领域专用工具，再用 web 兜底，最后才回退
+到模型记忆 — 每条回复底部的灰色徽章告诉你这次答案的真实来源（💭 来自模型记忆 /
+🤗 来自 Hugging Face / 🔍 来自 ModelScope 等），方便区分真实查询和模型幻觉。
 
-**操作类（需要二次确认）：**
-- 取消某个任务（会弹出确认卡片，点击「确认」才执行）
-- 创建新的下载任务（会弹出确认卡片，可修改参数后确认）
+**查询类（11 个，只读，无需确认）：**
+
+| 工具 | 用途 |
+|------|------|
+| `dlw_list_tasks` | 列出我的任务（可按状态过滤） |
+| `dlw_get_task` | 按 id 查单个任务详情 |
+| `dlw_get_task_events` | 查任务的最近事件（状态变更 / 错误） |
+| `dlw_quota_current` | 查租户当前配额用量 |
+| `dlw_list_storages` | 列出可用存储后端（创建任务前先查） |
+| `hf_api_metadata` | HF：查仓库元数据（sha / 文件列表） |
+| `hf_model_card` | HF：拉取仓库 README / 模型卡 |
+| `search_huggingface_models` | 在 huggingface.co 按关键词搜模型 |
+| `search_modelscope_models` | 在 modelscope.cn 按关键词搜模型 |
+| `web_search` | Brave 网页搜索（需 `DLW_AI_WEB_SEARCH_API_KEY`） |
+| `fetch_user_content` | 抓取允许列表内的 HTTPS URL 内容（需管理员启用） |
+
+**操作类（7 个，每次都需要二次确认）：**
+
+| 工具 | 用途 | 权限 |
+|------|------|------|
+| `dlw_create_task` | 新建下载任务（revision 默认 main、storage 自动选默认） | 用户 |
+| `dlw_cancel_task` | 取消运行中任务 | 用户 |
+| `dlw_delete_task` | 删除终态任务，释放存储+配额 | 用户 |
+| `dlw_retry_task` | 用相同参数新建任务（语义化重下） | 用户 |
+| `dlw_upgrade_task` | 升级到新 revision，未变文件自动 inherit | 用户 |
+| `dlw_patch_task` | 改运行中任务的 priority / source_strategy / source_blacklist | 用户 |
+| `dlw_create_local_user` | 新建本地用户 | system_admin |
+| `dlw_reset_local_password` | 重置本地用户密码 | system_admin |
+| `dlw_set_tenant_quota` | 设置租户配额上限，审计记录 | system_admin |
+
+**决策链全程透明**：助手回复上方会按时序显示「决策链」面板 — 每次思考、每次工具
+调用都打印出来（工具名、输入参数、返回结果摘要），点击可展开查看完整 JSON。让你
+能验证"AI 真的查了 HF API"还是"AI 自己编了答案"。
 
 **使用技巧：**
 
-- 可以直接粘贴任务 UUID：`帮我查一下任务 abc12345-...`
-- 可以用中文自然语言：`我最近下载的模型里有没有失败的？`
-- 操作确认卡片支持修改 AI 建议的参数后再执行
-- 每次对话上下文保留在同一个会话中，可以追问
+- 直接说自然语言："Hugging Face 上最新的 deepseek 是什么"
+- 任务 UUID 可以粘贴："任务 abc12345 为什么失败？"
+- 一句话端到端："下载 deepseek-ai/DeepSeek-R1" → AI 会先搜 HF → 弹确认 → 创建任务
+- 操作确认卡片可修改 AI 建议的参数后再点确认
+- 每次对话上下文保留，可以追问
 
 **AI 助手的安全机制：**
 
-- AI 助手只能访问你有权限查看的数据（租户隔离）
-- 所有 AI 工具调用都记录在审计日志中
-- 写操作必须经过用户明确确认，AI 不能直接执行写操作
-- 从外部来源（模型卡、搜索结果）获取的内容经过严格净化，无法注入恶意指令
+- 租户隔离 — AI 只能访问你有权限看的数据，跨租户调用返回 404
+- 审计 — 所有 AI 工具调用记录在审计日志（`ai.tool.*` action）
+- 二次确认 — 所有写操作必须用户点「确认」才执行，AI 不能直接写
+- T2 净化 — 外部内容（模型卡 / 搜索结果 / URL 抓取）经严格净化，无法注入恶意指令
+- system_admin 检查 — 管理员级工具（建用户 / 改配额）在工具入口和 chat service
+  双层检查（defense-in-depth）
 
 ---
 
@@ -424,4 +456,4 @@ asyncio.run(main())
 
 ---
 
-*本手册最后更新：2026-05。如有问题请通过 AI 助手提问，或联系系统管理员。*
+*本手册最后更新：2026-05-26。如有问题请通过 AI 助手提问，或联系系统管理员。*
