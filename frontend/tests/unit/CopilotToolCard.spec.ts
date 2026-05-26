@@ -7,7 +7,13 @@ import CopilotToolCard from '@/components/copilot/CopilotToolCard.vue'
 
 const i18n = createI18n({ legacy: false, locale: 'en-US', messages: { 'en-US': en } })
 
-function mountCard(props: Record<string, unknown>) {
+interface CardProps {
+  tool: string
+  input?: Record<string, unknown>
+  output?: Record<string, unknown>
+  ok?: boolean
+}
+function mountCard(props: CardProps) {
   return mount(CopilotToolCard, {
     props,
     global: { plugins: [ElementPlus, i18n] },
