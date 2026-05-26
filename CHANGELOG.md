@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+> Empty pending v2.1.0 GA tag — see `docs/operator/v21-production-deployment.md`
+> for the 7-day staging baseline that must complete before GA cuts.
+
+---
+
+## [v2.1.0-rc.1] — 2026-05-27
+
+**Release candidate**: all 15 sprints of `docs/v2.1-sprint-plan.md` are
+delivered + every CI run green. GA gates remaining on the runbook side:
+
+  - 7-day Locust staging run (`deploy/loadtest/`) with all 4 acceptance
+    gates met
+  - 4 chaos drills (`deploy/runbooks/chaos-drill.md`) repeated green
+  - `docs/operator/sla-slo.md` § 3 capacity baseline `?` rows replaced
+    with measured numbers
+
+Aggregate metrics this release:
+  - 1053 backend tests passing (~520 added net across S1-S15)
+  - 219 frontend unit tests passing (5 added in S6)
+  - 0 known regressions in v2.0 happy-path suites
+  - 12 cross-feature integration scenarios (S14)
+  - 5 new Prometheus metrics + 1 Grafana dashboard (S6/S9)
+
 ### Added (2026-05-26 — v2.1 Sprint 1/3/4)
 
 **SLA 分级**（Sprint 1）：
