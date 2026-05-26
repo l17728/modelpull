@@ -73,7 +73,10 @@
         "dlw_delete_task": "永久删除一个终态任务，释放存储和配额。",
         "dlw_retry_task": "用一模一样的参数新建任务（用于失败/取消任务的「重下」）。",
         "dlw_create_local_user": "新建本地用户名/密码用户（仅 system_admin）。",
-        "dlw_reset_local_password": "重置某个本地用户的密码（仅 system_admin）。"
+        "dlw_reset_local_password": "重置某个本地用户的密码（仅 system_admin）。",
+        "dlw_upgrade_task": "升级任务到新 revision，未变文件自动 inherit。",
+        "dlw_patch_task": "修改运行中任务的 priority / source_strategy / source_blacklist。",
+        "dlw_set_tenant_quota": "设置租户配额上限（流量/并发/存储/AI tokens），仅 system_admin，审计记录。"
       },
       "examples": {
         "dlw_list_tasks": "列出本周失败的任务。",
@@ -92,7 +95,10 @@
         "dlw_delete_task": "删除任务 abcd-1234 释放空间。",
         "dlw_retry_task": "重试失败的任务 abcd-1234。",
         "dlw_create_local_user": "在租户 1 下创建用户 alice，角色为 tenant_operator。",
-        "dlw_reset_local_password": "重置 user_id=5 的密码。"
+        "dlw_reset_local_password": "重置 user_id=5 的密码。",
+        "dlw_upgrade_task": "把任务 abcd-1234 升级到 revision v2.0。",
+        "dlw_patch_task": "把任务 abcd-1234 的优先级调到 5。",
+        "dlw_set_tenant_quota": "把租户 1 的并发配额提升到 20。"
       }
     }
   },

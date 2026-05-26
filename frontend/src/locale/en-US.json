@@ -72,7 +72,10 @@
         "dlw_delete_task": "Permanently delete a terminal task — frees storage and quota.",
         "dlw_retry_task": "Re-download by creating a NEW task with the same params as an existing one.",
         "dlw_create_local_user": "Create a local username/password user (system_admin only).",
-        "dlw_reset_local_password": "Reset a local user's password (system_admin only)."
+        "dlw_reset_local_password": "Reset a local user's password (system_admin only).",
+        "dlw_upgrade_task": "Upgrade a task to a new revision — unchanged files inherit automatically.",
+        "dlw_patch_task": "Patch a running task's priority / source_strategy / source_blacklist.",
+        "dlw_set_tenant_quota": "Set tenant quota limits (bytes/concurrent/storage/AI tokens) — system_admin only, audit-logged."
       },
       "examples": {
         "dlw_list_tasks": "List my failed tasks from this week.",
@@ -91,7 +94,10 @@
         "dlw_delete_task": "Delete task abcd-1234 to free space.",
         "dlw_retry_task": "Retry the failed task abcd-1234.",
         "dlw_create_local_user": "Create a user 'alice' with role tenant_operator in tenant 1.",
-        "dlw_reset_local_password": "Reset password for user 5."
+        "dlw_reset_local_password": "Reset password for user 5.",
+        "dlw_upgrade_task": "Upgrade task abcd-1234 to revision v2.0.",
+        "dlw_patch_task": "Bump priority of task abcd-1234 to 5.",
+        "dlw_set_tenant_quota": "Raise tenant 1's concurrent quota to 20."
       }
     }
   },

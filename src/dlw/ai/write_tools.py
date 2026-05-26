@@ -186,6 +186,101 @@ async def _create_local_user(session: AsyncSession, principal: Principal, *,
             "must_change_password": cred.must_change_password}
 
 
+async def _upgrade(session: AsyncSession, principal: Principal, *,
+                   task_id: str, new_revision: str) -> dict:
+    """Upgrade a task to a new revision by creating a NEW task at the new
+    revision (same repo / storage / strategy). The scheduler's diff_and_dedup
+    automatically inherits unchanged files from the original task, so only
+    changed/new files are re-downloaded. The original task is unchanged."""
+    try:
+        tid = uuid.UUID(str(task_id))
+    except (ValueError, TypeError):
+        return {"error": "invalid task_id"}
+    original = (await session.execute(
+        tenant_filtered(select(DownloadTask).where(DownloadTask.id == tid),
+                        DownloadTask, principal)
+    )).scalar_one_or_none()
+    if original is None:
+        return {"error": "task not found"}
+    if not new_revision or new_revision == original.revision:
+        return {"error": "new_revision must differ from current revision"}
+    return await _create(
+        session, principal,
+        repo_id=original.repo_id, revision=new_revision,
+        storage_id=original.storage_id,
+        priority=original.priority or 1,
+        source_strategy=original.source_strategy or "auto_balance",
+    )
+
+
+async def _patch(session: AsyncSession, principal: Principal, *,
+                 task_id: str, priority: int | None = None,
+                 source_strategy: str | None = None,
+                 source_blacklist: list | None = None) -> dict:
+    """Patch mutable task fields. Rejects terminal-state tasks."""
+    from dlw.services.task_patch import (
+        InvalidPatch, TaskNotFound, TaskPatch, TaskTerminal, patch_task,
+    )
+    try:
+        tid = uuid.UUID(str(task_id))
+    except (ValueError, TypeError):
+        return {"error": "invalid task_id"}
+    # Tenant gate first (same pattern as _cancel)
+    owned = await session.scalar(
+        tenant_filtered(select(DownloadTask.id).where(DownloadTask.id == tid),
+                        DownloadTask, principal))
+    if owned is None:
+        return {"error": "task not found"}
+    if priority is None and source_strategy is None and source_blacklist is None:
+        return {"error": "patch is empty — pass at least one field"}
+    try:
+        task = await patch_task(
+            session, task_id=tid, tenant_id=principal.tenant_id,
+            patch=TaskPatch(priority=priority,
+                            source_strategy=source_strategy,
+                            source_blacklist=source_blacklist))
+    except TaskNotFound:
+        return {"error": "task not found"}
+    except TaskTerminal as e:
+        return {"error": "task_terminal", "status": str(e)}
+    except InvalidPatch as e:
+        return {"error": "invalid_patch", "message": str(e)}
+    return {"task_id": str(task.id), "priority": task.priority,
+            "source_strategy": task.source_strategy,
+            "source_blacklist": list(task.source_blacklist or [])}
+
+
+async def _set_tenant_quota(session: AsyncSession, principal: Principal, *,
+                             tenant_id: int,
+                             quota_bytes_month: int | None = None,
+                             quota_concurrent: int | None = None,
+                             quota_storage_gb: int | None = None,
+                             quota_ai_tokens_month: int | None = None) -> dict:
+    """Set tenant quota limits. system_admin only; audit-logged."""
+    from dlw.services.tenant_quota import (
+        InvalidQuota, TenantNotFound, TenantQuotaPatch, set_tenant_quota,
+    )
+    if principal.role != "system_admin":
+        return {"error": "system_admin role required"}
+    try:
+        tenant = await set_tenant_quota(
+            session, tenant_id=int(tenant_id), actor_user_id=principal.user_id,
+            patch=TenantQuotaPatch(
+                quota_bytes_month=quota_bytes_month,
+                quota_concurrent=quota_concurrent,
+                quota_storage_gb=quota_storage_gb,
+                quota_ai_tokens_month=quota_ai_tokens_month))
+    except TenantNotFound:
+        return {"error": "tenant not found"}
+    except InvalidQuota as e:
+        return {"error": "invalid_quota", "message": str(e)}
+    return {"tenant_id": tenant.id,
+            "quota_bytes_month": tenant.quota_bytes_month,
+            "quota_concurrent": tenant.quota_concurrent,
+            "quota_storage_gb": tenant.quota_storage_gb,
+            "quota_ai_tokens_month": tenant.quota_ai_tokens_month}
+
+
 async def _reset_local_password(session: AsyncSession, principal: Principal, *,
                                  user_id: int, new_password: str) -> dict:
     """Reset a local user's password. system_admin only."""
@@ -269,4 +364,45 @@ WRITE_TOOLS: dict[str, WriteTool] = {
          "properties": {"user_id": {"type": "integer"},
                         "new_password": {"type": "string", "minLength": 8}}},
         _reset_local_password),
+    "dlw_upgrade_task": WriteTool(
+        "dlw_upgrade_task",
+        "Upgrade a task to a new revision. Creates a NEW task at "
+        "new_revision (same repo / storage / strategy as the original). "
+        "Unchanged files auto-inherit from the original task via the "
+        "scheduler's diff_and_dedup — only changed/new files re-download. "
+        "Original task is unchanged. Requires confirmation.",
+        {"type": "object", "required": ["task_id", "new_revision"],
+         "properties": {"task_id": {"type": "string"},
+                        "new_revision": {"type": "string",
+                                          "description": "Branch / tag / sha to upgrade to"}}},
+        _upgrade),
+    "dlw_patch_task": WriteTool(
+        "dlw_patch_task",
+        "Patch mutable fields of a non-terminal task: priority (0-10), "
+        "source_strategy (auto_balance / fastest_only / pin_<source> / "
+        "list:<csv>), source_blacklist (list of source ids to avoid). "
+        "Rejects terminal tasks (succeeded / failed / cancelled). Pass at "
+        "least one field. Requires confirmation.",
+        {"type": "object", "required": ["task_id"],
+         "properties": {"task_id": {"type": "string"},
+                        "priority": {"type": "integer",
+                                     "minimum": 0, "maximum": 10},
+                        "source_strategy": {"type": "string"},
+                        "source_blacklist": {"type": "array",
+                                              "items": {"type": "string"}}}},
+        _patch),
+    "dlw_set_tenant_quota": WriteTool(
+        "dlw_set_tenant_quota",
+        "Set tenant quota limits (bytes/month, concurrent tasks, storage "
+        "GB, AI tokens/month). system_admin only; pass at least one field; "
+        "writes an audit log entry with before/after values. Requires "
+        "confirmation.",
+        {"type": "object", "required": ["tenant_id"],
+         "properties": {"tenant_id": {"type": "integer"},
+                        "quota_bytes_month": {"type": "integer", "minimum": 0},
+                        "quota_concurrent": {"type": "integer", "minimum": 0},
+                        "quota_storage_gb": {"type": "integer", "minimum": 0},
+                        "quota_ai_tokens_month": {"type": "integer",
+                                                   "minimum": 0}}},
+        _set_tenant_quota),
 }

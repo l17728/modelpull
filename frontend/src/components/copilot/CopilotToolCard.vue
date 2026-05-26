@@ -20,7 +20,9 @@ const ICON: Record<string, string> = {
   web_search: '🌐', fetch_user_content: '🌐',
   dlw_create_task: '➕', dlw_cancel_task: '🛑',
   dlw_delete_task: '🗑', dlw_retry_task: '🔁',
+  dlw_upgrade_task: '⬆', dlw_patch_task: '✏',
   dlw_create_local_user: '👤', dlw_reset_local_password: '🔑',
+  dlw_set_tenant_quota: '🎛',
 }
 
 const icon = computed(() => ICON[props.tool] ?? '🛠')

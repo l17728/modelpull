@@ -271,3 +271,106 @@ async def test_reset_password_no_credential_returns_error(session):
     out = await WRITE_TOOLS["dlw_reset_local_password"].run(
         session, admin, user_id=9999, new_password="pw12345678")
     assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# dlw_upgrade_task
+# ---------------------------------------------------------------------------
+
+async def test_upgrade_requires_different_revision(session):
+    out = await WRITE_TOOLS["dlw_upgrade_task"].run(
+        session, _principal(1), task_id=str(TASK_T1), new_revision="0" * 40)
+    assert "must differ" in out["error"]
+
+
+async def test_upgrade_creates_new_task_at_new_revision(session, monkeypatch):
+    from dlw.services.hf_metadata import RepoFile
+
+    async def fake(repo_id, revision, *, hf_endpoint, hf_token):
+        return [RepoFile(path="m.bin", size=10, sha256="9" * 64)]
+
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+    out = await WRITE_TOOLS["dlw_upgrade_task"].run(
+        session, _principal(1), task_id=str(TASK_T1), new_revision="v2.0")
+    assert "task_id" in out
+    assert out["task_id"] != str(TASK_T1)
+    await session.rollback()
+
+
+async def test_upgrade_cross_tenant_not_found(session):
+    out = await WRITE_TOOLS["dlw_upgrade_task"].run(
+        session, _principal(1), task_id=str(TASK_T2), new_revision="v2")
+    assert out == {"error": "task not found"}
+
+
+# ---------------------------------------------------------------------------
+# dlw_patch_task
+# ---------------------------------------------------------------------------
+
+async def test_patch_priority_via_tool(session):
+    out = await WRITE_TOOLS["dlw_patch_task"].run(
+        session, _principal(1), task_id=str(TASK_T1), priority=7)
+    assert out["priority"] == 7
+    await session.rollback()
+
+
+async def test_patch_strategy_via_tool(session):
+    out = await WRITE_TOOLS["dlw_patch_task"].run(
+        session, _principal(1), task_id=str(TASK_T1),
+        source_strategy="pin_modelscope")
+    assert out["source_strategy"] == "pin_modelscope"
+    await session.rollback()
+
+
+async def test_patch_empty_returns_error(session):
+    out = await WRITE_TOOLS["dlw_patch_task"].run(
+        session, _principal(1), task_id=str(TASK_T1))
+    assert "empty" in out["error"]
+
+
+async def test_patch_invalid_strategy_returns_error(session):
+    out = await WRITE_TOOLS["dlw_patch_task"].run(
+        session, _principal(1), task_id=str(TASK_T1),
+        source_strategy="evil")
+    assert out["error"] == "invalid_patch"
+
+
+async def test_patch_cross_tenant_not_found(session):
+    out = await WRITE_TOOLS["dlw_patch_task"].run(
+        session, _principal(1), task_id=str(TASK_T2), priority=2)
+    assert out == {"error": "task not found"}
+
+
+# ---------------------------------------------------------------------------
+# dlw_set_tenant_quota
+# ---------------------------------------------------------------------------
+
+async def test_set_tenant_quota_non_admin_rejected(session):
+    out = await WRITE_TOOLS["dlw_set_tenant_quota"].run(
+        session, _principal(1), tenant_id=1, quota_concurrent=99)
+    assert "error" in out
+
+
+async def test_set_tenant_quota_system_admin_updates(session):
+    admin = Principal(user_id=1, tenant_id=1, role="system_admin",
+                      project_ids=())
+    out = await WRITE_TOOLS["dlw_set_tenant_quota"].run(
+        session, admin, tenant_id=1, quota_concurrent=42)
+    assert out["quota_concurrent"] == 42
+    await session.rollback()
+
+
+async def test_set_tenant_quota_nonexistent_tenant(session):
+    admin = Principal(user_id=1, tenant_id=1, role="system_admin",
+                      project_ids=())
+    out = await WRITE_TOOLS["dlw_set_tenant_quota"].run(
+        session, admin, tenant_id=9999, quota_bytes_month=1)
+    assert out["error"] == "tenant not found"
+
+
+async def test_set_tenant_quota_negative_value(session):
+    admin = Principal(user_id=1, tenant_id=1, role="system_admin",
+                      project_ids=())
+    out = await WRITE_TOOLS["dlw_set_tenant_quota"].run(
+        session, admin, tenant_id=1, quota_concurrent=-5)
+    assert out["error"] == "invalid_quota"

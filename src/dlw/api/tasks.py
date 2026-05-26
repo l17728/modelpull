@@ -163,6 +163,38 @@ async def post_cancel_task(
     return TaskRead.model_validate(task)
 
 
+@router.patch("/{task_id}")
+async def patch_task_route(
+    task_id: uuid.UUID,
+    body: dict,
+    principal: Principal = Depends(require_perm("/api/v1/tasks*", "POST")),
+    session: AsyncSession = Depends(_session),
+) -> TaskRead:
+    from dlw.services.task_patch import (
+        InvalidPatch, TaskNotFound, TaskPatch, TaskTerminal, patch_task,
+    )
+    patch = TaskPatch(
+        priority=body.get("priority"),
+        source_strategy=body.get("source_strategy"),
+        source_blacklist=body.get("source_blacklist"))
+    try:
+        task = await patch_task(
+            session, task_id=task_id, tenant_id=principal.tenant_id,
+            patch=patch)
+    except TaskNotFound as e:
+        raise HTTPException(status_code=404, detail="task not found") from e
+    except TaskTerminal as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TASK_TERMINAL", "status": str(e)}) from e
+    except InvalidPatch as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_PATCH", "message": str(e)}) from e
+    await session.commit()
+    return TaskRead.model_validate(task)
+
+
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT,
                 response_model=None)
 async def delete_task(

@@ -27,8 +27,11 @@ const TOOLS: ToolItem[] = [
   { name: 'dlw_cancel_task', icon: '🛑', category: 'write' },
   { name: 'dlw_delete_task', icon: '🗑', category: 'write' },
   { name: 'dlw_retry_task', icon: '🔁', category: 'write' },
+  { name: 'dlw_upgrade_task', icon: '⬆', category: 'write' },
+  { name: 'dlw_patch_task', icon: '✏', category: 'write' },
   { name: 'dlw_create_local_user', icon: '👤', category: 'write' },
   { name: 'dlw_reset_local_password', icon: '🔑', category: 'write' },
+  { name: 'dlw_set_tenant_quota', icon: '🎛', category: 'write' },
 ]
 </script>
 
