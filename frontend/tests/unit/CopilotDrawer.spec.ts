@@ -50,9 +50,15 @@ describe('CopilotDrawer (SP4a)', () => {
     const { ref } = await import('vue')
     copilotState.value = {
       messages: ref([
-        { role: 'user', text: 'list my tasks', toolCards: [] },
-        { role: 'assistant', text: 'You have 0 tasks.', toolCards: [
-          { id: 'c1', tool: 'dlw_list_tasks', ok: true, output: { items: [] } }] },
+        { role: 'user', text: 'list my tasks', toolCards: [], steps: [] },
+        { role: 'assistant', text: 'You have 0 tasks.',
+          toolCards: [
+            { id: 'c1', tool: 'dlw_list_tasks', ok: true,
+              output: { items: [] } }],
+          steps: [
+            { kind: 'tool', toolCard: {
+              id: 'c1', tool: 'dlw_list_tasks', ok: true,
+              output: { items: [] } } }] },
       ]),
       streaming: ref(false), conversationId: ref('conv-1'),
       conversations: ref([]), hasPendingConfirm: ref(false),

@@ -75,6 +75,38 @@ async function onSend() {
           :class="m.role"
           :data-test="`copilot-msg-${m.role}`"
         >
+          <!-- Decision chain: shows AI's thinking + tool calls in
+               chronological order, ABOVE the final reply. Transparency
+               so the user can verify the answer came from a real tool
+               and not the model's training memory. -->
+          <div
+            v-if="m.role === 'assistant' && m.steps.length"
+            class="steps"
+            data-test="copilot-steps"
+          >
+            <div class="steps-header">
+              {{ t('copilot.steps.header') }}
+            </div>
+            <template
+              v-for="(step, idx) in m.steps"
+              :key="idx"
+            >
+              <div
+                v-if="step.kind === 'thinking'"
+                class="thinking"
+                data-test="copilot-thinking"
+              >
+                💭 <span class="thinking-text">{{ step.text }}</span>
+              </div>
+              <CopilotToolCard
+                v-else-if="step.toolCard"
+                :tool="step.toolCard.tool"
+                :input="step.toolCard.input"
+                :output="step.toolCard.output"
+                :ok="step.toolCard.ok"
+              />
+            </template>
+          </div>
           <CopilotMessageBubble
             v-if="m.text || m.role === 'user'"
             :role="m.role"
@@ -88,14 +120,6 @@ async function onSend() {
             :closable="false"
             show-icon
             data-test="copilot-quota-alert"
-          />
-          <CopilotToolCard
-            v-for="card in m.toolCards"
-            :key="card.id"
-            :tool="card.tool"
-            :input="card.input"
-            :output="card.output"
-            :ok="card.ok"
           />
           <CopilotConfirmCard
             v-if="m.pendingConfirm"
@@ -139,4 +163,16 @@ async function onSend() {
 .msg { display: flex; flex-direction: column; gap: 4px; }
 .msg.user { align-items: flex-end; }
 .composer { display: flex; gap: var(--dlw-space-2); align-items: flex-end; }
+.steps {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px; border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--dlw-border);
+}
+.steps-header {
+  font-size: 11px; color: var(--dlw-text-soft); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 0;
+}
+.thinking { font-size: 12px; color: var(--dlw-text-soft); }
+.thinking-text { font-style: italic; }
 </style>

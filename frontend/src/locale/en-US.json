@@ -46,6 +46,9 @@
       "internal": "via internal data",
       "toolFailed": "a tool call failed"
     },
+    "steps": {
+      "header": "Decision chain"
+    },
     "tools": {
       "title": "Available tools", "hint": "click to expand",
       "intro": "The AI picks a tool based on your question: domain-specific tools first (Hugging Face / ModelScope / internal data), web_search as fallback, and model knowledge as last resort.",
@@ -57,6 +60,7 @@
         "dlw_get_task": "Get details for one task by id.",
         "dlw_get_task_events": "Get recent events for a task (state transitions, errors).",
         "dlw_quota_current": "Your tenant's current quota usage (bytes/storage/concurrency).",
+        "dlw_list_storages": "List storage backends available to your tenant (used before creating a task).",
         "hf_api_metadata": "Hugging Face: structured metadata (sha, file list) for a repo.",
         "hf_model_card": "Hugging Face: fetch the README/model card of a repo.",
         "search_huggingface_models": "Search huggingface.co for models by keyword (latest / top downloads / likes).",
@@ -64,7 +68,11 @@
         "web_search": "Search the web via Brave (operator-gated).",
         "fetch_user_content": "Fetch the body of an allow-listed HTTPS URL (operator-gated).",
         "dlw_create_task": "Create a new download task (requires confirmation).",
-        "dlw_cancel_task": "Cancel a running task (requires confirmation)."
+        "dlw_cancel_task": "Cancel a running task (requires confirmation).",
+        "dlw_delete_task": "Permanently delete a terminal task — frees storage and quota.",
+        "dlw_retry_task": "Re-download by creating a NEW task with the same params as an existing one.",
+        "dlw_create_local_user": "Create a local username/password user (system_admin only).",
+        "dlw_reset_local_password": "Reset a local user's password (system_admin only)."
       },
       "examples": {
         "dlw_list_tasks": "List my failed tasks from this week.",
@@ -78,7 +86,12 @@
         "web_search": "What's the latest DeepSeek model released this year?",
         "fetch_user_content": "Summarize https://example.com/blog/post.",
         "dlw_create_task": "Download meta-llama/Llama-3-8B to the default project.",
-        "dlw_cancel_task": "Cancel task abcd-1234."
+        "dlw_cancel_task": "Cancel task abcd-1234.",
+        "dlw_list_storages": "Which storage backends are available?",
+        "dlw_delete_task": "Delete task abcd-1234 to free space.",
+        "dlw_retry_task": "Retry the failed task abcd-1234.",
+        "dlw_create_local_user": "Create a user 'alice' with role tenant_operator in tenant 1.",
+        "dlw_reset_local_password": "Reset password for user 5."
       }
     }
   },

@@ -12,6 +12,21 @@ export interface ToolCard {
   ok?: boolean
 }
 
+export interface ThinkingStep {
+  text: string
+}
+
+/** A single step in the assistant's decision chain, in chronological emit
+ *  order. Renders ABOVE the final reply text so the user sees the full
+ *  reasoning path (and can verify it's a tool call, not a hallucination). */
+export interface DecisionStep {
+  kind: 'thinking' | 'tool'
+  /** Set when kind === 'thinking'. */
+  text?: string
+  /** Set when kind === 'tool' — same object as the matching toolCards entry. */
+  toolCard?: ToolCard
+}
+
 export interface PendingConfirm {
   callId: string
   tool: string
@@ -24,6 +39,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
   toolCards: ToolCard[]
+  steps: DecisionStep[]
   pendingConfirm?: PendingConfirm
   quotaExceeded?: boolean
 }
@@ -37,8 +53,10 @@ export function useCopilot() {
   async function send(text: string): Promise<void> {
     const trimmed = text.trim()
     if (!trimmed || streaming.value) return
-    messages.value.push({ role: 'user', text: trimmed, toolCards: [] })
-    const assistant: ChatMessage = { role: 'assistant', text: '', toolCards: [] }
+    messages.value.push({ role: 'user', text: trimmed, toolCards: [], steps: [] })
+    const assistant: ChatMessage = {
+      role: 'assistant', text: '', toolCards: [], steps: [],
+    }
     messages.value.push(assistant)
     streaming.value = true
     try {
@@ -48,12 +66,19 @@ export function useCopilot() {
         onEvent: (ev) => {
           if (ev.event === 'assistant.message_delta') {
             assistant.text += String(ev.data.text ?? '')
+          } else if (ev.event === 'assistant.thinking') {
+            assistant.steps.push({ kind: 'thinking',
+                                   text: String(ev.data.text ?? '') })
           } else if (ev.event === 'tool_call') {
-            assistant.toolCards.push({
+            const card: ToolCard = {
               id: String(ev.data.id ?? ''),
               tool: String(ev.data.tool ?? ''),
               input: ev.data.input as Record<string, unknown> | undefined,
-            })
+            }
+            assistant.toolCards.push(card)
+            // Same object is referenced from steps[] so updating ok/output via
+            // toolCards.find() below also updates the rendered step.
+            assistant.steps.push({ kind: 'tool', toolCard: card })
           } else if (ev.event === 'tool_result') {
             const card = assistant.toolCards.find(
               (c) => c.id === String(ev.data.id ?? ''))
@@ -98,13 +123,15 @@ export function useCopilot() {
                              input?: Record<string, unknown>;
                              output?: Record<string, unknown>; ok?: boolean }>
       }
+      const toolCards = (content.tool_calls ?? []).map((tc) => ({
+        id: String(tc.id ?? ''), tool: String(tc.tool ?? ''),
+        input: tc.input, output: tc.output, ok: tc.ok,
+      }))
       return {
         role: m.role === 'user' ? 'user' : 'assistant',
         text: content.text ?? '',
-        toolCards: (content.tool_calls ?? []).map((tc) => ({
-          id: String(tc.id ?? ''), tool: String(tc.tool ?? ''),
-          input: tc.input, output: tc.output, ok: tc.ok,
-        })),
+        toolCards,
+        steps: toolCards.map((tc) => ({ kind: 'tool' as const, toolCard: tc })),
       }
     })
   }
@@ -127,7 +154,9 @@ export function useCopilot() {
     if (!msg || !msg.pendingConfirm || !conversationId.value) return
     const callId = msg.pendingConfirm.callId
     msg.pendingConfirm = undefined        // resolve the card
-    const result: ChatMessage = { role: 'assistant', text: '', toolCards: [] }
+    const result: ChatMessage = {
+      role: 'assistant', text: '', toolCards: [], steps: [],
+    }
     messages.value.push(result)
     streaming.value = true
     try {
@@ -137,11 +166,13 @@ export function useCopilot() {
           if (ev.event === 'assistant.message_delta') {
             result.text += String(ev.data.text ?? '')
           } else if (ev.event === 'tool_result') {
-            result.toolCards.push({
+            const card: ToolCard = {
               id: String(ev.data.id ?? ''), tool: callId,
               ok: Boolean(ev.data.ok),
               output: ev.data.output as Record<string, unknown> | undefined,
-            })
+            }
+            result.toolCards.push(card)
+            result.steps.push({ kind: 'tool', toolCard: card })
           } else if (ev.event === 'error') {
             result.text += `\n[error: ${ev.data.message ?? ev.data.code}]`
           }

@@ -47,6 +47,9 @@
       "internal": "来自系统内部数据",
       "toolFailed": "某次工具调用失败"
     },
+    "steps": {
+      "header": "决策链"
+    },
     "tools": {
       "title": "可用工具", "hint": "点击展开",
       "intro": "AI 会根据你的问题选合适的工具：先用领域专用工具（Hugging Face / ModelScope / 系统内部），再用 web_search 兜底，最后才回退到模型记忆。",
@@ -58,6 +61,7 @@
         "dlw_get_task": "按 id 查询单个任务的详细信息。",
         "dlw_get_task_events": "查询某任务的最近事件（状态变更、错误）。",
         "dlw_quota_current": "查询当前租户的配额使用情况（流量/存储/并发）。",
+        "dlw_list_storages": "列出当前租户可用的存储后端（创建任务前先调它选 storage_id）。",
         "hf_api_metadata": "Hugging Face：查询仓库的结构化元数据（sha、文件列表）。",
         "hf_model_card": "Hugging Face：获取仓库的 README / 模型卡片。",
         "search_huggingface_models": "在 huggingface.co 上按关键词搜索模型（最新 / 最多下载 / 最多 likes）。",
@@ -65,7 +69,11 @@
         "web_search": "通过 Brave 搜索引擎搜索网页（需管理员启用）。",
         "fetch_user_content": "抓取允许列表内的 HTTPS URL 内容（需管理员启用）。",
         "dlw_create_task": "新建一个下载任务（需要确认）。",
-        "dlw_cancel_task": "取消正在运行的任务（需要确认）。"
+        "dlw_cancel_task": "取消正在运行的任务（需要确认）。",
+        "dlw_delete_task": "永久删除一个终态任务，释放存储和配额。",
+        "dlw_retry_task": "用一模一样的参数新建任务（用于失败/取消任务的「重下」）。",
+        "dlw_create_local_user": "新建本地用户名/密码用户（仅 system_admin）。",
+        "dlw_reset_local_password": "重置某个本地用户的密码（仅 system_admin）。"
       },
       "examples": {
         "dlw_list_tasks": "列出本周失败的任务。",
@@ -79,7 +87,12 @@
         "web_search": "今年发布的最新 DeepSeek 模型是什么？",
         "fetch_user_content": "总结 https://example.com/blog/post 这篇文章。",
         "dlw_create_task": "把 meta-llama/Llama-3-8B 下载到默认项目。",
-        "dlw_cancel_task": "取消任务 abcd-1234。"
+        "dlw_cancel_task": "取消任务 abcd-1234。",
+        "dlw_list_storages": "有哪些存储后端可用？",
+        "dlw_delete_task": "删除任务 abcd-1234 释放空间。",
+        "dlw_retry_task": "重试失败的任务 abcd-1234。",
+        "dlw_create_local_user": "在租户 1 下创建用户 alice，角色为 tenant_operator。",
+        "dlw_reset_local_password": "重置 user_id=5 的密码。"
       }
     }
   },

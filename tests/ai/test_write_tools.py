@@ -59,6 +59,15 @@ async def _bootstrap(engine):
                          path_template="hf/{model}/{revision}/{file}",
                          status="running"),
         ])
+        # Explicit-id inserts above don't advance the sequence, so next
+        # insert via the AI tool would collide with id=1/2. Bump sequences
+        # past the seeded rows so subsequent inserts use safe ids.
+        from sqlalchemy import text
+        for seq, last in [
+            ("users_id_seq", 2), ("storage_backends_id_seq", 2),
+            ("projects_id_seq", 2), ("tenants_id_seq", 2),
+        ]:
+            await s.execute(text(f"SELECT setval('{seq}', {last}, true)"))
         await s.commit()
     yield
     async with engine.begin() as conn:
@@ -118,3 +127,147 @@ async def test_create_quota_exceeded(session, monkeypatch):
         session, _principal(1), repo_id="org/x", revision="c" * 40,
         storage_id=1)
     assert out["error"] == "quota_exceeded"
+
+
+# ---------------------------------------------------------------------------
+# Smoothing: default revision + auto-pick storage
+# ---------------------------------------------------------------------------
+
+async def test_create_default_revision_is_main(session, monkeypatch):
+    from dlw.services.hf_metadata import RepoFile
+    captured = {}
+
+    async def fake(repo_id, revision, *, hf_endpoint, hf_token):
+        captured["revision"] = revision
+        return [RepoFile(path="x.bin", size=10, sha256="d" * 64)]
+
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+    await WRITE_TOOLS["dlw_create_task"].run(
+        session, _principal(1), repo_id="org/defrev", storage_id=1)
+    await session.commit()
+    assert captured["revision"] == "main"
+
+
+async def test_create_auto_picks_default_storage(session, monkeypatch):
+    """When storage_id is omitted and an is_default=true storage exists,
+    the tool picks it instead of erroring."""
+    from dlw.db.models.storage import StorageBackend
+    from dlw.services.hf_metadata import RepoFile
+
+    s_default = StorageBackend(
+        id=99, tenant_id=1, name="default-s3", backend_type="s3",
+        config_encrypted=b"", is_default=True)
+    session.add(s_default)
+    await session.flush()
+
+    async def fake(*a, **k):
+        return [RepoFile(path="x.bin", size=10, sha256="e" * 64)]
+
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+    out = await WRITE_TOOLS["dlw_create_task"].run(
+        session, _principal(1), repo_id="org/autostorage")
+    assert "task_id" in out
+    await session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# dlw_delete_task
+# ---------------------------------------------------------------------------
+
+async def test_delete_in_progress_returns_not_terminal(session):
+    out = await WRITE_TOOLS["dlw_delete_task"].run(
+        session, _principal(1), task_id=str(TASK_T1))
+    assert out["error"] == "task_not_terminal"
+
+
+async def test_delete_cross_tenant_is_error(session):
+    out = await WRITE_TOOLS["dlw_delete_task"].run(
+        session, _principal(1), task_id=str(TASK_T2))
+    assert out == {"error": "task not found"}
+
+
+async def test_delete_terminal_task_removes_row(session):
+    """Mark a fresh task succeeded then delete it via the tool."""
+    import uuid as _u
+    from dlw.db.models.task import DownloadTask
+    new_tid = _u.uuid4()
+    session.add(DownloadTask(
+        id=new_tid, tenant_id=1, project_id=1, owner_user_id=1, storage_id=1,
+        repo_id="org/term", revision="0" * 40,
+        path_template="hf/{model}/{revision}/{file}", status="succeeded"))
+    await session.commit()
+    out = await WRITE_TOOLS["dlw_delete_task"].run(
+        session, _principal(1), task_id=str(new_tid))
+    assert out["deleted"] is True
+    await session.commit()
+    assert await session.get(DownloadTask, new_tid) is None
+
+
+# ---------------------------------------------------------------------------
+# dlw_retry_task
+# ---------------------------------------------------------------------------
+
+async def test_retry_creates_new_task_with_same_params(session, monkeypatch):
+    from dlw.services.hf_metadata import RepoFile
+    captured = {}
+
+    async def fake(repo_id, revision, *, hf_endpoint, hf_token):
+        captured["repo_id"] = repo_id
+        captured["revision"] = revision
+        return [RepoFile(path="x.bin", size=10, sha256="f" * 64)]
+
+    monkeypatch.setattr("dlw.services.task_service.list_repo_tree", fake)
+    out = await WRITE_TOOLS["dlw_retry_task"].run(
+        session, _principal(1), task_id=str(TASK_T1))
+    assert "task_id" in out
+    # New task gets a fresh UUID, not the original
+    assert out["task_id"] != str(TASK_T1)
+    assert captured["repo_id"] == "org/m1"
+    await session.rollback()
+
+
+async def test_retry_cross_tenant_is_error(session):
+    out = await WRITE_TOOLS["dlw_retry_task"].run(
+        session, _principal(1), task_id=str(TASK_T2))
+    assert out == {"error": "task not found"}
+
+
+# ---------------------------------------------------------------------------
+# dlw_create_local_user
+# ---------------------------------------------------------------------------
+
+async def test_create_local_user_admin_only(session):
+    out = await WRITE_TOOLS["dlw_create_local_user"].run(
+        session, _principal(1), username="x", password="pw12345678",
+        tenant_id=1, role="tenant_viewer")
+    # principal is tenant_admin, NOT system_admin → rejected
+    assert "error" in out
+
+
+async def test_create_local_user_system_admin_succeeds(session):
+    admin = Principal(user_id=1, tenant_id=1, role="system_admin",
+                      project_ids=())
+    out = await WRITE_TOOLS["dlw_create_local_user"].run(
+        session, admin, username="new_local_u1", password="pw12345678",
+        tenant_id=1, role="tenant_viewer")
+    assert "user_id" in out
+    assert out["must_change_password"] is True
+    await session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# dlw_reset_local_password
+# ---------------------------------------------------------------------------
+
+async def test_reset_password_non_admin_rejected(session):
+    out = await WRITE_TOOLS["dlw_reset_local_password"].run(
+        session, _principal(1), user_id=1, new_password="pw12345678")
+    assert "error" in out
+
+
+async def test_reset_password_no_credential_returns_error(session):
+    admin = Principal(user_id=1, tenant_id=1, role="system_admin",
+                      project_ids=())
+    out = await WRITE_TOOLS["dlw_reset_local_password"].run(
+        session, admin, user_id=9999, new_password="pw12345678")
+    assert "error" in out

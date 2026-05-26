@@ -16,6 +16,7 @@ const TOOLS: ToolItem[] = [
   { name: 'dlw_get_task', icon: '🔎', category: 'read' },
   { name: 'dlw_get_task_events', icon: '📜', category: 'read' },
   { name: 'dlw_quota_current', icon: '📊', category: 'read' },
+  { name: 'dlw_list_storages', icon: '💾', category: 'read' },
   { name: 'hf_api_metadata', icon: '🤗', category: 'external' },
   { name: 'hf_model_card', icon: '🤗', category: 'external' },
   { name: 'search_huggingface_models', icon: '🤗', category: 'external' },
@@ -24,6 +25,10 @@ const TOOLS: ToolItem[] = [
   { name: 'fetch_user_content', icon: '🌐', category: 'external' },
   { name: 'dlw_create_task', icon: '➕', category: 'write' },
   { name: 'dlw_cancel_task', icon: '🛑', category: 'write' },
+  { name: 'dlw_delete_task', icon: '🗑', category: 'write' },
+  { name: 'dlw_retry_task', icon: '🔁', category: 'write' },
+  { name: 'dlw_create_local_user', icon: '👤', category: 'write' },
+  { name: 'dlw_reset_local_password', icon: '🔑', category: 'write' },
 ]
 </script>
 

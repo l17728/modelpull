@@ -103,6 +103,27 @@ async def _quota_current(session: AsyncSession, principal: Principal) -> dict:
     return snap or {"error": "tenant not found"}
 
 
+async def _list_storages(session: AsyncSession, principal: Principal) -> dict:
+    """List storage backends visible to the caller's tenant (own + global).
+
+    Used by the AI before proposing dlw_create_task so it can pick a valid
+    storage_id instead of guessing. Returns id / name / backend_type /
+    region / is_default — config_encrypted is never exposed."""
+    from sqlalchemy import or_
+    from dlw.db.models.storage import StorageBackend
+    rows = (await session.execute(
+        select(StorageBackend).where(
+            or_(StorageBackend.tenant_id == principal.tenant_id,
+                StorageBackend.tenant_id.is_(None))
+        ).order_by(StorageBackend.is_default.desc(), StorageBackend.id)
+    )).scalars().all()
+    return {"items": [{
+        "id": r.id, "name": r.name, "backend_type": r.backend_type,
+        "region": r.region, "is_default": r.is_default,
+        "scope": "global" if r.tenant_id is None else "tenant",
+    } for r in rows]}
+
+
 async def _hf_api_metadata(session: AsyncSession, principal: Principal, *,
                            repo_id: str, revision: str | None = None) -> dict:
     s = get_settings()
@@ -360,6 +381,13 @@ READONLY_TOOLS: dict[str, Tool] = {
         "Get the caller tenant's current quota usage.",
         {"type": "object", "properties": {}},
         _quota_current),
+    "dlw_list_storages": Tool(
+        "dlw_list_storages",
+        "List storage backends available to the caller's tenant. Use this "
+        "BEFORE proposing dlw_create_task to pick a valid storage_id. The "
+        "is_default=true entry is the recommended default.",
+        {"type": "object", "properties": {}},
+        _list_storages),
     "hf_api_metadata": Tool(
         "hf_api_metadata",
         "Get HF API structured metadata (sha, file list, last_modified) for a "

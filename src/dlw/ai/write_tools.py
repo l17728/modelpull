@@ -57,7 +57,8 @@ async def _cancel(session: AsyncSession, principal: Principal, *,
 
 
 async def _create(session: AsyncSession, principal: Principal, *,
-                  repo_id: str, revision: str, storage_id: int,
+                  repo_id: str, revision: str = "main",
+                  storage_id: int | None = None,
                   priority: int = 1,
                   source_strategy: str = "auto_balance") -> dict:
     from dlw.services.hf_metadata import (HfNetworkError,
@@ -72,6 +73,23 @@ async def _create(session: AsyncSession, principal: Principal, *,
             Project.tenant_id == principal.tenant_id))
     if project_id is None:
         return {"error": "tenant has no project"}
+    # Default storage_id resolution: prefer is_default=true entry visible to
+    # this tenant (own or global). Lets AI omit storage_id when there's an
+    # obvious choice; tools.py:dlw_list_storages exposes the same view so the
+    # AI can disambiguate when there's more than one default.
+    if storage_id is None:
+        from sqlalchemy import or_
+        from dlw.db.models.storage import StorageBackend
+        sid = await session.scalar(
+            select(StorageBackend.id).where(
+                or_(StorageBackend.tenant_id == principal.tenant_id,
+                    StorageBackend.tenant_id.is_(None)),
+                StorageBackend.is_default.is_(True),
+            ).order_by(StorageBackend.id).limit(1))
+        if sid is None:
+            return {"error": "no default storage — call dlw_list_storages "
+                             "and pass storage_id explicitly"}
+        storage_id = int(sid)
     body = TaskCreate(repo_id=repo_id, revision=revision,
                       storage_id=int(storage_id), priority=int(priority),
                       source_strategy=source_strategy)
@@ -94,17 +112,161 @@ async def _create(session: AsyncSession, principal: Principal, *,
             "repo_id": task.repo_id, "revision": task.revision}
 
 
+async def _delete(session: AsyncSession, principal: Principal, *,
+                  task_id: str) -> dict:
+    """Delete a terminal task (succeeded/failed/cancelled). Mirrors the
+    DELETE /api/v1/tasks/{id} endpoint: tenant-scoped + 409 if not terminal."""
+    from sqlalchemy.orm import selectinload
+    from dlw.services.storage_objects import deref_subtask
+    try:
+        tid = uuid.UUID(str(task_id))
+    except (ValueError, TypeError):
+        return {"error": "invalid task_id"}
+    row = (await session.execute(
+        tenant_filtered(select(DownloadTask).where(DownloadTask.id == tid),
+                        DownloadTask, principal)
+        .options(selectinload(DownloadTask.subtasks))
+    )).scalar_one_or_none()
+    if row is None:
+        return {"error": "task not found"}
+    if row.status not in ("succeeded", "failed", "cancelled"):
+        return {"error": "task_not_terminal", "status": row.status}
+    for sub in row.subtasks:
+        await deref_subtask(session, sub.id)
+    repo = row.repo_id
+    await session.delete(row)
+    await session.flush()
+    return {"task_id": str(tid), "deleted": True, "repo_id": repo}
+
+
+async def _retry(session: AsyncSession, principal: Principal, *,
+                 task_id: str) -> dict:
+    """Create a new download task using the parameters of an existing task.
+    The original task is NOT modified — this is "re-download semantics"
+    suitable for failed/cancelled tasks (or even successful ones, e.g. to
+    pick up upstream HF revision changes). For state-machine retry that
+    resets the same task's subtasks, a dedicated service is needed."""
+    try:
+        tid = uuid.UUID(str(task_id))
+    except (ValueError, TypeError):
+        return {"error": "invalid task_id"}
+    original = (await session.execute(
+        tenant_filtered(select(DownloadTask).where(DownloadTask.id == tid),
+                        DownloadTask, principal)
+    )).scalar_one_or_none()
+    if original is None:
+        return {"error": "task not found"}
+    return await _create(
+        session, principal,
+        repo_id=original.repo_id, revision=original.revision,
+        storage_id=original.storage_id,
+        priority=original.priority or 1,
+        source_strategy=original.source_strategy or "auto_balance",
+    )
+
+
+async def _create_local_user(session: AsyncSession, principal: Principal, *,
+                              username: str, password: str,
+                              tenant_id: int, role: str) -> dict:
+    """Create a local username/password user. Requires system_admin role
+    (enforced at the require_perm() boundary in the chat service)."""
+    from fastapi import HTTPException
+    from dlw.services.local_auth import create_user
+    if principal.role != "system_admin":
+        return {"error": "system_admin role required"}
+    try:
+        cred = await create_user(session, username, password,
+                                  int(tenant_id), role)
+    except HTTPException as e:
+        return {"error": e.detail.get("code", "create_failed")
+                if isinstance(e.detail, dict) else str(e.detail)}
+    await session.flush()
+    return {"user_id": cred.user_id, "username": cred.username,
+            "tenant_id": cred.tenant_id, "role": cred.role,
+            "must_change_password": cred.must_change_password}
+
+
+async def _reset_local_password(session: AsyncSession, principal: Principal, *,
+                                 user_id: int, new_password: str) -> dict:
+    """Reset a local user's password. system_admin only."""
+    from fastapi import HTTPException
+    from dlw.services.local_auth import reset_password
+    if principal.role != "system_admin":
+        return {"error": "system_admin role required"}
+    try:
+        await reset_password(session, int(user_id), new_password)
+    except HTTPException as e:
+        return {"error": e.detail.get("code", "reset_failed")
+                if isinstance(e.detail, dict) else str(e.detail)}
+    await session.flush()
+    return {"user_id": int(user_id), "reset": True,
+            "must_change_password": True}
+
+
 WRITE_TOOLS: dict[str, WriteTool] = {
     "dlw_cancel_task": WriteTool(
-        "dlw_cancel_task", "Cancel a running download task.",
+        "dlw_cancel_task",
+        "Cancel a running or pending download task. Requires user confirmation.",
         {"type": "object", "required": ["task_id"],
          "properties": {"task_id": {"type": "string"}}}, _cancel),
     "dlw_create_task": WriteTool(
-        "dlw_create_task", "Create a new download task (consumes quota).",
-        {"type": "object", "required": ["repo_id", "revision", "storage_id"],
-         "properties": {"repo_id": {"type": "string"},
-                        "revision": {"type": "string"},
-                        "storage_id": {"type": "integer"},
-                        "priority": {"type": "integer"},
-                        "source_strategy": {"type": "string"}}}, _create),
+        "dlw_create_task",
+        "Create a new download task. Workflow: (1) optionally call "
+        "search_huggingface_models / search_modelscope_models to find the "
+        "repo_id, (2) optionally call dlw_list_storages to pick a "
+        "storage_id (or omit to use the tenant default), (3) propose this "
+        "tool — the user confirms. revision defaults to 'main' (HF "
+        "resolves the sha). source_strategy defaults to 'auto_balance' "
+        "which spreads chunks across all enabled sources. Consumes quota.",
+        {"type": "object", "required": ["repo_id"],
+         "properties": {"repo_id": {"type": "string",
+                                    "description": "HF repo, e.g. 'meta-llama/Llama-3-8B'"},
+                        "revision": {"type": "string",
+                                     "description": "Branch/tag/sha (default 'main')"},
+                        "storage_id": {"type": "integer",
+                                       "description": "Omit to use tenant default"},
+                        "priority": {"type": "integer", "default": 1},
+                        "source_strategy": {"type": "string",
+                                            "enum": ["auto_balance", "fastest_only",
+                                                     "pin_huggingface", "pin_modelscope"]}}},
+        _create),
+    "dlw_delete_task": WriteTool(
+        "dlw_delete_task",
+        "Permanently delete a terminal task (succeeded / failed / cancelled). "
+        "Frees storage and quota. Returns 'task_not_terminal' for in-progress "
+        "tasks — cancel them first via dlw_cancel_task. Destructive: requires "
+        "user confirmation.",
+        {"type": "object", "required": ["task_id"],
+         "properties": {"task_id": {"type": "string"}}}, _delete),
+    "dlw_retry_task": WriteTool(
+        "dlw_retry_task",
+        "Re-download a task by creating a NEW task with the same repo_id / "
+        "revision / storage / strategy. The original task is unchanged. "
+        "Suitable for failed/cancelled tasks, or to refresh a succeeded one. "
+        "Consumes fresh quota; requires user confirmation.",
+        {"type": "object", "required": ["task_id"],
+         "properties": {"task_id": {"type": "string"}}}, _retry),
+    "dlw_create_local_user": WriteTool(
+        "dlw_create_local_user",
+        "Create a local username/password user. system_admin only. The new "
+        "user starts with must_change_password=true. Requires confirmation.",
+        {"type": "object",
+         "required": ["username", "password", "tenant_id", "role"],
+         "properties": {
+             "username": {"type": "string", "minLength": 1, "maxLength": 64},
+             "password": {"type": "string", "minLength": 8},
+             "tenant_id": {"type": "integer"},
+             "role": {"type": "string",
+                      "enum": ["system_admin", "tenant_admin",
+                               "tenant_operator", "tenant_viewer"]}}},
+        _create_local_user),
+    "dlw_reset_local_password": WriteTool(
+        "dlw_reset_local_password",
+        "Reset a local user's password to a new value. The user will be "
+        "required to change it on next login (must_change_password=true). "
+        "system_admin only; requires confirmation.",
+        {"type": "object", "required": ["user_id", "new_password"],
+         "properties": {"user_id": {"type": "integer"},
+                        "new_password": {"type": "string", "minLength": 8}}},
+        _reset_local_password),
 }

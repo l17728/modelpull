@@ -14,9 +14,13 @@ const expanded = ref(false)
 
 const ICON: Record<string, string> = {
   dlw_list_tasks: '📋', dlw_get_task: '🔎', dlw_get_task_events: '📜',
-  dlw_quota_current: '📊', hf_api_metadata: '🤗', hf_model_card: '🤗',
-  search_modelscope_models: '🔍', web_search: '🌐', fetch_user_content: '🌐',
+  dlw_quota_current: '📊', dlw_list_storages: '💾',
+  hf_api_metadata: '🤗', hf_model_card: '🤗',
+  search_huggingface_models: '🤗', search_modelscope_models: '🔍',
+  web_search: '🌐', fetch_user_content: '🌐',
   dlw_create_task: '➕', dlw_cancel_task: '🛑',
+  dlw_delete_task: '🗑', dlw_retry_task: '🔁',
+  dlw_create_local_user: '👤', dlw_reset_local_password: '🔑',
 }
 
 const icon = computed(() => ICON[props.tool] ?? '🛠')
