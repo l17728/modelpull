@@ -11,7 +11,14 @@
   },
   "nav": { "dashboard": "Overview", "tasks": "Tasks", "createTask": "New task",
     "executors": "Executors", "audit": "Audit log",
-    "quota": "Quota", "settings": "Settings", "help": "Help" },
+    "quota": "Quota", "settings": "Settings", "docs": "Docs", "help": "Help" },
+  "docs": {
+    "title": "Documentation",
+    "loadingIndex": "Loading docs index…",
+    "indexError": "Failed to load docs index.",
+    "loadingDoc": "Loading…",
+    "docError": "Failed to load this doc."
+  },
   "shell": {
     "theme": "Theme", "language": "Language",
     "commandHint": "Command palette (Ctrl/⌘+K)", "tenant": "Tenant", "role": "Role"

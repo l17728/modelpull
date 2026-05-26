@@ -12,7 +12,14 @@
   "nav": {
     "dashboard": "概览", "tasks": "任务", "createTask": "新建任务",
     "executors": "执行节点", "audit": "审计日志",
-    "quota": "配额", "settings": "设置", "help": "帮助"
+    "quota": "配额", "settings": "设置", "docs": "文档", "help": "帮助"
+  },
+  "docs": {
+    "title": "文档中心",
+    "loadingIndex": "正在加载文档列表…",
+    "indexError": "文档列表加载失败。",
+    "loadingDoc": "正在加载…",
+    "docError": "该文档加载失败。"
   },
   "shell": {
     "theme": "主题", "language": "语言", "commandHint": "命令面板 (Ctrl/⌘+K)",

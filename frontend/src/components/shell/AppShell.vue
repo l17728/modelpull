@@ -7,6 +7,7 @@ import { useUiStore } from '@/stores/ui'
 import { useSessionStore } from '@/stores/session'
 import { visibleNav } from '@/nav/registry'
 import CopilotDrawer from '@/components/copilot/CopilotDrawer.vue'
+import DocsDrawer from '@/components/help/DocsDrawer.vue'
 import HelpDrawer from '@/components/help/HelpDrawer.vue'
 
 const { t } = useI18n()
@@ -59,6 +60,13 @@ function toggleLocale() {
         </el-menu>
         <div class="aside-footer">
           <el-menu :collapse="ui.sidebarCollapsed">
+            <el-menu-item
+              index="docs"
+              data-test="nav-docs"
+              @click="ui.toggleDocs()"
+            >
+              <span>📚 {{ t('nav.docs') }}</span>
+            </el-menu-item>
             <el-menu-item
               index="help"
               data-test="nav-help"
@@ -122,6 +130,7 @@ function toggleLocale() {
       </el-main>
     </el-container>
     <CopilotDrawer />
+    <DocsDrawer />
     <HelpDrawer />
   </el-container>
 </template>

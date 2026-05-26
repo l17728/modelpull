@@ -13,6 +13,7 @@ export const useUiStore = defineStore('ui', () => {
   const sidebarCollapsed = ref(localStorage.getItem('dlw_sidebar') === 'true')
   const copilotOpen = ref(false)
   const helpOpen = ref(false)
+  const docsOpen = ref(false)
   const locale = ref<LocaleCode>(
     (localStorage.getItem('dlw_locale') as LocaleCode) ?? 'zh-CN',
   )
@@ -35,6 +36,9 @@ export const useUiStore = defineStore('ui', () => {
   function toggleHelp(): void {
     helpOpen.value = !helpOpen.value
   }
+  function toggleDocs(): void {
+    docsOpen.value = !docsOpen.value
+  }
   function setLocale(l: LocaleCode): void {
     locale.value = l
     localStorage.setItem('dlw_locale', l)
@@ -45,6 +49,7 @@ export const useUiStore = defineStore('ui', () => {
     setI18nLocale(locale.value)
   }
 
-  return { theme, sidebarCollapsed, copilotOpen, helpOpen, locale,
-    toggleTheme, toggleSidebar, toggleCopilot, toggleHelp, setLocale, hydrate }
+  return { theme, sidebarCollapsed, copilotOpen, helpOpen, docsOpen, locale,
+    toggleTheme, toggleSidebar, toggleCopilot, toggleHelp, toggleDocs,
+    setLocale, hydrate }
 })
