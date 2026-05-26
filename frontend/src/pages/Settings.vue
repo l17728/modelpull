@@ -8,11 +8,36 @@ import { useUiStore } from '@/stores/ui'
 import { useSystemHealth } from '@/composables/useSystemHealth'
 import { client } from '@/api/client'
 import HealthPill from '@/components/infra/HealthPill.vue'
+import { useQuota } from '@/composables/useQuota'
 const { t } = useI18n()
 const route = useRoute()
 const session = useSessionStore()
 const ui = useUiStore()
 const { data: health } = useSystemHealth()
+const quotaQuery = useQuota()
+const quota = quotaQuery.data
+
+// v2.1 SP1 — SLA tier. system_admin can change; others read-only.
+const slaUpdating = ref(false)
+const slaIsAdmin = () => session.principal?.role === 'system_admin'
+async function changeSlaTier(newTier: string): Promise<void> {
+  if (!session.principal?.tenantId) return
+  slaUpdating.value = true
+  try {
+    await client.put(
+      `/api/v1/tenants/${session.principal.tenantId}/sla`,
+      { sla_tier: newTier })
+    ElMessage.success(t('settings.slaUpdated'))
+    await quotaQuery.refetch()
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } })?.response?.status
+    if (status === 403) ElMessage.error(t('settings.slaAdminOnly'))
+    else if (status === 422) ElMessage.error(t('settings.slaInvalid'))
+    else ElMessage.error(t('errors.network'))
+  } finally {
+    slaUpdating.value = false
+  }
+}
 
 // ── Change password ──────────────────────────────────────────────────────────
 const pwFormRef = ref<FormInstance>()
@@ -243,6 +268,42 @@ onMounted(() => {
       <div class="row">
         <span class="lbl">{{ t('settings.controllerState') }}</span>
         <HealthPill :state="health?.controller_state ?? 'unknown'" />
+      </div>
+      <div class="row">
+        <span class="lbl">{{ t('settings.slaTier') }}</span>
+        <template v-if="slaIsAdmin()">
+          <el-select
+            :model-value="quota?.sla_tier ?? 'standard'"
+            size="small"
+            :loading="slaUpdating"
+            data-test="sla-tier-select"
+            @update:model-value="(v: string | number | boolean | undefined) =>
+              changeSlaTier(String(v))"
+          >
+            <el-option
+              value="critical"
+              :label="t('settings.slaCritical')"
+            />
+            <el-option
+              value="standard"
+              :label="t('settings.slaStandard')"
+            />
+            <el-option
+              value="bulk"
+              :label="t('settings.slaBulk')"
+            />
+          </el-select>
+          <span class="sub">{{ t('settings.slaAdminHint') }}</span>
+        </template>
+        <el-tag
+          v-else
+          size="small"
+          :type="quota?.sla_tier === 'critical' ? 'danger'
+            : quota?.sla_tier === 'bulk' ? 'info' : 'success'"
+          data-test="sla-tier-readonly"
+        >
+          {{ quota?.sla_tier ?? 'standard' }}
+        </el-tag>
       </div>
     </el-card>
 

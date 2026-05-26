@@ -61,6 +61,8 @@ export interface QuotaCurrent {
   storage_gb_quota: number
   concurrent_tasks: number
   concurrent_quota: number
+  /** v2.1 SP1: 'critical' | 'standard' | 'bulk'. Default 'standard'. */
+  sla_tier?: 'critical' | 'standard' | 'bulk'
 }
 
 export interface TaskCreateBody {

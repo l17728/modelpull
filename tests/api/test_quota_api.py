@@ -66,3 +66,15 @@ async def test_quota_current_shape(client):
 
 async def test_quota_current_unauth_401(client):
     assert (await client.get("/api/v1/quota/current")).status_code == 401
+
+
+async def test_quota_current_includes_sla_tier(client):
+    """v2.1 SP1 — quota snapshot now exposes the tenant's sla_tier so the
+    frontend Settings page can render it without a separate fetch."""
+    r = await client.get("/api/v1/quota/current",
+                         headers=principal_headers(secret=SECRET,
+                                                   role="tenant_viewer"))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    # Default for tenants seeded without an explicit value is "standard".
+    assert b["sla_tier"] == "standard"

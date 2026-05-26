@@ -127,6 +127,14 @@ async def claim_one_subtask(
             .with_for_update(skip_locked=True)
         )
     candidates = (await session.execute(stmt)).scalars().all()
+    # v2.1 SP1 ops observability: when SLA ordering is on, log the tier
+    # of the first candidate so operators can `grep sla_tier` to see
+    # what's being claimed. Cheap (one fetch only if there's a candidate).
+    if _SLA_TIER_ENABLED and candidates:
+        import logging as _lg
+        _lg.getLogger(__name__).debug(
+            "claim_one_subtask: SLA ordering active — top candidate "
+            "task=%s subtask=%s", candidates[0].task_id, candidates[0].id)
     for sub in candidates:
         size = sub.file_size or 0
         # SP3: an inherit subtask materializes via a server-side S3 copy /

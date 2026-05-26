@@ -58,6 +58,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   user-visible reply.
 - Config: `ai_opencode_inject_skills: True` (default).
 
+### Added (2026-05-26 — late: v2.1 Sprint 1 complete)
+
+**v2.1 Sprint 1 ship**: SLA tier (critical / standard / bulk) end-to-end.
+Scheduler now weights claim ordering by (tier_weight × priority); quota
+admission rejects bulk at ≥90% busy; bulk subtasks pending >30 min get
+a starvation bump to standard's weight. system_admin can change per-
+tenant tier via the new `PUT /api/v1/tenants/{id}/sla` REST endpoint
+(audit-logged before/after) or in the frontend Settings → SLA tier
+dropdown; non-admin users see a read-only tag with the current tier.
+`/api/v1/quota/current` now also returns `sla_tier`. Gated by env
+`DLW_SLA_TIER_ENABLED` (default true) so the new ordering can be
+rolled back without redeploy. Tag candidate: **v2.1.0-alpha.1**.
+
+Deliverables:
+- Migration c2d3e4f5a6b7 — adds tenants.sla_tier with check constraint
+- services/sla_tier.py — tier constants, weights, admission_decision,
+  set_tenant_sla_tier with audit
+- services/scheduler.py — JOIN to Tenant; SQL CASE for tier weight +
+  starvation bump; replaces parent_active EXISTS with JOIN's status
+  filter to avoid auto-correlation
+- services/quota.py — calls admission_decision after hard quotas
+- api/tenants.py — PUT /sla endpoint (system_admin, 403/404/422)
+- services/quota_read.py — exposes sla_tier in GET /quota/current
+- Frontend: Settings → System card gains SLA tier dropdown (admin) /
+  read-only tag (others); QuotaCurrent type updated
+- 21 new test cases (16 unit + 3 scheduler integration + 1 admission
+  + 1 quota response shape)
+
+NOT in alpha.1 (deferred to Sprint 1.5 or later):
+- Prometheus per-tier metrics (requires project-wide instrumentation
+  foundation first)
+
 ### Docs polish (2026-05-26 — late)
 
 - `README.md` / `README_en.md`: test badge 427 → 1000+; AI Copilot

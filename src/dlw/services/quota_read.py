@@ -24,4 +24,8 @@ async def get_quota_snapshot(
         "storage_gb_quota": tenant.quota_storage_gb,
         "concurrent_tasks": snap.concurrent_tasks if snap else 0,
         "concurrent_quota": tenant.quota_concurrent,
+        # v2.1 SP1 — expose the tenant's SLA tier so the frontend Settings
+        # page can show it (read-only for non-admin; system_admin can
+        # change via PUT /api/v1/tenants/{id}/sla).
+        "sla_tier": tenant.sla_tier or "standard",
     }
