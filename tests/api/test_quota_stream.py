@@ -128,6 +128,7 @@ async def test_quota_stream_multi_snapshot(
         "tenant_id", "bytes_used_month", "bytes_quota_month",
         "storage_gb_used", "storage_gb_quota",
         "concurrent_tasks", "concurrent_quota",
+        "sla_tier",                      # v2.1 SP1 — added to snapshot
     }
     for raw in received[:2]:
         body = json.loads(raw)
