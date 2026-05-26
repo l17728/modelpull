@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `services/replication.py`：create / list / get / cancel + 6 异常
 - `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
 
+**自适应优化 Part 2 — Optimizer + Capacity matrix**（Sprint 8）：
+- `services/optimizer.py` LPT (Longest Processing Time) heuristic + 局部交换打磨；solve() 接口与未来 highspy/LP 后端兼容
+- 决策点：选纯 Python heuristic 而非 highspy 新依赖 — Graham 1969 保证 makespan ≤ 4/3 倍最优；100×10×5 < 10ms（plan 预算 1s）
+- `services/capacity_estimator.py` 从 `chunk_throughput_sample` 30 分钟窗口聚合（按 executor × source × file_type）— 用 statistics.median，异常值不污染 LP
+- 17 单测：退化场景 / LPT 顺序 / 单 ex / 单 src / file_type 隔离 / polish 不变差 / 100×10×5 性能 / capacity 阈值 + 中位数 + lookback
+
 **自适应优化 Part 1 — 吞吐采样基础**（Sprint 7）：
 - 新表 `chunk_throughput_sample` (executor_id, source_id, file_type, bytes, duration_ms)
 - `services/throughput_sampler.py` 异步批量缓冲：deque + 5s flush_loop，无阻塞 hot path

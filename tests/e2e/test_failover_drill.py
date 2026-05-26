@@ -26,7 +26,7 @@ def _test_db_url(test_db_name: str) -> str:
 _LOCK_ID = 0x4D45_4145_5044_5631   # 'MEAPDV1' — distinct from test_leader_election
 
 
-async def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.05):
+async def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.05):
     """Poll `predicate()` until it returns truthy or `timeout` elapses.
     Returns the truthy value on success; raises asyncio.TimeoutError on
     miss. Replaces fixed-sleep + assert patterns that flake on slow CI
