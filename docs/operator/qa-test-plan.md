@@ -264,18 +264,280 @@ cd D:/download_weights/frontend && pnpm dev
 
 ---
 
-## 10. v2.1+ 待测特性（未来 release）
+## 10. v2.1 特性测试（已 ship — 跑在功能验证阶段）
 
-⚠️ **现在不要测**，等对应 feature 实现：
+v2.1.0-rc.1 已 cut（commit `acd553e`）。下列特性都已实现 + 全套 CI 通过；
+测试人员在功能验证阶段把它们补到 §1-§9 的对应小节后跑：
 
-- 物理字节 GC + LRU 驱逐（已有 services/physical_gc.py 骨架，详见
-  [`v2.1-roadmap.md`](../v2.1-roadmap.md)）
-- 自适应运筹优化（v2.1）
-- 企业内网部署（反向 WSS / 凭证池 / Live Console）
-- 跨地域复制
-- SLA 分级
+| 特性 | Sprint | 验证位置 | 启用方式 |
+|------|--------|---------|---------|
+| SLA 分级 | S1 | §4 配额：先 `PUT /tenants/{id}/sla` 改为 `bulk`，制造系统忙到 91% 验证新任务 429 | 默认 ON，tenants 默认 `standard` |
+| Physical GC | S3 | §6 增量下载后：删任务 → `POST /admin/gc/run` → 验证 storage 字节真减少 | `DLW_PHYSICAL_GC_ENABLED=true` |
+| 跨地域复制 | S4-S6 | 新增 §10.1（见下） | `DLW_REPLICATION_WORKER_ENABLED=true` |
+| 自适应优化 | S7-S9 | 新增 §10.2 | `DLW_ADAPTIVE_OPTIMIZER_ENABLED=true`（先 shadow）|
+| 企业内网部署 | S10-S13 | 新增 §10.3 | 仅在内网 deploy 时启用 |
+
+### 10.1 跨地域复制端到端
+
+**前置**：至少 2 个 storage_backend、1 个已下载完成的 object（有 storage_object 行）。
+
+**步骤**：
+1. UI 左侧（admin 角色）→「跨地域复制」→ 看到空表 → 点「新建任务」
+2. 填 `source_object_id` + `target_storage_id` → 确认 → 期望表中出现 pending 行
+3. 等几秒（轮询间隔 5s）→ 状态变 `running` → 几秒后变 `succeeded`，`bytes_transferred` 显示完整 size
+4. AI 助手提问"把 object {id} 复制到 storage {target_id}"→ 弹确认卡片 → 确认 → 创建第二个任务
+5. 取消正跑的任务：点「取消」按钮 → 确认 → 期望状态变 `cancelled`，target 没有出现新对象
+
+**期望**：`/metrics` 中 `dlw_replication_jobs_total{status="succeeded"}` 计数 +1，`dlw_replication_bytes_total` 增加；Grafana `dlw-replication` dashboard 有数据点。
+
+### 10.2 自适应优化 shadow 验证
+
+**前置**：至少 2 个 source（HF + mirror）+ ≥ 100 个已完成的 chunk（让 sampler 有数据）。
+
+**步骤**：
+1. 启动 controller 时设 `DLW_ADAPTIVE_OPTIMIZER_ENABLED=true`（apply 仍关）
+2. 等 30s（replan_loop 一个 tick）→ controller 日志应有 `replan shadow: would move X/Y pending chunks (solve=N.NNNs, K capacity rows)`
+3. `curl http://127.0.0.1:8001/metrics | grep dlw_replan_chunk_moves_total` 期望看到 `{mode="shadow"}` 计数 > 0、`{mode="apply"} = 0`
+4. **不要直接启 apply**。Shadow 至少跑 24h 后人工对照 log 看 move 是否合理，再 set `DLW_ADAPTIVE_OPTIMIZER_APPLY=true`
+
+**期望**：subtask_chunks.source_id 在 shadow 期间**不变**（直接查 DB 对照）；apply 启用后才看到 chunk 被迁移到 mirror。
+
+### 10.3 反向 WSS + Live Console（仅企业内网 deploy）
+
+**前置**：executor 启用 reverse WSS 客户端模式（v2.1 client 默认配置；详见 docs/operator/executor-runbook.md）。
+
+**步骤**：
+1. Executor 启动 → controller 日志应有 `reverse_ws: registered session ... for executor ex-N`
+2. `curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8001/api/v1/admin/reverse-ws/sessions` → 期望 items 含该 executor
+3. 发 status 命令：`curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"command":"status"}' http://127.0.0.1:8001/api/v1/admin/executors/ex-N/command` → 期望 200 + 返回 `command_id`
+4. 试非白名单：`-d '{"command":"rm-rf"}'` → 期望 **422 NOT_WHITELISTED**
+5. tenant_admin 角色（非 system_admin）试同样的请求 → 期望 **403**
+6. Executor 进程 kill 重启 → 30s 内 sessions list 重新包含它（reconnect-wins）
+
+**期望**：每条 command 都进审计日志；白名单严格只允许 `status` / `drain` / `restart`。
 
 ---
 
-*最后更新：2026-05-26。维护：本文随核心特性 PR 同步更新；测试人员发现遗漏的
-场景请提 PR / issue 补到对应章节。*
+## 11. GA 验收（v2.1.0-rc.1 → v2.1.0 GA 切换流程）
+
+> **本节是 ops 任务**，由运维 / SRE 在 staging 集群执行。完成 4 个子任务
+> 后 release manager 才能 cut `v2.1.0` GA tag。
+>
+> 全程预计 7-10 个工作日（包含 7-day 压测 wall-time）。
+
+### 11.1 任务 1 — 7-day Locust 压测
+
+**前置（D-1，开跑前一天）**：
+
+1. staging 集群验证：
+   ```bash
+   kubectl -n dlw-staging get pods -l app=dlw-controller
+   # 期望 2 个 pod ready (active + standby)
+   kubectl -n dlw-staging get statefulset dlw-executor
+   # 期望 ≥ 10 replicas
+   ```
+
+2. 拿两个 JWT（tenant + admin）写入环境变量：
+   ```bash
+   # 在 controller pod 内执行
+   kubectl -n dlw-staging exec deploy/dlw-controller -- \
+     ./deploy/runbooks/scripts/maintenance.sh --issue-jwt tenant_admin > /tmp/tenant.jwt
+   kubectl -n dlw-staging exec deploy/dlw-controller -- \
+     ./deploy/runbooks/scripts/maintenance.sh --issue-jwt system_admin > /tmp/admin.jwt
+   ```
+
+3. 安装 Locust + 准备机器（建议跟 staging 同 region 的小 EC2 / VM，不要本机）：
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   pip install 'locust>=2.30'
+   ```
+
+4. Grafana：打开 `dlw-overview` + `dlw-replication` dashboard，时间窗调到 `last 7 days`，准备截图基线。
+
+**执行（D0）**：
+
+```bash
+export DLW_BASE_URL=https://staging.modelpull.internal
+export DLW_JWT=$(cat /tmp/tenant.jwt)
+export DLW_ADMIN_JWT=$(cat /tmp/admin.jwt)
+
+# 后台启动，stdout 重定向到日志
+nohup locust -f deploy/loadtest/locustfile.py \
+       --headless -u 100 -r 10 -t 7d \
+       --csv staging-baseline \
+       --html staging-baseline.html \
+       > locust.log 2>&1 &
+echo "pid=$!" > locust.pid
+```
+
+参数说明：
+- `-u 100`：100 并发虚拟用户（4 user type 按 weight 分配：60+20+15+5）
+- `-r 10`：每秒 spawn 10 个 user（10 秒到峰值，避免 thundering herd）
+- `-t 7d`：跑满 7 天后自动停
+- `--csv` + `--html`：自动产生 per-request + 总报告
+
+**每日检查（D1 - D7）**：
+
+```bash
+# 看进度
+tail -20 locust.log
+
+# 看错误率（关键指标）
+grep -c "POST /api/v1/tasks .* 5[0-9][0-9]" locust.log
+
+# 看 controller 健康
+curl -s $DLW_BASE_URL/healthz | jq .
+```
+
+如出现以下情况**立即停止**（`kill $(cat locust.pid)`）+ 调查：
+- controller `/healthz` 持续 503 超过 3 分钟
+- 任何 endpoint 的 5xx 率 > 1%
+- p95 延迟突然飙到 > 1s 持续 > 10 分钟（非 chaos drill 期间）
+
+**评分（D7 结束）**：
+
+打开 `staging-baseline.html` 检查 4 个 acceptance gate：
+
+| Gate | 测量 | 通过标准 | 失败处理 |
+|------|------|---------|---------|
+| Availability | controller `/healthz` 7 天总宕机 | 0 段连续 > 3 min | 看 Grafana, 找根因 |
+| Latency | p95 per-endpoint（按小时分桶） | < 300 ms（除 chaos drill 期间） | 慢查询调查 |
+| Throughput | task-create QPS sustained | ≥ 5（不含 quota 4xx） | 调度器 profiling |
+| Data integrity | 7 天后所有 task 是否都有终态 | 0 行 `running` > 2h | 单独跑 recovery |
+
+4 个全过 → 标记任务 1 ✅。任意 fail → 写 post-mortem（`docs/operator/post-mortem-template.md`）+ 修 + 重跑。
+
+### 11.2 任务 2 — 4 个 chaos drill
+
+按 [`deploy/runbooks/chaos-drill.md`](../../deploy/runbooks/chaos-drill.md)
+执行，**与 11.1 的 Locust 同时跑**（chaos 是在压测背景下注入的）。
+
+**操作流程**：
+
+1. **每个 drill 前**：通知 `#modelpull-staging` 频道，注明 drill ID + 预计开始时间 + 影响范围（"staging 集群可能 5 分钟不可用"）。
+2. **执行 drill**：严格按 runbook 步骤；不要跳步、不要"试试看"。
+3. **观察期 5-10 min**：watch Grafana + tail `locust.log`，记录每个 acceptance check 的实际值。
+4. **每个 drill 后**：
+   - 填 `docs/operator/post-mortem-template.md` —— 即使 drill 顺利通过也写一份"演练记录"，证明流程跑过
+   - 如果 drill 触发了真问题，标 SEV，按事故流程走
+5. **Drill 间隔**：每个 drill 之间留 30 min 让系统稳定，再做下一个。
+
+**4 个 drill 的预期结果矩阵**：
+
+| Drill | 关键指标 | 通过 | 失败响应 |
+|-------|---------|------|---------|
+| 1. PG 拔插 | `/healthz` 5 分钟内恢复 200，无 task 卡 `running` | drill 1 ✅ | 检查 PG 重连配置 |
+| 2. 拔 S3 region | 失败 replication job retry_count 触顶 = 3 不无限重试；恢复后手动建的新 job 成功 | drill 2 ✅ | 看 replication_worker 日志 |
+| 3. Kill active controller | 30 秒内 standby promote；任务不报 failed | drill 3 ✅ | 看 leader_election 日志 |
+| 4. Mass executor disconnect | 2 分钟内 sessions list 重新满 | drill 4 ✅ | 看 reverse_ws_registry 日志 |
+
+4 个全过 → 标记任务 2 ✅。
+
+### 11.3 任务 3 — 填回 sla-slo.md § 3 容量基线
+
+打开 [`sla-slo.md`](./sla-slo.md) § 3，把 5 行 ❓ 替换为 11.1 + 11.2 的实测值：
+
+```diff
+- | 单 controller 并发 task | ≤ 500 | ❓ 待 Sprint 15 压测填回 |
++ | 单 controller 并发 task | ≤ 500 | ✅ <实测峰值> sustained (locust run YYYY-MM-DD) |
+
+- | 单 controller 并发 executor | ≤ 100 | ❓ 待 Sprint 15 压测填回 |
++ | 单 controller 并发 executor | ≤ 100 | ✅ <实测数> (drill 4 验证) |
+
+- | 租户数 | ≤ 1000 | ❓ casbin 在该规模延迟未实测 |
++ | 租户数 | ≤ 1000 | ✅ <数> 户 × casbin p95 <ms>ms |
+
+- | **v2.1 新增 — 反向 WSS 并发** | ≤ 200 sessions / controller | ❓ ... |
++ | **v2.1 新增 — 反向 WSS 并发** | ≤ 200 sessions / controller | ✅ <实测峰值> |
+
+- | **v2.1 新增 — chunk_throughput_sample 写入率** | ≤ 1000 rows/s sustained | ❓ ... |
++ | **v2.1 新增 — chunk_throughput_sample 写入率** | ≤ 1000 rows/s sustained | ✅ <实测平均> rows/s |
+```
+
+实测值从哪里来：
+- Locust HTML：`Total Requests / Total Time` = 平均 QPS；`Median Response Time` / `95% Response Time` 是 p50/p95
+- Grafana：`dlw-overview` dashboard 的 `dlw_tasks_active_count` 峰值 = 并发 task 峰值
+- `kubectl -n dlw-staging exec deploy/dlw-controller -- curl -s localhost:8001/metrics | grep dlw_replication_bytes_total` 取 throughput 累计 ÷ 7 天 = 平均吞吐
+- PG 写率：`kubectl -n dlw-staging exec sts/pg -- psql -c "SELECT now()-stats_reset, tup_inserted/extract(epoch from now()-stats_reset) FROM pg_stat_database WHERE datname='dlw'"`
+
+**Commit + push**：
+```bash
+git checkout -b chore/v21-baseline-fillback
+git add docs/operator/sla-slo.md
+git commit -m "chore(v2.1): fill in sla-slo capacity baseline from staging run
+
+Numbers measured 2026-MM-DD on staging集群 N-controller M-executor
+configuration. Locust run ID: staging-baseline-YYYY-MM-DD."
+gh pr create --title "chore(v2.1): sla-slo baseline from staging" --base main
+```
+
+PR merge 后 → 标记任务 3 ✅。
+
+### 11.4 任务 4 — Cut v2.1.0 GA tag
+
+**前置**：11.1-11.3 三个任务都 ✅；release manager 在 `#modelpull-announce` 已宣告 GA 窗口。
+
+**步骤**：
+
+1. **更新 CHANGELOG**：
+   ```bash
+   # 把 [v2.1.0-rc.1] 标题改为 [v2.1.0]，加 GA 行
+   vim CHANGELOG.md
+   ```
+   ```diff
+   - ## [v2.1.0-rc.1] — 2026-05-27
+   + ## [v2.1.0] — 2026-MM-DD (GA)
+   +
+   + RC1 在 staging 7-day 压测 + 4 chaos drill 全过 (locust run ID:
+   + staging-baseline-YYYY-MM-DD)。容量基线已填回 sla-slo.md § 3。
+   ```
+
+2. **更新 release notes**：
+   ```bash
+   cp docs/releases/v2.1.0-rc.1.md docs/releases/v2.1.0.md
+   # 编辑顶部 GA gate 部分，从 "pending" 改为 "completed with measured numbers"
+   vim docs/releases/v2.1.0.md
+   ```
+
+3. **Commit + push + tag**：
+   ```bash
+   git add CHANGELOG.md docs/releases/v2.1.0.md
+   git commit -m "release: v2.1.0 GA"
+   git push origin main
+
+   # 等 CI 绿后
+   git tag -a v2.1.0 -m "v2.1.0 GA — see docs/releases/v2.1.0.md"
+   git push origin v2.1.0
+   ```
+
+4. **GitHub release**：
+   ```bash
+   gh release create v2.1.0 \
+     --title "v2.1.0 — GA" \
+     --notes-file docs/releases/v2.1.0.md
+   ```
+
+5. **Helm chart bump**：
+   ```bash
+   sed -i 's/^version:.*/version: 2.1.0/' deploy/helm/Chart.yaml
+   sed -i 's/^appVersion:.*/appVersion: "2.1.0"/' deploy/helm/Chart.yaml
+   git add deploy/helm/Chart.yaml
+   git commit -m "release: bump helm chart to 2.1.0"
+   git push origin main
+   ```
+
+6. **公告**：在 `#modelpull-announce` 发布：
+   ```
+   🎉 v2.1.0 GA shipped (commit <SHA>)
+   • GitHub release: <URL>
+   • 5 大特性 (SLA / GC / Replication / Optimizer / Enterprise net)
+   • Staging baseline filled: <link to sla-slo.md PR>
+   • 升级文档: docs/operator/v21-production-deployment.md
+   On-call paged for 48h post-GA monitoring.
+   ```
+
+7. **48h on-call 监控**：cut 后两天严密看 Grafana。任何 SLO miss 立即 SEV2 起，post-mortem 走 §post-mortem-template 流程。
+
+---
+
+*最后更新：2026-05-27（v2.1.0-rc.1 cut；§10 重写为已 ship 特性、§11 新增 GA 验收 ops 流程）。维护：本文随核心特性 PR 同步更新；测试人员发现遗漏的场景请提 PR / issue 补到对应章节。*
