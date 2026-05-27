@@ -40,6 +40,16 @@ _DOC_ALLOWLIST: dict[str, dict[str, str]] = {
         "title_zh": "QA 测试清单（测试人员用）",
         "path": "docs/operator/qa-test-plan.md",
     },
+    "v21-production-deployment": {
+        "title_en": "v2.1 production deployment checklist",
+        "title_zh": "v2.1 生产部署清单",
+        "path": "docs/operator/v21-production-deployment.md",
+    },
+    "post-mortem-template": {
+        "title_en": "Post-mortem template",
+        "title_zh": "事故复盘模板",
+        "path": "docs/operator/post-mortem-template.md",
+    },
 }
 
 

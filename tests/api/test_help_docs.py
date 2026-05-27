@@ -31,9 +31,10 @@ async def test_list_docs_returns_all_curated_slugs(client):
     assert r.status_code == 200
     body = r.json()
     slugs = {item["slug"] for item in body["items"]}
-    # The 4 docs we expose
+    # The curated set we expose (4 v2.0 + 2 v2.1)
     assert slugs == {
-        "ai-troubleshooting", "local-auth", "sla-slo", "qa-test-plan"}
+        "ai-troubleshooting", "local-auth", "sla-slo", "qa-test-plan",
+        "v21-production-deployment", "post-mortem-template"}
     for item in body["items"]:
         assert item["title_en"]
         assert item["title_zh"]
