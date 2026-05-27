@@ -19,18 +19,52 @@
 # proxy (nginx / caddy / cloudflare-tunnel / etc.) forwards :443 →
 # 127.0.0.1:8001 so the controller is never directly exposed.
 
+# --------------------------------------------------------------------------
+# Logging defaults — applied per-service via YAML anchor.
+#
+# json-file driver with rotation: each container caps at 7 × 100MB = 700MB
+# on disk before old logs roll off. `docker compose logs` keeps working
+# unchanged; in addition, we bind-mount /var/log/modelpull on each service
+# so the user can `tail -f` files directly without going through docker.
+#
+# Concrete log paths (persisted on host, see deploy.sh which creates them):
+#   /opt/modelpull/logs/controller.log
+#   /opt/modelpull/logs/executor-1.log
+#   /opt/modelpull/logs/executor-2.log
+#   /opt/modelpull/logs/postgres.log
+#   /opt/modelpull/logs/minio.log
+#   /opt/modelpull/logs/frontend.log
+#
+# Set DLW_LOG_LEVEL=DEBUG in .env for verbose diagnostics.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "7"
+    tag: "{{.Name}}"
+
 services:
   postgres:
     image: postgres:18-alpine
     container_name: dlw-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: dlw
     volumes:
       - dlw-pgdata:/var/lib/postgresql/data
+      - ./logs:/var/log/dlw     # for the tail script below
     # NOT exposed to host network — only the controller + migrate
     # containers reach it through the internal docker network.
+    command: >
+      postgres
+        -c log_destination=stderr
+        -c logging_collector=off
+        -c log_min_messages=info
+        -c log_min_error_statement=error
+        -c log_connections=on
+        -c log_disconnections=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d dlw"]
       interval: 5s
@@ -41,6 +75,7 @@ services:
     image: minio/minio:RELEASE.2024-11-07T00-52-20Z
     container_name: dlw-minio
     restart: unless-stopped
+    logging: *default-logging
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -62,6 +97,7 @@ services:
       context: ../..
       dockerfile: Dockerfile.controller
     container_name: dlw-migrate
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +116,7 @@ services:
       dockerfile: Dockerfile.controller
     container_name: dlw-controller
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,7 +130,7 @@ services:
       DLW_DB_USER: postgres
       DLW_DB_PASSWORD: ${POSTGRES_PASSWORD}
       DLW_DB_NAME: dlw
-      DLW_LOG_LEVEL: INFO
+      DLW_LOG_LEVEL: ${DLW_LOG_LEVEL:-INFO}
       # Auth — bootstrap.sh generates these into .env
       DLW_AUTH_DEV_MODE: "${DLW_AUTH_DEV_MODE:-false}"
       DLW_SYSTEM_JWT_SECRET: ${DLW_SYSTEM_JWT_SECRET}
@@ -109,6 +146,18 @@ services:
       AWS_DEFAULT_REGION: us-east-1
     volumes:
       - dlw-ca:/app/.ca
+      # Host-side persistent logs — controller python logging tees here
+      # via the entrypoint wrapper. See bootstrap.sh for the wrapper.
+      - ./logs:/var/log/dlw
+    # Wrap uvicorn so its stdout/stderr ALSO lands in a host-visible file.
+    # `script` gives us a real PTY so uvicorn's color codes don't break
+    # `tail -f`; if `script` isn't installed (slim image), fall back to tee.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /var/log/dlw
+        exec uvicorn dlw.main:app --host 0.0.0.0 --port 8001 \
+             2>&1 | tee -a /var/log/dlw/controller.log
     ports:
       # Loopback ONLY — front this with your existing HTTPS reverse proxy.
       - "127.0.0.1:8001:8001"
@@ -125,6 +174,7 @@ services:
       dockerfile: Dockerfile.executor
     container_name: dlw-executor-1
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       controller:
         condition: service_healthy
@@ -143,7 +193,13 @@ services:
     volumes:
       - dlw-executor-1-downloads:/downloads
       - dlw-executor-1-parts:/parts
-    command: ["--log-level", "INFO"]
+      - ./logs:/var/log/dlw
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /var/log/dlw
+        exec dlw-executor --log-level ${DLW_LOG_LEVEL:-INFO} \
+             2>&1 | tee -a /var/log/dlw/executor-1.log
 
   executor-2:
     build:
@@ -151,6 +207,7 @@ services:
       dockerfile: Dockerfile.executor
     container_name: dlw-executor-2
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       controller:
         condition: service_healthy
@@ -169,19 +226,32 @@ services:
     volumes:
       - dlw-executor-2-downloads:/downloads
       - dlw-executor-2-parts:/parts
-    command: ["--log-level", "INFO"]
+      - ./logs:/var/log/dlw
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /var/log/dlw
+        exec dlw-executor --log-level ${DLW_LOG_LEVEL:-INFO} \
+             2>&1 | tee -a /var/log/dlw/executor-2.log
 
   frontend:
     image: node:20-alpine
     container_name: dlw-frontend
     restart: unless-stopped
+    logging: *default-logging
     working_dir: /app
     volumes:
       - ../../frontend:/app
-    command: >
-      sh -c "corepack enable pnpm
-      && pnpm install --frozen-lockfile
-      && pnpm preview --host 0.0.0.0 --port 5173"
+      - ./logs:/var/log/dlw
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /var/log/dlw
+        corepack enable pnpm
+        pnpm install --frozen-lockfile
+        exec pnpm preview --host 0.0.0.0 --port 5173 \
+             2>&1 | tee -a /var/log/dlw/frontend.log
     ports:
       # Same loopback-only pattern as controller — reverse-proxy this.
       - "127.0.0.1:5173:5173"

@@ -168,19 +168,106 @@ curl https://catown.cloud/healthz
 Then open `https://catown.cloud/` in a browser, log in with `admin` +
 the password printed by `bootstrap.sh`.
 
+## Logs — where to look when something breaks
+
+Two views of the same data:
+
+### A) Persistent files on host (recommended for `grep` / `tail -F`)
+
+The compose file bind-mounts `./logs/` into every container as
+`/var/log/dlw`, and each service's `exec ... | tee -a` makes a copy of
+its stdout flow land in a stable file. `deploy.sh` `chmod 777`s the
+directory so containers (root inside) can write.
+
+**Absolute paths on the VM after `deploy.sh`:**
+
+| Service | File |
+|---------|------|
+| Controller (FastAPI + dlw services + scheduler) | `/opt/modelpull/deploy/single-host/logs/controller.log` |
+| Executor 1 (worker)         | `/opt/modelpull/deploy/single-host/logs/executor-1.log` |
+| Executor 2 (worker)         | `/opt/modelpull/deploy/single-host/logs/executor-2.log` |
+| Frontend (Vite preview)     | `/opt/modelpull/deploy/single-host/logs/frontend.log` |
+| Postgres                    | only docker logs (PG writes to stderr; see below) |
+| MinIO                       | only docker logs |
+
+### B) `docker compose logs` (always works, even before file write)
+
+Useful as a fallback when the bind-mount file isn't there yet (first 30s
+after start) or when you want timestamps from the docker daemon:
+
+```bash
+cd /opt/modelpull/deploy/single-host
+docker compose logs -f controller        # tail controller live
+docker compose logs --tail 200 executor-1  # last 200 lines
+docker compose logs                       # all services, all time
+```
+
+The `json-file` driver caps each container at **7 × 100MB = 700 MB**
+(rotation built into docker), so disk can't fill from logs even on a
+long-running deploy.
+
+### Helper: `logs.sh`
+
+```bash
+cd /opt/modelpull/deploy/single-host
+bash logs.sh paths                # print every log path + size
+bash logs.sh tail                 # tail -F controller.log
+bash logs.sh tail executor-1      # tail one executor
+bash logs.sh tail-all             # interleaved tail of controller + both executors
+bash logs.sh errors               # grep WARNING/ERROR/Traceback from last hour
+bash logs.sh errors 24            # ... from last 24 hours
+bash logs.sh snapshot             # tarball of everything for bug reports
+bash logs.sh rotate               # force a fresh log file
+```
+
+### Turn on DEBUG (verbose)
+
+For deep diagnostics, edit `.env` and add or change:
+
+```ini
+DLW_LOG_LEVEL=DEBUG
+```
+
+Then `docker compose up -d` re-applies. This propagates to:
+  - controller python logger (`logger.debug(...)` lines appear)
+  - both executor `--log-level DEBUG`
+
+Remember to flip back to `INFO` after — DEBUG can quadruple log volume.
+
+### Common grep patterns
+
+```bash
+# All v2.1 SLA tier admission rejections
+grep "admission_denied_" logs/controller.log
+
+# Replication job failures
+grep "replication.*failed\|replication.*error" logs/controller.log
+
+# Reverse-WSS connection issues
+grep "reverse_ws" logs/controller.log | grep -v "heartbeat"
+
+# Executor task failures (cross-executor)
+grep -E "failed|error|Exception" logs/executor-*.log
+
+# Admin role-denied attempts (security review)
+grep "role_denied" logs/controller.log
+```
+
 ## Day-2 operations
 
 | Action | Command (run in `deploy/single-host/`) |
 |--------|----------------------------------------|
-| Tail controller logs | `docker compose logs -f controller` |
-| Tail one executor   | `docker compose logs -f executor-1` |
-| Restart controller  | `docker compose restart controller` |
-| Apply a code update | `git pull && bash deploy.sh --rebuild` |
-| Stop everything     | `docker compose down` (keeps volumes) |
-| Wipe everything     | `docker compose down -v` (DELETES data!) |
-| Check disk usage    | `docker system df && du -sh /var/lib/docker/volumes/` |
-| Open a PG shell     | `docker compose exec postgres psql -U postgres dlw` |
-| Open MinIO UI       | SSH-tunnel `127.0.0.1:9001` or reverse-proxy a `/minio/` subpath |
+| Tail controller logs | `bash logs.sh tail` |
+| Tail one executor    | `bash logs.sh tail executor-1` |
+| Errors last hour     | `bash logs.sh errors` |
+| Restart controller   | `docker compose restart controller` |
+| Apply a code update  | `git pull && bash deploy.sh --rebuild` |
+| Stop everything      | `docker compose down` (keeps volumes) |
+| Wipe everything      | `docker compose down -v` (DELETES data!) |
+| Check disk usage     | `docker system df && du -sh logs/` |
+| Open a PG shell      | `docker compose exec postgres psql -U postgres dlw` |
+| Open MinIO UI        | SSH-tunnel `127.0.0.1:9001` or reverse-proxy a `/minio/` subpath |
+| Bug-report snapshot  | `bash logs.sh snapshot` (creates a `.tgz` to attach) |
 
 ## Upgrades
 

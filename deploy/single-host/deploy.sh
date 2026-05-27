@@ -41,6 +41,15 @@ docker compose version
 echo "[deploy] step 2: bootstrap secrets (idempotent)"
 bash bootstrap.sh
 
+echo "[deploy] step 2b: prepare host log directory"
+# The compose file bind-mounts ./logs into every container as /var/log/dlw.
+# Pre-create it world-writable enough that root-in-container can append
+# (the containers don't run as the host user). 770 + owner adjustment is
+# the security-aware path; 777 is the get-it-working path for a one-host
+# deploy where the box already trusts whoever ran deploy.sh.
+mkdir -p logs
+chmod 777 logs  # tradeoff: containers run as root so write needs g/o write
+
 echo "[deploy] step 3: build + bring up the stack"
 if [ "$REBUILD" -eq 1 ]; then
   docker compose build --pull
@@ -70,6 +79,19 @@ echo
 echo "  Controller (loopback):  http://127.0.0.1:8001/healthz"
 echo "  Frontend (loopback):    http://127.0.0.1:5173/"
 echo "  MinIO console:          http://127.0.0.1:9001/"
+echo
+echo "Persistent log files on host (also via 'docker compose logs'):"
+LOGS_ABS=$(realpath logs)
+echo "  $LOGS_ABS/controller.log    (FastAPI + dlw service log)"
+echo "  $LOGS_ABS/executor-1.log    (worker 1)"
+echo "  $LOGS_ABS/executor-2.log    (worker 2)"
+echo "  $LOGS_ABS/frontend.log      (Vue preview)"
+echo "  $LOGS_ABS/postgres.log      (only if PG is configured to write here)"
+echo
+echo "Quick tail commands:"
+echo "  tail -F $LOGS_ABS/controller.log"
+echo "  bash $(pwd)/logs.sh tail controller   # same thing, shorter"
+echo "  bash $(pwd)/logs.sh errors            # grep last hour of errors"
 echo
 echo "Now point your existing HTTPS reverse proxy at the loopback ports."
 echo "See README.md § 'TLS / reverse proxy' for nginx + caddy templates."
