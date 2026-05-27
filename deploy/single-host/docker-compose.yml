@@ -1,0 +1,199 @@
+# modelpull v2.1 single-host docker compose.
+#
+# What this brings up on one VM:
+#   - postgres-18           PG with the dlw database
+#   - minio                 S3-compatible storage backend
+#   - controller            FastAPI app on 127.0.0.1:8001 (loopback only — front it with your existing HTTPS reverse proxy)
+#   - executor-1            first download worker
+#   - executor-2            second download worker
+#   - frontend              Vite preview server on 127.0.0.1:5173 (also loopback; reverse-proxy if you want browser access)
+#   - migrate (one-shot)    runs alembic upgrade head before controller starts
+#
+# Usage:
+#   1) cp .env.example .env  and fill in
+#   2) ./bootstrap.sh         (generates CA + JWT signing key + enrollment token; idempotent)
+#   3) docker compose up -d --build
+#   4) docker compose logs -f controller    (watch for "controller_state=active")
+#
+# The controller binds ONLY to 127.0.0.1 — your existing HTTPS reverse
+# proxy (nginx / caddy / cloudflare-tunnel / etc.) forwards :443 →
+# 127.0.0.1:8001 so the controller is never directly exposed.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: dlw-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: dlw
+    volumes:
+      - dlw-pgdata:/var/lib/postgresql/data
+    # NOT exposed to host network — only the controller + migrate
+    # containers reach it through the internal docker network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dlw"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: dlw-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --address ":9000" --console-address ":9001"
+    volumes:
+      - dlw-miniodata:/data
+    ports:
+      # MinIO console on 9001 — bound to loopback; reverse-proxy or use
+      # an SSH tunnel if you need to manage buckets via browser.
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.controller
+    container_name: dlw-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DLW_DB_HOST: postgres
+      DLW_DB_PORT: "5432"
+      DLW_DB_USER: postgres
+      DLW_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DLW_DB_NAME: dlw
+    entrypoint: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.controller
+    container_name: dlw-controller
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DLW_DB_HOST: postgres
+      DLW_DB_PORT: "5432"
+      DLW_DB_USER: postgres
+      DLW_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DLW_DB_NAME: dlw
+      DLW_LOG_LEVEL: INFO
+      # Auth — bootstrap.sh generates these into .env
+      DLW_AUTH_DEV_MODE: "${DLW_AUTH_DEV_MODE:-false}"
+      DLW_SYSTEM_JWT_SECRET: ${DLW_SYSTEM_JWT_SECRET}
+      DLW_ADMIN_USERNAME: ${DLW_ADMIN_USERNAME:-admin}
+      DLW_ADMIN_INITIAL_PASSWORD: ${DLW_ADMIN_INITIAL_PASSWORD}
+      DLW_ENROLLMENT_TOKEN: ${DLW_ENROLLMENT_TOKEN}
+      DLW_CONTROLLER_HOSTNAME: dlw-controller
+      DLW_CA_DIR: /app/.ca
+      # MinIO as the default S3-compatible storage backend
+      DLW_HF_ENDPOINT: https://huggingface.co
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - dlw-ca:/app/.ca
+    ports:
+      # Loopback ONLY — front this with your existing HTTPS reverse proxy.
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  executor-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.executor
+    container_name: dlw-executor-1
+    restart: unless-stopped
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      DLW_EXECUTOR_ID: catown-host-1-worker-1
+      DLW_EXECUTOR_HOST_ID: catown-host-1
+      DLW_EXECUTOR_CONTROLLER_URL: http://controller:8001
+      DLW_EXECUTOR_BEARER_TOKEN: ${DLW_ENROLLMENT_TOKEN}
+      DLW_EXECUTOR_ENROLLMENT_TOKEN: ${DLW_ENROLLMENT_TOKEN}
+      DLW_EXECUTOR_DOWNLOAD_DIR: /downloads
+      DLW_EXECUTOR_PARTS_DIR_PATH: /parts
+      DLW_EXECUTOR_REGION: local
+      DLW_EXECUTOR_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - dlw-executor-1-downloads:/downloads
+      - dlw-executor-1-parts:/parts
+    command: ["--log-level", "INFO"]
+
+  executor-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.executor
+    container_name: dlw-executor-2
+    restart: unless-stopped
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      DLW_EXECUTOR_ID: catown-host-1-worker-2
+      DLW_EXECUTOR_HOST_ID: catown-host-1
+      DLW_EXECUTOR_CONTROLLER_URL: http://controller:8001
+      DLW_EXECUTOR_BEARER_TOKEN: ${DLW_ENROLLMENT_TOKEN}
+      DLW_EXECUTOR_ENROLLMENT_TOKEN: ${DLW_ENROLLMENT_TOKEN}
+      DLW_EXECUTOR_DOWNLOAD_DIR: /downloads
+      DLW_EXECUTOR_PARTS_DIR_PATH: /parts
+      DLW_EXECUTOR_REGION: local
+      DLW_EXECUTOR_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - dlw-executor-2-downloads:/downloads
+      - dlw-executor-2-parts:/parts
+    command: ["--log-level", "INFO"]
+
+  frontend:
+    image: node:20-alpine
+    container_name: dlw-frontend
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ../../frontend:/app
+    command: >
+      sh -c "corepack enable pnpm
+      && pnpm install --frozen-lockfile
+      && pnpm preview --host 0.0.0.0 --port 5173"
+    ports:
+      # Same loopback-only pattern as controller — reverse-proxy this.
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      controller:
+        condition: service_healthy
+
+volumes:
+  dlw-pgdata:
+  dlw-miniodata:
+  dlw-ca:
+  dlw-executor-1-downloads:
+  dlw-executor-1-parts:
+  dlw-executor-2-downloads:
+  dlw-executor-2-parts:

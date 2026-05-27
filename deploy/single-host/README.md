@@ -1,0 +1,238 @@
+# modelpull v2.1 — single-host docker compose deploy
+
+For deploys on a single VM where you already have an HTTPS reverse
+proxy (nginx / caddy / cloudflare-tunnel / etc.). The stack runs:
+
+  - PostgreSQL 18
+  - MinIO (S3-compatible storage)
+  - modelpull controller (FastAPI on `127.0.0.1:8001`)
+  - 2 × modelpull executor
+  - Vue frontend (`127.0.0.1:5173`)
+
+The controller + frontend bind to **loopback only**. The host's HTTPS
+reverse proxy is what exposes them to the internet at
+`https://your-domain/`.
+
+## Prerequisites
+
+  - 64-bit Linux VM (Debian/Ubuntu tested; deploy.sh installs docker if
+    missing)
+  - ≥ 4 GB RAM (controller + 2 executors + PG + minio)
+  - ≥ 30 GB disk (download cache + minio volume)
+  - Ports 443 (your reverse proxy) and 22 (your SSH) — that's all
+  - An existing HTTPS reverse proxy somewhere on the box (we don't
+    install one for you)
+
+## Quick start
+
+On your laptop, ship the deploy bundle:
+
+```bash
+# from the repo root
+tar czf /tmp/modelpull-deploy.tgz \
+    pyproject.toml uv.lock alembic.ini \
+    src/ frontend/ \
+    config/ docs/operator/ MANUAL.md \
+    Dockerfile.executor Dockerfile.controller \
+    deploy/single-host/
+
+scp /tmp/modelpull-deploy.tgz user@catown.cloud:/tmp/
+ssh user@catown.cloud
+```
+
+On the VM:
+
+```bash
+sudo mkdir -p /opt/modelpull && sudo chown $USER:$USER /opt/modelpull
+tar xzf /tmp/modelpull-deploy.tgz -C /opt/modelpull
+cd /opt/modelpull/deploy/single-host
+sudo bash deploy.sh
+```
+
+The script:
+
+  1. Installs docker if missing
+  2. Runs `bootstrap.sh` (generates secrets into `.env`, prints the
+     initial admin password ONCE)
+  3. `docker compose up -d --build`
+  4. Waits for the controller to become healthy
+  5. Prints next-step instructions
+
+## TLS / reverse proxy
+
+You said your site is already HTTPS, so pick whichever proxy you use
+and point it at the loopback ports:
+
+### nginx
+
+Add this server block to your nginx config:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name catown.cloud;
+
+    # your existing cert paths
+    ssl_certificate     /etc/letsencrypt/live/catown.cloud/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/catown.cloud/privkey.pem;
+
+    # 1) UI
+    location / {
+        proxy_pass         http://127.0.0.1:5173/;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-Proto https;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    }
+
+    # 2) Controller API + WebSocket
+    location /api/ {
+        proxy_pass         http://127.0.0.1:8001;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-Proto https;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        # WebSocket upgrade (reverse-WSS endpoint)
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade           $http_upgrade;
+        proxy_set_header   Connection        "upgrade";
+        proxy_read_timeout 3600s;
+    }
+    location /healthz {
+        proxy_pass         http://127.0.0.1:8001/healthz;
+    }
+    location /metrics {
+        # Prometheus scrape; restrict by IP if exposing externally
+        proxy_pass         http://127.0.0.1:8001/metrics;
+    }
+}
+```
+
+Reload: `sudo nginx -t && sudo systemctl reload nginx`.
+
+### Caddy
+
+Add this site block to your `Caddyfile`:
+
+```caddy
+catown.cloud {
+    # Caddy auto-handles TLS via letsencrypt
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8001 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+    handle /healthz {
+        reverse_proxy 127.0.0.1:8001
+    }
+    handle /metrics {
+        reverse_proxy 127.0.0.1:8001
+    }
+    handle {
+        reverse_proxy 127.0.0.1:5173
+    }
+}
+```
+
+Reload: `sudo systemctl reload caddy`.
+
+### Cloudflare Tunnel
+
+If you're behind a Cloudflare tunnel, run:
+
+```bash
+cloudflared tunnel --hostname catown.cloud --url http://127.0.0.1:5173
+```
+
+For the `/api/*` path, route inside the cloudflared config:
+
+```yaml
+ingress:
+  - hostname: catown.cloud
+    path: /api/.*
+    service: http://127.0.0.1:8001
+  - hostname: catown.cloud
+    service: http://127.0.0.1:5173
+  - service: http_status:404
+```
+
+## Verification
+
+After the reverse proxy is in place:
+
+```bash
+# from your laptop
+curl https://catown.cloud/healthz
+# expect: {"status":"healthy", ...}
+```
+
+Then open `https://catown.cloud/` in a browser, log in with `admin` +
+the password printed by `bootstrap.sh`.
+
+## Day-2 operations
+
+| Action | Command (run in `deploy/single-host/`) |
+|--------|----------------------------------------|
+| Tail controller logs | `docker compose logs -f controller` |
+| Tail one executor   | `docker compose logs -f executor-1` |
+| Restart controller  | `docker compose restart controller` |
+| Apply a code update | `git pull && bash deploy.sh --rebuild` |
+| Stop everything     | `docker compose down` (keeps volumes) |
+| Wipe everything     | `docker compose down -v` (DELETES data!) |
+| Check disk usage    | `docker system df && du -sh /var/lib/docker/volumes/` |
+| Open a PG shell     | `docker compose exec postgres psql -U postgres dlw` |
+| Open MinIO UI       | SSH-tunnel `127.0.0.1:9001` or reverse-proxy a `/minio/` subpath |
+
+## Upgrades
+
+The deploy bundle is self-contained. To upgrade:
+
+  1. On your laptop, pull `main` and rebuild the tarball as above
+  2. scp + extract overwriting `/opt/modelpull/`
+  3. `cd /opt/modelpull/deploy/single-host && sudo bash deploy.sh --rebuild`
+
+`deploy.sh --rebuild` re-runs `alembic upgrade head` via the `migrate`
+container before flipping over the controller, so schema migrations
+ship atomically.
+
+## Sizing notes
+
+| Field | Default | When to bump |
+|-------|---------|--------------|
+| Executor count | 2 | More executors = more parallel downloads. Add `executor-3:` block in `docker-compose.yml`. |
+| Executor concurrency | 4 | `DLW_EXECUTOR_CHUNK_CONCURRENCY` env on each executor. |
+| Controller workers | 1 (uvicorn default) | Single-host doesn't need more; for active/standby use the helm chart. |
+| MinIO disk | docker volume | For > 100 GB models, mount a host path: replace `dlw-miniodata` with `/srv/minio:/data`. |
+
+## Security
+
+  - `.env` has `chmod 600` after `bootstrap.sh` runs — only root +
+    your user can read it. Don't commit it.
+  - The controller binds to `127.0.0.1` only — the docker-published
+    port is unreachable from the public network even without a firewall.
+  - PG and MinIO have **no** host port published; only the docker
+    network sees them.
+  - Reverse-proxy `/api/*` and `/healthz`, NOT `/metrics`, to the
+    public internet — Prometheus scrape should come from inside the box.
+
+## What's NOT included
+
+  - Active/standby controller HA — use the helm chart (`deploy/helm/`)
+    for that. Single-host is single-controller by design.
+  - Automatic TLS — you said your site is already HTTPS; we don't
+    duplicate that.
+  - Monitoring stack — Prometheus + Grafana have their own deploys
+    under `deploy/prometheus/` and `deploy/grafana/`. Single-host can
+    add them later as additional compose services.
+  - Backups — `docker compose exec postgres pg_dump -U postgres dlw |
+    gzip > /backup/dlw-$(date +%F).sql.gz` is the simplest path; cron
+    it daily on the host.
+
+## Troubleshooting
+
+| Symptom | First thing to check |
+|---------|---------------------|
+| `bash deploy.sh` fails on `docker compose build` | Check disk space (`df -h`) and that the source tar landed correctly under `/opt/modelpull/` |
+| Controller `/healthz` 503 | `docker compose logs controller` — usually PG migration didn't run; rerun `docker compose run --rm migrate` |
+| Executor not registering | `docker compose logs executor-1` — most common cause is `DLW_ENROLLMENT_TOKEN` mismatch. Run `bootstrap.sh` again to confirm token. |
+| Browser can't reach UI | Reverse-proxy not configured or wrong port. `curl http://127.0.0.1:5173/` on the box should return HTML. |
+| Login returns 500 | Empty `DLW_ADMIN_INITIAL_PASSWORD` in `.env` — re-run `bootstrap.sh` and `docker compose restart controller`. |
