@@ -2,14 +2,32 @@
 #
 # Multi-stage: build with uv (lockfile drives a deterministic install),
 # run with a slim python image. Matches the pattern in Dockerfile.executor.
+#
+# ARG-defaulted mirror config — overridden at build time on hosts with
+# unrestricted egress (e.g. CI). On the catown.cloud-style China-region
+# VM the defaults make `pip install` + `apt-get update` work without
+# fiddling with /etc/pip.conf or /etc/apt/sources.list.d.
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
+ARG APT_MIRROR=mirrors.aliyun.com
+
 FROM python:3.12-slim AS builder
+ARG PIP_INDEX_URL
+ARG APT_MIRROR
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+# uv reads its index from UV_INDEX_URL; tie it to the same mirror so the
+# transitive `uv sync` step doesn't tip back over to pypi.org.
+ENV UV_INDEX_URL=${PIP_INDEX_URL}
+ENV UV_DEFAULT_INDEX=${PIP_INDEX_URL}
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.9
-COPY pyproject.toml uv.lock alembic.ini ./
+COPY pyproject.toml uv.lock alembic.ini README.md ./
 COPY src/ src/
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim
+ARG PIP_INDEX_URL
+ARG APT_MIRROR
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
@@ -19,8 +37,17 @@ COPY config/ ./config/
 # drawer); copy it into the image so the in-app help works out of the box.
 COPY MANUAL.md ./MANUAL.md
 COPY docs/operator/ ./docs/operator/
-# curl: for healthcheck + ad-hoc troubleshooting from `docker exec`
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# Swap Debian apt sources to the mirror BEFORE update so the very first
+# `apt-get update` doesn't hit deb.debian.org over a flaky link.
+RUN echo "deb http://${APT_MIRROR}/debian bookworm main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list \
+    && echo "deb http://${APT_MIRROR}/debian bookworm-updates main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list \
+    && echo "deb http://${APT_MIRROR}/debian-security bookworm-security main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src

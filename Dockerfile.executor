@@ -1,17 +1,41 @@
 # Multi-stage: build with uv, run with slim
+#
+# Mirror config ARGs — same pattern as Dockerfile.controller so build
+# works behind restricted egress (catown.cloud); override at build time
+# on hosts with direct pypi/debian.org access.
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
+ARG APT_MIRROR=mirrors.aliyun.com
+
 FROM python:3.12-slim AS builder
+ARG PIP_INDEX_URL
+ARG APT_MIRROR
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+ENV UV_INDEX_URL=${PIP_INDEX_URL}
+ENV UV_DEFAULT_INDEX=${PIP_INDEX_URL}
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.9
-COPY pyproject.toml uv.lock alembic.ini ./
+COPY pyproject.toml uv.lock alembic.ini README.md ./
 COPY src/ src/
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim
+ARG PIP_INDEX_URL
+ARG APT_MIRROR
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/alembic.ini ./alembic.ini
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN echo "deb http://${APT_MIRROR}/debian bookworm main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list \
+    && echo "deb http://${APT_MIRROR}/debian bookworm-updates main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list \
+    && echo "deb http://${APT_MIRROR}/debian-security bookworm-security main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src
 ENTRYPOINT ["dlw-executor"]

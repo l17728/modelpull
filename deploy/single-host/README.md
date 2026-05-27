@@ -1,27 +1,70 @@
 # modelpull v2.1 — single-host docker compose deploy
 
-For deploys on a single VM where you already have an HTTPS reverse
-proxy (nginx / caddy / cloudflare-tunnel / etc.). The stack runs:
+For deploys on a single VM. Two browser-access modes:
+
+  - **Behind your own HTTPS reverse proxy** (recommended) — controller +
+    frontend stay loopback-only, your existing nginx/caddy/cloudflared
+    terminates TLS at `https://your-domain/`.
+  - **Direct port access** (POC / small team) — frontend binds 5173 on
+    all interfaces and serves both UI and API via vite-preview's proxy.
+    Set `DLW_PREVIEW_ALLOWED_HOSTS=your.domain,1.2.3.4` so vite accepts
+    the public Host header.
+
+Stack:
 
   - PostgreSQL 18
   - MinIO (S3-compatible storage)
-  - modelpull controller (FastAPI on `127.0.0.1:8001`)
-  - 2 × modelpull executor
-  - Vue frontend (`127.0.0.1:5173`)
-
-The controller + frontend bind to **loopback only**. The host's HTTPS
-reverse proxy is what exposes them to the internet at
-`https://your-domain/`.
+  - modelpull controller (FastAPI, `127.0.0.1:8001`, never public)
+  - 2 × modelpull executor (no exposed port)
+  - Vue frontend (vite preview, binds `0.0.0.0:5173`, proxies `/api`)
 
 ## Prerequisites
 
   - 64-bit Linux VM (Debian/Ubuntu tested; deploy.sh installs docker if
     missing)
-  - ≥ 4 GB RAM (controller + 2 executors + PG + minio)
+  - ≥ 2 GB RAM **plus pre-built frontend dist** (see below) — or ≥ 4 GB
+    RAM if you let docker build the SPA on the server
   - ≥ 30 GB disk (download cache + minio volume)
-  - Ports 443 (your reverse proxy) and 22 (your SSH) — that's all
-  - An existing HTTPS reverse proxy somewhere on the box (we don't
-    install one for you)
+  - Ports 22 (SSH) and 5173 (browser → frontend) — open 5173 in cloud
+    firewall if using direct port access mode
+  - Optional: an existing HTTPS reverse proxy on the box
+
+## China-region VM checklist
+
+If the VM is in mainland China (or otherwise behind restricted egress),
+deploy.sh handles most of it automatically; this is what it does:
+
+  - Detects docker hub unreachability + installs DaoCloud mirror to
+    `/etc/docker/daemon.json` (`docker.m.daocloud.io` is the only mirror
+    we've found that survives multiple regions; aliyun mirror returns
+    HTTP 200 on probe but throttles large pulls to ~2 KB/s, which makes
+    `docker compose pull` of minio/postgres time out).
+  - Dockerfiles default `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/`
+    + `APT_MIRROR=mirrors.aliyun.com` — `pnpm` reads
+    `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com` from compose env.
+
+## Frontend dist: build locally, ship the artifact
+
+The Vue SPA is ~1.2 MB minified but the rollup build process peaks at
+~1 GB of node heap. On a 2 GB VM with the rest of the stack already up
+this OOM-kills the build (host runs out of memory). Two options:
+
+**Recommended**: build on your laptop, ship the artifact:
+
+```bash
+cd frontend && pnpm install --frozen-lockfile && pnpm build
+cd .. && tar czf /tmp/dist.tgz -C frontend dist/
+scp /tmp/dist.tgz user@your-vm:/tmp/
+ssh user@your-vm "tar xzf /tmp/dist.tgz -C /opt/modelpull/frontend/"
+# Now docker compose up — the frontend command sees /app/dist/index.html
+# and skips the in-container build.
+```
+
+**Fallback**: let the container build. The compose command runs
+`NODE_OPTIONS="--max-old-space-size=768" pnpm build` which fits into a
+2 GB VM IF you `docker compose stop controller executor-1 executor-2`
+first, build, then `docker compose start ...`. Slower (~30s build +
+restart dance) but no laptop side-channel.
 
 ## Quick start
 

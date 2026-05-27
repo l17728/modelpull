@@ -26,9 +26,19 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 _rand() {
-  # POSIX-portable random: 24 chars of base64 from /dev/urandom
-  # tr to strip '+/=' so the value lands safely in .env / env vars
-  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-24}"
+  # Generate N random alphanumeric chars (default 24). Uses openssl
+  # because the previous `tr -dc ... | head -c N` pattern triggers
+  # SIGPIPE under `set -o pipefail` when head closes the pipe after
+  # reading N bytes — that surfaced as exit 141 on the first deploy.
+  local n="${1:-24}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$n" | tr -d '\n' | cut -c"1-${n}"
+  else
+    # Fallback for ultra-minimal images: disable pipefail just for the
+    # tr|head pipeline so SIGPIPE on `tr` doesn't kill the whole script.
+    ( set +o pipefail
+      LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$n" )
+  fi
 }
 
 _set_if_placeholder() {

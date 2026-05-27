@@ -1,7 +1,17 @@
-"""mTLS peer-cert dependency (Phase 2 W3a §3.4)."""
+"""mTLS peer-cert dependency (Phase 2 W3a §3.4).
+
+Dev-mode bypass (added for v2.1 single-host POC deploys):
+  When ``DLW_AUTH_DEV_MODE=true`` AND no peer cert is offered, look up
+  the executor by id parsed out of the URL path (executor endpoints all
+  follow ``/api/v1/executors/{id}/...``).  This lets single-host plain-
+  HTTP deploys (`deploy/single-host/`) work without a real TLS chain
+  between controller and executor.  Multi-host production deploys MUST
+  NOT enable DLW_AUTH_DEV_MODE — the bypass intentionally trades cross-
+  host authentication for a working single-machine experience."""
 from __future__ import annotations
 
 import os
+import re
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -12,6 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dlw.api.tasks import _session
 from dlw.auth.ca import fingerprint_of
 from dlw.db.models.executor import Executor
+
+# Path shape: /api/v1/executors/{id}/{action}. Match the {id} segment so
+# the dev-mode bypass can resolve the executor row.
+_EXECUTOR_ID_RE = re.compile(r"/executors/([^/]+)/")
 
 
 def _extract_peer_cert(request: Request) -> bytes | None:
@@ -49,9 +63,20 @@ async def require_executor_mtls(
     request: Request,
     session: AsyncSession = Depends(_session),
 ) -> Executor:
-    """Validate mTLS peer cert + look up executor by fingerprint."""
+    """Validate mTLS peer cert + look up executor by fingerprint.
+
+    Dev-mode bypass — see module docstring."""
     cert_pem = _extract_peer_cert(request)
     if cert_pem is None:
+        if os.environ.get("DLW_AUTH_DEV_MODE", "false").lower() == "true":
+            m = _EXECUTOR_ID_RE.search(str(request.url.path))
+            if m is not None:
+                ex_id = m.group(1)
+                ex = (await session.execute(
+                    select(Executor).where(Executor.id == ex_id)
+                )).scalar_one_or_none()
+                if ex is not None:
+                    return ex
         raise HTTPException(401, detail="missing or invalid mTLS peer cert")
     try:
         fp = fingerprint_of(cert_pem)
