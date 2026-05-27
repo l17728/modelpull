@@ -341,7 +341,7 @@ AI 助手（右上角「🤖 AI 助手」）是集成在界面中的智能对话
 | `web_search` | Brave 网页搜索（需 `DLW_AI_WEB_SEARCH_API_KEY`） |
 | `fetch_user_content` | 抓取允许列表内的 HTTPS URL 内容（需管理员启用） |
 
-**操作类（7 个，每次都需要二次确认）：**
+**操作类（10 个，每次都需要二次确认）：**
 
 | 工具 | 用途 | 权限 |
 |------|------|------|
@@ -354,6 +354,7 @@ AI 助手（右上角「🤖 AI 助手」）是集成在界面中的智能对话
 | `dlw_create_local_user` | 新建本地用户 | system_admin |
 | `dlw_reset_local_password` | 重置本地用户密码 | system_admin |
 | `dlw_set_tenant_quota` | 设置租户配额上限，审计记录 | system_admin |
+| `dlw_create_replication` (v2.1) | 创建跨地域复制任务（object → storage） | system_admin |
 
 **决策链全程透明**：助手回复上方会按时序显示「决策链」面板 — 每次思考、每次工具
 调用都打印出来（工具名、输入参数、返回结果摘要），点击可展开查看完整 JSON。让你
@@ -559,4 +560,60 @@ asyncio.run(main())
 
 ---
 
-*本手册最后更新：2026-05-27（v2.1 Sprint 1/3/4/5/6 — SLA 分级、Physical GC、跨地域复制全栈）。如有问题请通过 AI 助手提问，或联系系统管理员。*
+## v2.1 高级管理（系统管理员）
+
+以下都是 admin-only 配置，通过环境变量启停，默认全关。完整启用顺序见 `docs/operator/v21-production-deployment.md` § "Deploy step 4 — Feature flags"。
+
+### 自适应优化（Sprint 7-9）
+
+调度器可以基于历史样本周期重规划 pending chunk 的来源，缩短整体 makespan：
+
+```bash
+# Master switch（loop 才跑）
+export DLW_ADAPTIVE_OPTIMIZER_ENABLED=true
+
+# Shadow 模式（仅 log + Prometheus metric，不真改 source_id）
+# 推荐先用 shadow 跑 1-2 周，对照 metric 看效果
+unset DLW_ADAPTIVE_OPTIMIZER_APPLY   # 默认 false
+
+# 真应用（写库）— 仅在 shadow 验证 OK 后启用
+export DLW_ADAPTIVE_OPTIMIZER_APPLY=true
+```
+
+监控指标：`dlw_optimizer_solve_duration_seconds` (Histogram) + `dlw_replan_chunk_moves_total{mode=shadow|apply}` (Counter)。
+
+### 反向 WSS 企业内网部署（Sprint 10-13）
+
+让位于内网防火墙后的 executor 主动连出到 controller，无需开 inbound 端口。Executor 端在 v2.1 client 启用 WSS dialing 即可（与现有 mTLS + JWT 一致）。
+
+Admin 操作：
+
+```bash
+# 查看当前所有 reverse-WSS 连接
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+     http://controller:8001/api/v1/admin/reverse-ws/sessions
+
+# 给 executor 发送白名单命令（status / drain / restart）
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"command": "drain"}' \
+     http://controller:8001/api/v1/admin/executors/ex-1/command
+```
+
+### 凭证池 envelope encryption（Sprint 12）
+
+`storage_backends.config_encrypted` 列可以从 Sprint 12 起被 Fernet 加密。新行自动加 magic 前缀 + 包裹；旧 plaintext 行无感继续工作（非破坏性升级）。
+
+```bash
+# 生成 Fernet key（base64 url-safe，32 字节）
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# 写入 controller secret store
+export DLW_CONFIG_KEY=<上面输出>
+
+# Key rotation：换 key 后旧加密行解密会抛 _CryptoError —— 必须先 batch
+# 重加密所有旧行（follow-on tool TBD），再切 key。
+```
+
+---
+
+*本手册最后更新：2026-05-27（v2.1 Sprint 1/3/4/5/6/7-9/10-13 全部 ship）。如有问题请通过 AI 助手提问，或联系系统管理员。*
