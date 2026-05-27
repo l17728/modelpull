@@ -91,3 +91,12 @@ charts/
 .tools/
 # local runtime: controller/executor/minio data, dev CA + certs (SECRETS)
 .run/
+
+# Claude Code session artifacts
+.claude/
+
+# ad-hoc screenshots from local manual testing (use docs/screenshots/ for committed images)
+ai-response.png
+copilot-drawer-after-changes.png
+login-result.png
+*-screenshot.png

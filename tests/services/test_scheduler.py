@@ -111,9 +111,22 @@ async def test_two_concurrent_claims_get_different_subtasks(
     db_session: AsyncSession, engine
 ) -> None:
     """Concurrency: 2 sessions polling at once must get DIFFERENT subtasks."""
-    await _make_pending_task(db_session, n_subtasks=2)
-
+    # Mirror test_third_claim_returns_none_when_all_assigned's cleanup —
+    # without this, a prior test's leftover pending subtask can be picked
+    # up by one of the two concurrent claims, causing the other to see
+    # exactly 1 row left (the second pending) and claim it, but only after
+    # the first finishes. On a slow CI runner the second call then races
+    # past commit boundaries and returns None instead of the second seeded
+    # subtask. Pre-cleanup gives the test exactly 2 pending rows to fight
+    # over, deterministically.
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as cleanup:
+        from sqlalchemy import update
+        await cleanup.execute(
+            update(FileSubTask).where(FileSubTask.status == "pending")
+            .values(status="assigned"))
+        await cleanup.commit()
+    await _make_pending_task(db_session, n_subtasks=2)
 
     async def claim_in_own_session() -> uuid.UUID | None:
         async with factory() as s:
