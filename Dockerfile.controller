@@ -20,9 +20,22 @@ ENV UV_INDEX_URL=${PIP_INDEX_URL}
 ENV UV_DEFAULT_INDEX=${PIP_INDEX_URL}
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.9
-COPY pyproject.toml uv.lock alembic.ini README.md ./
+# 1) Deps-only layer — keyed on pyproject.toml + uv.lock ALONE, so a
+#    source-only edit below does NOT re-trigger the (slow) dependency
+#    install. --no-install-project installs deps without building `dlw`
+#    itself, so src/ + README.md aren't needed here. The uv cache mount
+#    persists downloaded wheels across builds even when this layer is
+#    busted by a lockfile change (requires DOCKER_BUILDKIT=1).
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+# 2) Project layer — now copy source + the metadata the wheel build needs
+#    (README is referenced by [project].readme), then install `dlw` itself
+#    (fast: all deps are already present from step 1).
+COPY alembic.ini README.md ./
 COPY src/ src/
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 FROM python:3.12-slim
 ARG PIP_INDEX_URL
