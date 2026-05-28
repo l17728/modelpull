@@ -324,6 +324,63 @@ The deploy bundle is self-contained. To upgrade:
 container before flipping over the controller, so schema migrations
 ship atomically.
 
+## Migrating to another host
+
+`migrate.sh` moves the controller (with its PostgreSQL + MinIO data + secrets
++ mTLS CA) and/or the executors to a new VM. Three verbs:
+
+| Verb | Runs on | What it does |
+|------|---------|--------------|
+| `export`   | source | Snapshots the chosen component into a `.tgz` bundle (source left fully intact) |
+| `import`   | target | Restores a bundle and brings the stack up; **refuses to clobber** existing target data unless `--force` |
+| `transfer` | source | One-click: `export` → `scp` to target → `import` over SSH (source needs SSH access to target) |
+
+`--component` selects what moves:
+
+- **`controller`** — `pg_dump` of the `dlw` DB + MinIO objects + the CA volume
+  + `.env` secrets + the build context. A faithful relocation: tasks, tenants,
+  executor registrations, downloaded objects all come across.
+- **`executor`** — produces a *standalone* executor bundle pre-pointed at a
+  controller URL you supply, for standing up a worker on a new box.
+- **`all`** — controller + its co-located 2-executor stack (a full move).
+
+### One-click examples
+
+```bash
+# Full move of everything to a new VM (run on the source):
+bash migrate.sh transfer --component all --target root@new-vm --yes
+
+# Relocate just the controller (keeps all data), then repoint executors:
+bash migrate.sh transfer --component controller --target root@new-vm --yes
+#   then on each executor host:
+bash migrate.sh repoint-executors --controller-url https://new-domain/
+
+# Add an executor on a new worker host:
+bash migrate.sh transfer --component executor --target root@worker2 \
+     --controller-url https://catown.cloud/ --s3-url http://10.0.0.5:9000
+```
+
+Manual (no source→target SSH): `export` here, copy the `.tgz` yourself, then
+`import --in <bundle>` on the target.
+
+### Prerequisites & notes
+
+- **Remote executors must be able to reach the controller over the network.**
+  The controller binds `127.0.0.1:8001` only, so a worker on another host
+  reaches it via your HTTPS reverse proxy — pass `--controller-url
+  https://your-domain/` (the proxy forwards `/api/*` to the controller). The
+  `--s3-url` must point at a MinIO/S3 endpoint the worker can reach for uploads.
+- **Give each new executor a unique id.** The generated executor bundle's
+  `.env` has placeholder `DLW_EXECUTOR_ID` / `DLW_EXECUTOR_HOST_ID` — edit them
+  before first start so registrations don't collide.
+- **Consistency**: `export` briefly stops the controller + executors so the PG
+  dump and MinIO copy are coherent, then restarts them. Use `--dry-run` to
+  preview every step, `--yes` to skip prompts, `--include-images` to ship
+  `docker save`d images (skips the slow rebuild on the target — handy given the
+  `uv sync` slowness on China-region VMs, see above).
+- **After a controller move**: point DNS / your reverse proxy at the new host,
+  then `repoint-executors --controller-url <new-url>` on each executor host.
+
 ## Sizing notes
 
 | Field | Default | When to bump |

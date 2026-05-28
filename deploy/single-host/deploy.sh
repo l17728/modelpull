@@ -56,9 +56,9 @@ if [ "$REBUILD" -eq 1 ]; then
 fi
 docker compose up -d --build
 
-echo "[deploy] step 4: wait for controller /healthz to return 200"
+echo "[deploy] step 4: wait for controller /health/ready to return 200"
 ATTEMPTS=0
-until docker compose exec -T controller curl -fsS http://localhost:8001/healthz >/dev/null 2>&1; do
+until docker compose exec -T controller curl -fsS http://localhost:8001/health/ready >/dev/null 2>&1; do
   ATTEMPTS=$((ATTEMPTS+1))
   if [ "$ATTEMPTS" -gt 60 ]; then
     echo "[deploy] controller didn't become healthy in 5 min; check logs:"
@@ -76,7 +76,7 @@ echo
 echo "==================================================================="
 echo "modelpull v2.1 is up."
 echo
-echo "  Controller (loopback):  http://127.0.0.1:8001/healthz"
+echo "  Controller (loopback):  http://127.0.0.1:8001/health/ready"
 echo "  Frontend (loopback):    http://127.0.0.1:5173/"
 echo "  MinIO console:          http://127.0.0.1:9001/"
 echo
