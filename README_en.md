@@ -2,36 +2,33 @@
 
 [中文](./README.md) | English
 
-> **📐 Design only — no executable code yet**
-> Looking for **design reviewers**, not users. Code work starts at [ROADMAP](./ROADMAP.md) Phase 1.
+> **✅ Shipped & runnable** — v2.0 (Phase 1/2/3) + **all 15 v2.1 sprints** are implemented and merged to main, tagged **v2.1.0-rc.1** (2026-05-27, 1053 backend + 219 frontend tests, CI green).
+> Run it locally: controller + executor + object storage, and download real HF models via CLI/SDK.
+> Get started: [**`docs/getting-started.md`**](./docs/getting-started.md).
 
 [![CI](https://github.com/l17728/modelpull/actions/workflows/ci.yml/badge.svg)](https://github.com/l17728/modelpull/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-![Status](https://img.shields.io/badge/status-design--only-orange)
-![Version](https://img.shields.io/badge/spec-v2.0.13-blue)
-![Code](https://img.shields.io/badge/code-not--started-red)
+![Status](https://img.shields.io/badge/status-v2.1.0--rc.1%20shipped-brightgreen)
+![Version](https://img.shields.io/badge/spec-v2.1-blue)
+![Tests](https://img.shields.io/badge/tests-1053%20backend%20%2B%20219%20frontend-brightgreen)
 [![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
-⛔ **You cannot download models with this repo yet.** If you came looking for a working
-distributed HF download tool, this isn't it.
+✅ A **distributed HuggingFace model-weight download system**: controller orchestration, parallel multi-executor downloads, multi-source acceleration, multi-tenant isolation, incremental dedup — writing to S3-compatible object storage.
 
-✅ If you're an **architect / distributed systems enthusiast / SRE / reviewer**, welcome.
-
-📚 **Design output** (~28000 lines / 14 chapters / OpenAPI / Helm + Prometheus + Grafana / 6 runbooks):
+📚 **Design authority** (~28000 lines / 14 chapters / OpenAPI / Helm + Prometheus + Grafana / 6 runbooks):
 - Entry point: [`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md)
-- Code work starts after v2.0 GA — see [ROADMAP](./ROADMAP.md)
 
 📌 **Out of scope**: single-machine downloads of small models — [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) already handles that.
 
-📌 **In scope**: distributed multi-node / multi-source acceleration / multi-tenancy / corporate intranet deployment / embedded AI Copilot chat / online operations-research optimization.
+📌 **In scope**: distributed multi-node / multi-source acceleration / multi-tenancy / incremental dedup / CLI+SDK / embedded AI Copilot (v2.0) / adaptive OR optimization + cross-region replication + SLA tiers + corporate intranet deployment (**v2.1 shipped**).
 
 ---
 
 ## ⚡ 3 things you can do right now
 
-1. **Read the INDEX** to decide if you want to dive in: [`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md) (5 role-based reading paths)
-2. **File a design review issue**: [template](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — most valuable contribution at this stage
-3. **Star + Watch**: get notified when Phase 1 starts
+1. **Run it locally**: follow [`docs/getting-started.md`](./docs/getting-started.md) to bring up controller + executor + minio, then `dlw submit` a real model
+2. **Read the architecture**: [`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md) (14 chapters / 5 role-based reading paths)
+3. **File an issue**: [design review template](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — architecture/protocol/correctness feedback still welcome
 
 ---
 
@@ -111,13 +108,20 @@ flowchart LR
 
 ```
 modelpull/
-├── docs/v2.0/                    Design docs (current authoritative)
-│   ├── 00-INDEX.md               Navigation + role-based reading paths
-│   ├── 01-..14-...               14 chapters
-├── docs/operator/                Day-zero / OIDC / mTLS bootstrap
-├── docs/getting-started.md       What to do at this stage
-├── api/openapi.yaml              OpenAPI 3.1 spec (1900+ lines)
-├── deploy/                       Helm + Prometheus + Grafana + 6 runbook scripts
+├── src/dlw/                      👈 implementation (shipped)
+│   ├── main.py                   FastAPI app + leader-gated lifespan
+│   ├── api/ auth/ authz/ db/     REST + system-JWT/OIDC + mTLS CA + casbin + SQLAlchemy
+│   ├── services/                 scheduler / multi-source / dedup / recovery / quota / leader
+│   │                             + v2.1: replication / optimizer / replan / credential_pool / reverse_ws
+│   ├── sources/ executor/        SourceDriver + NameResolver · runner / client / downloader / cli
+│   └── sdk/ cli/                 Python SDK (sync+async) · dlw CLI
+├── tests/                        1053 backend tests (api/db/services/e2e/sdk/cli/integration/...)
+├── frontend/                     Vue3 SPA (219 unit tests)
+├── docs/v2.0/                    Design authority — 00-INDEX.md + 14 chapters
+├── docs/operator/                Day-zero / OIDC / mTLS / deployment / load-test / chaos runbooks
+├── docs/getting-started.md       User manual (install / deploy / use)
+├── api/openapi.yaml              OpenAPI 3.1 spec
+├── deploy/                       Helm + Prometheus + Grafana + 6 runbooks + loadtest + single-host compose
 ├── tools/                        CI invariant lint (Python)
 └── docs/archive/                 v1.x history (superseded)
 ```
@@ -142,7 +146,9 @@ modelpull/
 
 ---
 
-## Key features (designed, not yet implemented)
+## Key features
+
+> Legend: unmarked = **✅ shipped in v2.0** (Phase 1/2/3); **(v2.1)** = **✅ shipped in v2.1** (15 sprints, v2.1.0-rc.1).
 
 ### 🚀 Multi-source orchestration
 Built-in drivers: HuggingFace · hf-mirror.com · ModelScope · WiseModel · OpenCSG · self-hosted S3 mirror.
@@ -161,9 +167,9 @@ Built-in drivers: HuggingFace · hf-mirror.com · ModelScope · WiseModel · Ope
 - Audit log with chained hash (tamper-evident) + WORM export
 
 ### 📊 Production-ready ops
-- 4 SLO/SLI definitions
-- 32 Prometheus alerts (P0/P1/P2 with hysteresis + inhibit_rules)
-- 19 executable runbook scripts
+- 4 core SLI/SLO definitions
+- 20+ Prometheus alerts (P0/P1/P2 with hysteresis + inhibit_rules)
+- 6 executable runbook scripts (+ v2.1 chaos-drill plan)
 - Active/Standby Controller (RTO ≤ 10min, RPO ≤ 15min)
 - Chaos / GameDay drill plan
 
@@ -181,58 +187,64 @@ Built-in drivers: HuggingFace · hf-mirror.com · ModelScope · WiseModel · Ope
 - Tool bridge: **Skills bridge** (no MCP server) — 18 tools (11 read + 7 write) fed to the LLM via a generated manifest; the LLM picks the right tool from the user's question and shells out to `dlw` CLI or curl. Writes require an in-UI confirmation card; everything audit-logged; full decision chain (thinking + tool_call + tool_result) shown chronologically above the reply.
 - Example queries: "what's the latest deepseek on Hugging Face?" / "download deepseek-ai/DeepSeek-R1" / "why did task abcd-1234 fail?"
 
-### 📐 Adaptive download optimization (v2.1)
-- Formalized as: `minimize makespan + α × switch_cost`
-- Continuous online decisions (30s tick + event-triggered)
+### 📐 Adaptive download optimization (v2.1 ✅ shipped)
+- Chunk-throughput sampler feeds an LPT + local-swap optimizer (zero-dependency heuristic; highspy/MILP path isolated)
+- Online replan loop with shadow + apply dual mode (two feature flags, default off for safe rollout)
 - **Sub-chunking** of slow large files via S3 multipart, no cross-node FS access needed
-- Hysteresis (CUSUM) prevents thrashing; already-downloaded bytes preserved unless they become bottleneck
+- 2 Prometheus metrics (solve-duration histogram + replan-moves counter)
 
-### 🏢 Corporate intranet support (v2.1)
-- **Reverse control channel**: executor opens persistent WSS outbound (passes through corp proxy); controller pushes commands sub-second
-- **Rate-limit dimension probing**: auto-detect per-connection / per-IP / per-user
-- **Local credential pool**: secrets never leave executor; controller knows aliases only
-- **Live Console**: admin real-time log streaming UI
+### 🏢 Corporate intranet support (v2.1 ✅ shipped)
+- **Reverse control channel**: executor opens persistent WSS outbound (passes through corp proxy); controller pushes commands sub-second (at-least-once + reconnect-resend)
+- **Local credential pool**: Fernet envelope encryption with hot key reload; secrets never leave executor; controller knows aliases only
+- **Live Console**: admin real-time command (whitelisted status/drain/restart) + session listing
+
+### 🎚 SLA tiers + 🌐 cross-region replication + 🗑 physical GC (v2.1 ✅ shipped)
+- **SLA tiers** (`critical`/`standard`/`bulk`): weighted scheduling + admission control + Settings UI
+- **Cross-region replication**: `replication_jobs` + streaming worker (sha verify + retry + bandwidth cap) + `/replication` UI + AI tool + Prometheus/Grafana
+- **Physical GC + LRU eviction**: real object-store byte deletion on top of v2.0 refcount tombstones + `/admin/gc` REST (flag-gated)
 
 ---
 
 ## Status
 
-✅ **Done**:
-- 28000+ lines of design + deployment artifacts
-- Complete OpenAPI 3.1 spec
-- 3 rounds of multi-agent review; ~150 issues fixed across 6 PRs
-- 4-Phase 15-week implementation roadmap (P90 18-19 weeks)
-- v1.x → v2.0 data migration plan
-- Helm chart + Prometheus alerts + Grafana dashboards + 7 runbook scripts
-- CI invariant lint with 9 unit tests
+✅ **Shipped & merged (v2.0 Phase 1/2/3)**:
+- **Phase 1** foundation: FastAPI controller + PG schema + scheduler/state machine + real HF→S3 multipart download (PR #1–#6)
+- **Phase 2** distributed correctness: fence/recovery, chunk downloader, cancel/paused, mTLS + executor-JWT + heartbeat HMAC, HF reverse-proxy, active/standby controller (PR #7–#14)
+- **Phase 3** platform: multi-tenancy (OIDC/RBAC/quota/tenant isolation), multi-source (probing + LPT + chunk routing + blacklist), incremental download + global dedup (refcount/GC), `dlw` CLI + Python SDK sync/async (PR #15–#18)
+- Complete OpenAPI 3.1 spec, Helm chart, Prometheus alerts, Grafana dashboards, 6 runbook scripts
 
-🚧 **Not started**:
-- Backend code (Python + FastAPI + SQLAlchemy)
-- Frontend code (Vue 3 + Pinia + Element Plus)
-- CLI / Python SDK implementation
-- E2E tests + chaos drill execution
+✅ **Shipped & merged (v2.1, 15 sprints → v2.1.0-rc.1, 2026-05-27)**:
+- **SLA tiers** (S1), **Physical GC + LRU** (S3), **cross-region replication** (S4–S6)
+- **adaptive OR optimization** (S7–S9): sampler + optimizer + shadow/apply online replan (flag-gated)
+- **corporate intranet** (S10–S13): reverse WSS + RPC dispatch + credential pool envelope encryption + Live Console
+- **cross-feature integration** (S14, 12 scenarios) + **production-deploy artifacts** (S15: Locust 7-day load test + chaos drills)
+- **1053 backend + 219 frontend tests green, CI green throughout**
+
+🚧 **Remaining for GA (operational only, no code)**:
+- 7-day Locust staging run (`deploy/loadtest/`) with all 4 acceptance gates met
+- 4 chaos drills (`deploy/runbooks/chaos-drill.md`) repeated green
+- Fill `docs/operator/sla-slo.md` § 3 capacity baseline with measured numbers → then tag **v2.1.0 GA**
 
 ---
 
 ## Roadmap
 
-See [ROADMAP.md](./ROADMAP.md) for current phase status.
-
-| Version | Content |
-|---------|---------|
-| **v2.0** (design complete) | Single-tenant → distributed → multi-tenant + multi-source → production hardening (4 phases / 15 weeks) |
-| v2.1 | **adaptive optimization** + **enterprise intranet** + cross-region replication + SLA tiers + offline export bundle |
-| v2.2+ | Active-active controller / federated cross-cluster / PRC self-hosted LLM / Sigstore verification / model online quantization |
+| Version | Content | Status |
+|---------|---------|--------|
+| **v2.0** | Single-tenant → distributed correctness → multi-tenant + multi-source → incremental dedup → CLI/SDK | ✅ **shipped & merged** (Phase 1/2/3, PR #1–#18) |
+| **v2.1** | SLA tiers + Physical GC/LRU + cross-region replication + adaptive OR optimization + corporate intranet (reverse WSS / credential pool / Live Console) | ✅ **shipped & merged** (15 sprints → **v2.1.0-rc.1**; GA pending 7-day staging baseline) |
+| v2.2 | Active-active controller + Sigstore verification + model online quantization + BLAKE3 streaming hash | 📐 design |
+| v2.3 | Multi-controller cluster (sharded by tenant) | 📐 design |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). At this stage the most valuable contribution is **design review**:
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Architecture / protocol / invariant review is always welcome:
 
 - 🐛 [Bug Report](https://github.com/l17728/modelpull/issues/new?template=bug_report.yml)
 - ✨ [Feature Request](https://github.com/l17728/modelpull/issues/new?template=feature_request.yml)
-- 🏛 [Design Review](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — **most valuable now**
+- 🏛 [Design Review](https://github.com/l17728/modelpull/issues/new?template=design_review.yml)
 
 Discussions: [GitHub Discussions](https://github.com/l17728/modelpull/discussions)
 

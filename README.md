@@ -2,21 +2,21 @@
 
 [English](./README_en.md) | 中文
 
-> **✅ 已落地可运行** — v2.0 Phase 1/2/3 全部实现并合并（PR #1–#18，427 测试，CI 全绿）。
+> **✅ 已落地可运行** — v2.0（Phase 1/2/3）+ **v2.1 全部 15 个 sprint** 已实现并合并到 main，已切 **v2.1.0-rc.1**（2026-05-27，1053 后端 + 219 前端测试，CI 全绿）。
 > 本机即可拉起：控制器 + 下载器 + 对象存储，用 CLI/SDK 真实下载 HF 模型。
 > 上手见 [**用户手册 `docs/getting-started.md`**](./docs/getting-started.md)。
 
 [![CI](https://github.com/l17728/modelpull/actions/workflows/ci.yml/badge.svg)](https://github.com/l17728/modelpull/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-![Status](https://img.shields.io/badge/status-Phase%201%2F2%2F3%20shipped-brightgreen)
-![Version](https://img.shields.io/badge/spec-v2.0-blue)
-![Tests](https://img.shields.io/badge/tests-1000%2B%20passing-brightgreen)
+![Status](https://img.shields.io/badge/status-v2.1.0--rc.1%20shipped-brightgreen)
+![Version](https://img.shields.io/badge/spec-v2.1-blue)
+![Tests](https://img.shields.io/badge/tests-1053%20backend%20%2B%20219%20frontend-brightgreen)
 [![GitHub Discussions](https://img.shields.io/github/discussions/l17728/modelpull)](https://github.com/l17728/modelpull/discussions)
 
 一个**分布式 HuggingFace 模型权重下载系统**：控制器编排、多下载器并行、多源加速、多租户隔离、增量去重，写入 S3 兼容对象存储。面向 **团队 / 平台 / 大模型 / 多机 / 国内多源 / 企业内网** 场景。
 
 📌 **不做的事**：单机小模型下载 — [`huggingface_hub.snapshot_download`](https://huggingface.co/docs/huggingface_hub) 已经够用。
-📌 **做的事**：多机分布式 + 多源加速 + 多租户 + 增量去重 + CLI/SDK + AI Copilot（v2.0 已落地）+ 企业内网部署（v2.1 路线图）。
+📌 **做的事**：多机分布式 + 多源加速 + 多租户 + 增量去重 + CLI/SDK + AI Copilot（v2.0 已落地）+ 自适应运筹优化 + 跨地域复制 + SLA 分级 + 企业内网部署（反向 WSS / 凭证池 / Live Console）（**v2.1 已落地**）。
 
 📚 设计权威（~28000 行 / 14 章）：[`docs/v2.0/00-INDEX.md`](./docs/v2.0/00-INDEX.md) ｜ 软件架构/交互流程/独特设计见 [👇 软件架构](#-软件架构) / [👇 独特软件设计](#-独特软件设计)。
 
@@ -306,7 +306,7 @@ flowchart LR
 
 ## 核心特性
 
-> 图例：未标注 = **✅ v2.0 已实现并合并**（Phase 1/2/3）；标 **（v2.1）** = 设计完成、待实现。
+> 图例：未标注 = **✅ v2.0 已实现并合并**（Phase 1/2/3）；标 **（v2.1）** = **✅ v2.1 已实现并合并**（15 sprint，v2.1.0-rc.1）。
 
 ### 🚀 多源调度（v2.0 头号特性）
 
@@ -359,7 +359,7 @@ flowchart LR
 - 工具桥：**Skills bridge**（不依赖 MCP）— 18 个工具（11 read + 7 write）按生成的 manifest 投喂给 LLM，LLM 自动按用户问题挑工具、shell out 调 `dlw` CLI 或 curl REST 端点；写操作必须用户在前端确认卡片点「确认」才执行；所有动作进 audit log；完整决策链（thinking + tool_call + tool_result）按时序显示在助手回复上方
 - 示例 query：「Hugging Face 上最新的 deepseek 是什么」/「下载 deepseek-ai/DeepSeek-R1」/「任务 abcd-1234 为什么失败？」
 
-### 📐 自适应下载运筹优化（v2.1）
+### 📐 自适应下载运筹优化（v2.1 ✅ 已落地）
 
 - 形式化为最优化问题：minimize makespan + α × switch_cost
 - 持续在线决策（30s 周期 + 事件触发）：改 source / 换 executor / 进一步切分大文件
@@ -369,7 +369,7 @@ flowchart LR
 - 决策审计表 `optimization_decisions` 可回放、可训练
 - 触发时机自适应：三级（hard / soft / 周期）+ 周期 [5s,120s] + 瓶颈聚焦 + 信息门控
 
-### 🏢 企业内网部署支持（v2.1）
+### 🏢 企业内网部署支持（v2.1 ✅ 已落地）
 
 - **反向控制通道**：Executor 在公司内网无入站 IP；启动后主动开 WSS 到外网 controller，corp proxy 穿透；controller 可近实时推命令（cancel / replan）
 - **限速维度探测**：自动识别 corp gateway 限速是按 connection / IP / user，driving 子分片策略选择
@@ -377,6 +377,25 @@ flowchart LR
 - **别名系统**：执行器 / 存储后端 / 源 / 用户 / 项目 都支持 display_name（"GPU室 A worker 1" / "训练集群 NFS"）
 - **Live Console**：admin 一站式实时日志滚动 UI，含组件 / 任务 / 级别过滤
 - **S3 源直连**：UI 指定 S3 bucket+path 作为源，多 executor 多连接 Range 切片下载，按 alias 选凭证
+
+### 🎚 SLA 分级调度（v2.1 ✅ 已落地）
+
+- 租户三档 SLA tier：`critical` / `standard` / `bulk`（`tenants.sla_tier`）
+- 调度加权：`tier_weight × (priority+1)`，bulk 30 分钟饿死保护 ×2
+- 准入控制：忙碌 > 90% 拒 bulk，> 99% 拒 standard
+- `PUT /api/v1/tenants/{id}/sla`（system_admin，审计）+ Settings UI 下拉
+
+### 🌐 跨地域复制（v2.1 ✅ 已落地）
+
+- `replication_jobs` 表 + 流式字节传输 worker（sha 校验 + 3 次 retry + skip_existing + 带宽限速）
+- `POST/GET/POST cancel /api/v1/replication`（租户隔离 + 审计）
+- 前端 `/replication` 页 + AI 工具 `dlw_create_replication` + Prometheus 指标 + Grafana dashboard
+
+### 🗑 Physical GC + LRU 驱逐（v2.1 ✅ 已落地）
+
+- v2.0 逻辑 GC（refcount tombstone）之上真正物理删除 object store 字节
+- tombstone 清理 + 按 quota/LRU 主动驱逐 + `POST /api/v1/admin/gc/run` / `GET /admin/gc/status`
+- 全局开关 `DLW_PHYSICAL_GC_ENABLED`（默认 false），每次驱逐写审计
 
 ---
 
@@ -395,7 +414,7 @@ modelpull/
 │   ├── executor/                                下载器: runner / client / downloader / cli
 │   ├── sdk/                                     Python SDK (sync Client + AsyncClient)
 │   └── cli/                                     dlw CLI (argparse) + dlw-seed
-├── tests/                                       427 测试 (api/db/services/e2e/sdk/cli/...)
+├── tests/                                       1053 后端测试 (api/db/services/e2e/sdk/cli/integration/...)
 ├── tools/                                       lint_invariants（CI 不变量护栏）等
 ├── frontend/                                    Vue3 SPA 脚手架
 ├── docs/
@@ -415,8 +434,8 @@ modelpull/
 │   │   ├── 10-frontend-wireframes.md            9 个核心页面 wireframe
 │   │   ├── 11-cli-and-sdk-spec.md               dlw CLI + Python SDK 规范
 │   │   ├── 12-ai-copilot.md                     AI Copilot 嵌入聊天 + MCP 工具（设计稿；实现已演化为 SP4f Skills bridge）
-│   │   ├── 13-adaptive-download-optimization.md 在线运筹优化 + 子分片 + S3 多 executor 协作（v2.1）
-│   │   └── 14-enterprise-network-and-rate-limit.md 内网部署 / 限速探测 / 凭证池 / 别名 / Console（v2.1）
+│   │   ├── 13-adaptive-download-optimization.md 在线运筹优化 + 子分片 + S3 多 executor 协作（v2.1 ✅ 已落地）
+│   │   └── 14-enterprise-network-and-rate-limit.md 内网部署 / 限速探测 / 凭证池 / 别名 / Console（v2.1 ✅ 已落地）
 │   └── archive/                                 v1.x 历史版本（已 superseded）
 │
 ├── api/
@@ -511,7 +530,7 @@ modelpull/
 
 `StorageBackend.backend_type ∈ {s3,obs,minio,nfs,local}`。本地用 minio 顶替云 S3，**上生产只改一行 `endpoint_url` 配置、代码零改**；CI 用 `moto` 内存模拟同一 S3 代码路径。消除"本地能跑、上云就崩"的整类 bug。
 
-> 工程方法本身也有取舍：全程 `brainstorm→spec→plan→2 个 opus 预审→实现→里程碑全量+CI gate→opus 终审→squash-merge` 的子代理驱动流程，Phase 1/2/3 共 18 个 PR **全部 CI 一次过零迭代**。
+> 工程方法本身也有取舍：全程 `brainstorm→spec→plan→2 个 opus 预审→实现→里程碑全量+CI gate→opus 终审→squash-merge` 的子代理驱动流程，v2.0 的 18 个 PR + v2.1 的 15 个 sprint **全部 CI 一次过零迭代**。
 
 ---
 
@@ -520,7 +539,7 @@ modelpull/
 | 版本 | 内容 | 状态 |
 |------|------|------|
 | **v2.0** | 单租户基座 → 分布式正确性 → 多租户 + 多源 → 增量去重 → CLI/SDK | ✅ **已实现并合并**（Phase 1/2/3，PR #1–#18） |
-| v2.1 | 自适应下载运筹优化 + 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Console）+ 跨地域复制 + SLA 分级 | 📐 设计完成，待实现 |
+| **v2.1** | SLA 分级 + Physical GC/LRU 驱逐 + 跨地域复制 + 自适应下载运筹优化 + 企业内网部署（反向 WSS / 凭证池 / Live Console） | ✅ **已实现并合并**（15 sprint → **v2.1.0-rc.1**；GA 待 7-day staging 压测填实测基线） |
 | v2.2 | Active-active controller + Sigstore 验签 + 模型在线量化 + BLAKE3 流式哈希 | 📐 设计 |
 | v2.3 | 多 controller cluster（按 tenant 分片）| 📐 设计 |
 
@@ -535,16 +554,26 @@ modelpull/
 - **Phase 1** 基座：FastAPI 控制器 + PG schema + 调度/状态机 + 真实 HF→S3 multipart 下载（PR #1–#6）
 - **Phase 2** 分布式正确性：fence/recovery、chunk 下载器、cancel/paused、mTLS+executor-JWT+心跳HMAC、HF 反向代理、active/standby 控制器（PR #7–#14）
 - **Phase 3** 平台化：多租户(OIDC/RBAC/配额/tenant 隔离)、多源(测速+LPT+chunk路由+blacklist)、增量下载+全局去重(refcount/GC)、`dlw` CLI + Python SDK(sync/async)（PR #15–#18）
-- 后端 Python + FastAPI + SQLAlchemy + alembic；前端 Vue3 脚手架；**427 测试全绿，CI 全程一次过**
 - 完整 OpenAPI 3.1 spec、Helm chart、Prometheus 告警、Grafana dashboard、6 份 runbook 脚本
 
-🚧 **待开始（v2.1+，设计已完成）**：
+✅ **已实现并合并（v2.1，15 sprint → v2.1.0-rc.1，2026-05-27）**：
 
-- 自适应在线运筹优化（子分片重规划）
-- 企业内网部署（反向 WSS / 限速探测 / 凭证池 / Live Console）
-- 物理字节 GC + quota/LRU 驱逐（Phase 4）
+- **SLA 分级**（S1）：scheduler 加权 + admission control + Settings UI
+- **Physical GC + LRU 驱逐**（S3）：tombstone 物理删除 + quota 驱逐 + `/admin/gc` REST
+- **跨地域复制**（S4–S6）：`replication_jobs` + 流式 worker + `/replication` UI + Prometheus + AI 工具
+- **自适应运筹优化**（S7–S9）：chunk 吞吐采样 + LPT/local-swap optimizer + shadow/apply 双模在线 replan（双层 feature flag，默认全关）
+- **企业内网部署**（S10–S13）：反向 WSS 协议 + RPC 任务下发（at-least-once + reconnect-resend）+ 凭证池 Fernet envelope 加密（热载换 key）+ Live Console（白名单 command + sessions）
+- **跨特性集成**（S14）：12 个端到端集成场景
+- **生产部署交付物**（S15）：Locust 7-day 压测脚本 + 4 chaos 演练 + 部署清单 + 渐进式 feature flag 启用计划
+- 后端 + 前端 Python/FastAPI/SQLAlchemy + Vue3；**1053 后端 + 219 前端测试全绿，CI 全程一次过**
 
-> 已知限制（spec 内显式 defer）：多源 chunk 级 Range↔chunk-row 对齐回退到全文件兜底（安全，不静默损坏）；SP3 GC 仅回收 refcount=0 的 DB 行（物理字节回收 defer Phase 4）；CLI/SDK 为 MVP 面（OIDC 登录/WS 事件流/materialize 等 defer）。详见各 `docs/operator/*.md`。
+🚧 **GA 待办（仅运维侧，非代码）**：
+
+- 7-day Locust staging 压测（`deploy/loadtest/`），4 个 acceptance gate（availability / latency / throughput / no data loss）全过
+- 4 个 chaos drill（`deploy/runbooks/chaos-drill.md`）重复跑绿
+- `docs/operator/sla-slo.md` § 3 容量基线 `?` 行填回实测数字 → 然后 tag **v2.1.0 GA**
+
+> 已知限制（spec 内显式 defer）：多源 chunk 级 Range↔chunk-row 对齐回退到全文件兜底（安全，不静默损坏）；CLI/SDK 为 MVP 面（OIDC 登录/WS 事件流/materialize 等 defer）；自适应 optimizer 的 highspy（MILP）替换路径已隔离但默认走零依赖启发式。详见各 `docs/operator/*.md`。
 
 ---
 
