@@ -1,64 +1,66 @@
 # Local Development Setup
 
 > 用途：让贡献者第一天就能 self-serve 跑通本地环境。
-> Phase 1 启动后会扩展为完整的 backend + frontend dev 环境；现在只覆盖**当前可跑的 CI 工具链**。
+> 覆盖完整的 backend + frontend dev 栈（v2.0 + v2.1 已实现）以及 CI 工具链。
 
 ---
 
-## 1. 当前能本地跑的（设计阶段）
+## 1. 仓库现有可执行物
 
-仓库现有可执行物：
-
-| 工具 | 用途 | 依赖 |
+| 区域 | 路径 | 依赖 |
 |------|------|------|
-| `tools/lint_invariants.py` | 校验 46 不变量索引一致性 + 跨文档引用 | Python ≥ 3.9 |
-| `tools/test_lint_invariants.py` | 9 个 pytest unit test for 上面的 lint | pytest |
-| `deploy/runbooks/scripts/*.sh` | 7 个 ops runbook 脚本（无法本地运行真任务，只能 review 代码） | bash, optional psql / kubectl |
-| `api/openapi.yaml` | OpenAPI 3.1 spec | `npx @redocly/cli` 或 swagger-cli |
-| `deploy/helm/` | Helm chart | `helm` |
-| `deploy/prometheus/`, `deploy/grafana/` | 告警规则 + dashboard JSON | (review only) |
-
-后端代码（FastAPI / SQLAlchemy / Vue3）等 Phase 1 启动后再加。
+| 后端 (FastAPI + SQLAlchemy + alembic) | `src/dlw/` | Python ≥ 3.12, uv, PostgreSQL 18 |
+| 前端 (Vue3 SPA) | `frontend/` | Node ≥ 20, pnpm |
+| 测试 (1053 后端 + 219 前端) | `tests/`, `frontend/src/**/*.spec.ts` | pytest, vitest |
+| 不变量护栏 | `tools/lint_invariants.py` (+ unit tests) | Python |
+| OpenAPI 3.1 spec | `api/openapi.yaml` | `npx @redocly/cli` 或 swagger-cli |
+| Helm chart + 告警 + dashboard | `deploy/helm/`, `deploy/prometheus/`, `deploy/grafana/` | helm |
+| 单机 docker compose 部署 | `deploy/single-host/` | docker compose |
 
 ---
 
-## 2. 5 分钟本地 setup
+## 2. 本地 dev 栈 setup
 
 ```bash
-# 1. clone
-git clone https://github.com/l17728/modelpull
-cd modelpull
+# 1. clone + Python 工具链
+git clone https://github.com/l17728/modelpull && cd modelpull
+python --version      # 3.12+
+pip install uv
 
-# 2. Python 工具链（3.9+）
-python3 --version
-pip install pytest
+# 2. 后端依赖 + DB schema（PostgreSQL 18 跑在 :5433）
+uv sync
+DLW_DB_HOST=localhost DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw \
+  uv run alembic upgrade head
 
-# 3. Node（用于 Helm / OpenAPI lint，可选）
-node --version    # 18+
+# 3. 起 controller（dev 模式，最小环境变量）
+DLW_AUTH_DEV_MODE=true \
+DLW_SYSTEM_JWT_SECRET=dev-secret-32-bytes-long-padding! \
+DLW_ADMIN_USERNAME=admin DLW_ADMIN_INITIAL_PASSWORD=admin1234 \
+DLW_DB_HOST=localhost DLW_DB_PORT=5433 DLW_DB_USER=postgres DLW_DB_NAME=dlw \
+  uv run uvicorn dlw.main:app --port 8001 --host 127.0.0.1
 
-# 4. 跑 invariant lint（最小验证仓库未坏）
-python tools/lint_invariants.py
-# 期望：OK: 46 invariants declared, 46 indexed in 01 §7, contiguous
+# 4. 起前端（另一个终端；vite proxy 默认指向 :8001）
+cd frontend && pnpm install && pnpm dev   # http://localhost:5173
 
-# 5. 跑 lint 工具自身的单测
-python -m pytest tools/test_lint_invariants.py -v
-# 期望：9 passed
+# 5. 跑测试
+uv run pytest                              # 后端全套
+cd frontend && pnpm test                   # 前端 vitest
 
-# 6. (可选) Helm chart lint
-helm version    # 3.14+
-helm dependency update deploy/helm/  # 拉 PG / Prometheus / Grafana 子 chart
+# 6. 不变量 lint + 自身单测
+python tools/lint_invariants.py            # OK: 46 invariants ... contiguous
+uv run pytest tools/test_lint_invariants.py -v
+
+# 7. (可选) Helm / OpenAPI lint
 helm lint deploy/helm/
-helm template dlw deploy/helm/ > /tmp/rendered.yaml
-# 检查 rendered.yaml 是否符合预期
-
-# 7. (可选) OpenAPI 浏览
 npx @redocly/cli preview-docs api/openapi.yaml
-# 浏览器自动打开 http://localhost:8080
 ```
+
+> 完整测试人员手册（含 v2.1 全部特性的逐项验证步骤）见 [`docs/operator/qa-test-plan.md`](../operator/qa-test-plan.md)，
+> UI 内「📚 文档」抽屉也能直接打开。
 
 ---
 
-## 3. 你的第一个 PR（design 阶段）
+## 3. 你的第一个 PR
 
 最容易上手的 PR 类型：
 
@@ -88,32 +90,17 @@ npx @redocly/cli preview-docs api/openapi.yaml
 
 ---
 
-## 4. dev 环境（Phase 1 启动后扩展）
+## 4. 单机一键栈（docker compose）
 
-预计 Phase 1 Week 1-2 提供以下：
-
-```bash
-# (Phase 1 后) 本地开发栈
-docker-compose -f deploy/dev/docker-compose.yml up -d
-# 起 PG + MinIO + wiremock(HF mock) + controller + 1 executor
-```
+不想手工起各组件时，用单机 compose bundle 一次拉起 PG + MinIO + controller + 2 executor + 前端：
 
 ```bash
-# (Phase 1 后) 后端 dev
-cd backend
-uv sync                         # 装依赖
-uv run alembic upgrade head     # DB schema
-uv run uvicorn dlw.main:app --reload
+cd deploy/single-host
+# 按 README 配好 .env（DB 密码 / JWT secret / 可选 AI key），然后：
+docker compose up -d
 ```
 
-```bash
-# (Phase 1 后) 前端 dev
-cd frontend
-pnpm install
-pnpm run dev                    # http://localhost:5173
-```
-
-详细要等 Phase 1 启动。届时本文会更新。
+详见 [`deploy/single-host/README.md`](../../deploy/single-host/README.md)（含国内 VM 镜像源 checklist + 低内存机器先本地 build 前端 dist 的指引）。
 
 ---
 

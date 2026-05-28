@@ -1,8 +1,8 @@
 # modelpull QA 测试清单（测试人员手册）
 
-> 用途：让测试人员**按图索骥**完整验证 modelpull v2.0 + 本次 AI Copilot
-> 增量。每个测试包含：前置条件、操作步骤、期望结果、失败时怎么报。
-> 适用版本：v2.0 (Phase 1/2/3/4) + AI Copilot SP4f。
+> 用途：让测试人员**按图索骥**完整验证 modelpull v2.1 全部特性（含 v2.0 基座
+> + AI Copilot + v2.1 五大特性）。每个测试包含：前置条件、操作步骤、期望结果、失败时怎么报。
+> 适用版本：v2.1（Phase 1/2/3/4 + v2.1 全部 Sprint S1–S15）+ AI Copilot SP4f。
 > 估时：完整跑一遍 ~ 1 工作日。
 
 ---
@@ -51,7 +51,7 @@ cd D:/download_weights/frontend && pnpm dev
 | S2 | 数据库连接 | `curl http://127.0.0.1:8001/health/ready` | `{"status":"ready","db":"ok"}` |
 | S3 | 登录 | 浏览器 → admin/admin1234 → 看到 Dashboard | 顶部出现 "租户 1 · system_admin" |
 | S4 | 任务列表 | Dashboard 左侧 "任务" → 看到任务表（即使空） | 不报错，表头正确 |
-| S5 | AI 助手抽屉 | 顶部 "🤖 AI 助手" → 抽屉展开 | 看到「🛠 可用工具」面板默认展开 + 18 个工具 |
+| S5 | AI 助手抽屉 | 顶部 "🤖 AI 助手" → 抽屉展开 | 看到「🛠 可用工具」面板默认展开 + 21 个工具 |
 
 任意失败 → 停止，按 [`runbook-ai-assistant.md`](./runbook-ai-assistant.md) §1 排查层级。
 
@@ -138,7 +138,7 @@ cd D:/download_weights/frontend && pnpm dev
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| AI1 | 工具列表完整 | 打开 AI 抽屉 → 「🛠 可用工具」面板默认展开 | 看到 18 个工具（11 read + 7 write），每个有图标 + 类别 tag + 描述 + 示例 |
+| AI1 | 工具列表完整 | 打开 AI 抽屉 → 「🛠 可用工具」面板默认展开 | 看到 21 个工具（11 read + 10 write），每个有图标 + 类别 tag + 描述 + 示例 |
 | AI2 | 工具优先级提示 | 看面板顶部 intro | 包含"先用领域专用工具…再 web_search…最后回退模型记忆" |
 | AI3 | footnote 警告 | 看面板底部 | 提到 web_search 需要 API key、否则可能产生幻觉 |
 
@@ -173,7 +173,7 @@ cd D:/download_weights/frontend && pnpm dev
 
 | # | 用例 | 步骤 | 期望 |
 |---|------|------|------|
-| AI15 | 文档抽屉打开 | 侧栏底部 "📚 文档" → 抽屉打开 | 左边列表显示 4 个文档（AI 排查、本地认证、SLA、QA 清单），右边 Markdown 渲染 |
+| AI15 | 文档抽屉打开 | 侧栏底部 "📚 文档" → 抽屉打开 | 左边列表显示 6 个文档（AI 排查、本地认证、SLA、QA 清单、v2.1 部署清单、事故复盘模板），右边 Markdown 渲染 |
 | AI16 | 切换文档 | 点列表别的项 | 右边内容切换 |
 | AI17 | 帮助抽屉 | 侧栏底部 "📖 帮助" → 抽屉打开 | 显示 MANUAL.md 内容（不是缓存的老版本） |
 
@@ -386,11 +386,11 @@ tail -20 locust.log
 grep -c "POST /api/v1/tasks .* 5[0-9][0-9]" locust.log
 
 # 看 controller 健康
-curl -s $DLW_BASE_URL/healthz | jq .
+curl -s $DLW_BASE_URL/health/ready | jq .
 ```
 
 如出现以下情况**立即停止**（`kill $(cat locust.pid)`）+ 调查：
-- controller `/healthz` 持续 503 超过 3 分钟
+- controller `/health/ready` 持续 503 超过 3 分钟
 - 任何 endpoint 的 5xx 率 > 1%
 - p95 延迟突然飙到 > 1s 持续 > 10 分钟（非 chaos drill 期间）
 
@@ -400,7 +400,7 @@ curl -s $DLW_BASE_URL/healthz | jq .
 
 | Gate | 测量 | 通过标准 | 失败处理 |
 |------|------|---------|---------|
-| Availability | controller `/healthz` 7 天总宕机 | 0 段连续 > 3 min | 看 Grafana, 找根因 |
+| Availability | controller `/health/ready` 7 天总宕机 | 0 段连续 > 3 min | 看 Grafana, 找根因 |
 | Latency | p95 per-endpoint（按小时分桶） | < 300 ms（除 chaos drill 期间） | 慢查询调查 |
 | Throughput | task-create QPS sustained | ≥ 5（不含 quota 4xx） | 调度器 profiling |
 | Data integrity | 7 天后所有 task 是否都有终态 | 0 行 `running` > 2h | 单独跑 recovery |
@@ -426,7 +426,7 @@ curl -s $DLW_BASE_URL/healthz | jq .
 
 | Drill | 关键指标 | 通过 | 失败响应 |
 |-------|---------|------|---------|
-| 1. PG 拔插 | `/healthz` 5 分钟内恢复 200，无 task 卡 `running` | drill 1 ✅ | 检查 PG 重连配置 |
+| 1. PG 拔插 | `/health/ready` 5 分钟内恢复 200，无 task 卡 `running` | drill 1 ✅ | 检查 PG 重连配置 |
 | 2. 拔 S3 region | 失败 replication job retry_count 触顶 = 3 不无限重试；恢复后手动建的新 job 成功 | drill 2 ✅ | 看 replication_worker 日志 |
 | 3. Kill active controller | 30 秒内 standby promote；任务不报 failed | drill 3 ✅ | 看 leader_election 日志 |
 | 4. Mass executor disconnect | 2 分钟内 sessions list 重新满 | drill 4 ✅ | 看 reverse_ws_registry 日志 |

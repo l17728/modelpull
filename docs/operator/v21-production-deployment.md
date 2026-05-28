@@ -7,7 +7,7 @@ production cutover.
 
 ## Pre-flight (before the deploy window)
 
-- [ ] All 14 sprints of `docs/v2.1-sprint-plan.md` show ✅
+- [ ] All 15 sprints of `docs/v2.1-sprint-plan.md` show ✅
 - [ ] CI is green on `main` for the version being deployed
 - [ ] Every `deploy/runbooks/chaos-drill.md` drill is green on staging
 - [ ] Locust run finished with 0 failed acceptance gates
@@ -54,12 +54,14 @@ PG backup if needed.
    kubectl rollout status deployment/dlw-controller -w
    ```
 
-3. Verify both pods are alive AND only one is `controller_role=active`:
+3. Verify both pods are alive AND exactly one returns 200 on `/health/active`
+   (the active leader; the standby returns 503):
 
    ```bash
    for pod in $(kubectl get pods -l app=dlw-controller -o name); do
-     echo "$pod"
-     kubectl exec $pod -- curl -s localhost:8001/healthz | jq .controller_role
+     code=$(kubectl exec $pod -- curl -s -o /dev/null -w '%{http_code}' \
+       localhost:8001/health/active)
+     echo "$pod -> /health/active: $code"   # expect exactly one 200, rest 503
    done
    ```
 

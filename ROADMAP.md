@@ -5,21 +5,20 @@
 
 ---
 
-## 📊 当前状态：📐 **设计阶段完成 · 代码尚未启动**
+## 📊 当前状态：✅ **v2.0 + v2.1 已实现并合并 · v2.1.0-rc.1**
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ ✅ Round 0 (已完成):  设计文档 v1.0 → v2.0.13                   │
-│                       28000+ 行 / 14 章 / 46 不变量              │
+│ ✅ 设计 (已完成):     28000+ 行 / 14 章 / 46 不变量              │
+│ ✅ Phase 1-3 (已 ship): 基座 + 分布式正确性 + 多租户/多源/CLI   │
+│                       (PR #1–#18，CI 全程一次过)                 │
+│ ✅ AI Copilot (已 ship): opencode 无头 + 21 工具 Skills bridge   │
+│ ✅ v2.1 (已 ship):    SLA 分级 / Physical GC / 跨地域复制 /      │
+│                       自适应运筹优化 / 企业内网 (15 sprint)      │
+│                       → v2.1.0-rc.1 (2026-05-27)                 │
 │                                                                  │
-│ ✅ Round 1-3 (已完成): 3 轮多 agent review；6 PR 修复 ~150 issue │
-│                                                                  │
-│ 🚧 Phase 1 (待启动):  6 周 / 5.5 FTE / 单租户 PoC                │
-│ 🚧 Phase 2:           3 周 / 7.5 FTE / fence + mTLS + 多机       │
-│ 🚧 Phase 3:           3 周 / 8.5 FTE / 多租户 + 多源 + CLI       │
-│ 🚧 Phase 4:           3 周 / 10 FTE / 生产加固 + GA              │
-│                                                                  │
-│ 总计：v2.0 GA = 15 周（P50）/ 18-19 周（P90 risk-adjusted）      │
+│ 🚧 v2.1.0 GA (待运维): 7-day staging 压测 + chaos drill +        │
+│                       sla-slo 容量基线填回，然后 tag GA          │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,7 +104,7 @@
 
 ## 进度追踪
 
-实际进度 → [GitHub Projects](https://github.com/l17728/modelpull/projects)（Phase 1 启动后开放）。
+实际进度 → commit 历史（`feat(v2.1 sprint N)` 系列）+ [`docs/v2.1-sprint-plan.md`](./docs/v2.1-sprint-plan.md) live 进度表。
 
 每个 PR 的 commit 信息含 fix 编号（如 `[review-pr5]` 或 `[review-pr6]`），用于追溯到 reviewer 报告。
 

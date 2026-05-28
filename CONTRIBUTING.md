@@ -2,7 +2,7 @@
 
 感谢你对 **modelpull** 感兴趣！本文档说明在不同阶段如何贡献。
 
-> ⚠️ **当前阶段：设计完成 · 代码未实现**。此阶段最有价值的贡献是**设计 review** 和**文档/规范修订**。代码贡献请等 Phase 1 启动后。
+> ✅ **当前阶段：v2.0 + v2.1 已实现并合并（v2.1.0-rc.1）**。代码已开放贡献——欢迎 bug 修复、测试补强、文档/规范修订，以及对架构 / 不变量 / 协议的 review。提交前请确保本地全套测试 + CI 绿。
 
 ---
 
@@ -13,7 +13,7 @@
 - [设计 Review（当前阶段最重要）](#设计-review当前阶段最重要)
 - [文档 / 规范修订](#文档--规范修订)
 - [部署物料修订](#部署物料修订)
-- [代码贡献（Phase 1+）](#代码贡献phase-1)
+- [代码贡献](#代码贡献)
 - [PR 流程](#pr-流程)
 - [Commit 规范](#commit-规范)
 - [Code of Conduct](#code-of-conduct)
@@ -22,13 +22,13 @@
 
 ## 贡献类型
 
-| 类型 | Issue 模板 | 当前阶段优先级 |
+| 类型 | Issue 模板 | 优先级 |
 |------|----------|--------------|
-| 🏛 设计 review（架构 / 不变量 / 协议） | `Design Review` | ⭐⭐⭐ 最高 |
+| 💻 代码（Python 后端 / Vue 前端 / SDK）：bug 修复 / 测试 / 新特性 | `Bug Report` / `Feature Request` | ⭐⭐⭐ 开放中 |
 | 🐛 文档矛盾 / 规范错误 / 部署物料 bug | `Bug Report` | ⭐⭐ |
-| ✨ 新 feature 提议 | `Feature Request` | ⭐ 进 v2.1+ roadmap |
+| 🏛 设计 review（架构 / 不变量 / 协议） | `Design Review` | ⭐⭐ |
+| ✨ 新 feature 提议 | `Feature Request` | ⭐ 进 v2.2+ roadmap |
 | 💬 提问 / 讨论 | GitHub Discussions | 随时 |
-| 💻 代码（Python 后端 / Vue 前端 / SDK） | （Phase 1 启动后开放） | 暂不接受 |
 
 ---
 
@@ -120,16 +120,15 @@ CI 会跑同样的检查；本地通过更省时间。
 
 ---
 
-## 代码贡献（Phase 1+）
+## 代码贡献
 
-Phase 1 启动后将开放代码贡献。届时本节会更新具体规范，含：
+代码已开放贡献。本地环境搭建见 [`docs/contributor/local-setup.md`](./docs/contributor/local-setup.md)。规范：
 
-- 项目骨架 / 依赖管理（uv / pnpm）
-- 测试覆盖率门槛（详见 [`07-test-plan.md`](./docs/v2.0/07-test-plan.md)）
-- 代码风格（black + ruff + mypy strict / ESLint + Prettier）
-- 不变量必须断言（CI 强制）
-
-预计 Phase 1 启动时间：见 [`08-mvp-roadmap.md`](./docs/v2.0/08-mvp-roadmap.md)。
+- 依赖管理：后端 uv（`uv sync`）、前端 pnpm
+- 测试：后端 `uv run pytest`、前端 `cd frontend && pnpm test`，新代码必须带测试
+- 代码风格：ruff + mypy（后端）/ ESLint `--max-warnings=0` + vue-tsc（前端）
+- 不变量必须断言（`tools/lint_invariants.py`，CI 强制）
+- 提交前本地全套测试 + CI 全绿才会 review
 
 ---
 

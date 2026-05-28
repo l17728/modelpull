@@ -184,7 +184,7 @@ Built-in drivers: HuggingFace · hf-mirror.com · ModelScope · WiseModel · Ope
 ### 🤖 AI Copilot (v2.0 shipped)
 - Embedded chat drawer: natural-language driven (task ops, HF/ModelScope search, quota mgmt…)
 - Backend: **opencode headless only** (modelpull integrates with the opencode CLI; whichever LLM opencode is configured to use is opencode's own concern); stub backend for CI/tests
-- Tool bridge: **Skills bridge** (no MCP server) — 18 tools (11 read + 7 write) fed to the LLM via a generated manifest; the LLM picks the right tool from the user's question and shells out to `dlw` CLI or curl. Writes require an in-UI confirmation card; everything audit-logged; full decision chain (thinking + tool_call + tool_result) shown chronologically above the reply.
+- Tool bridge: **Skills bridge** (no MCP server) — 21 tools (11 read + 10 write) fed to the LLM via a generated manifest; the LLM picks the right tool from the user's question and shells out to `dlw` CLI or curl. Writes require an in-UI confirmation card; everything audit-logged; full decision chain (thinking + tool_call + tool_result) shown chronologically above the reply.
 - Example queries: "what's the latest deepseek on Hugging Face?" / "download deepseek-ai/DeepSeek-R1" / "why did task abcd-1234 fail?"
 
 ### 📐 Adaptive download optimization (v2.1 ✅ shipped)

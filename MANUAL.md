@@ -1,6 +1,6 @@
 # modelpull 用户手册
 
-> 版本：Phase 4 / 2026-05  
+> 版本：v2.1 / 2026-05  
 > 本手册随软件一同部署，AI 助手可直接读取本文件获取帮助内容。
 
 ---
@@ -432,11 +432,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 每次驱逐都写审计日志（action=`physical_gc.evict`），包含对象 ID / 大小 / 原因。
 
-### 跨地域复制（v2.1，REST-only）
+### 跨地域复制（v2.1 ✅ 已落地）
 
-> Sprint 6 前端 UI 上线之前，跨地域复制仅通过 REST 接口可用，建议由管理员或自动化脚本触发。
-
-支持把某个 `storage_object` 复制到另一个 `storage_backend`（典型场景：把上海集群下载好的 model 推到深圳的 S3 桶）。
+支持把某个 `storage_object` 复制到另一个 `storage_backend`（典型场景：把上海集群下载好的 model 推到深圳的 S3 桶）。REST、Web UI（`/replication`）、AI 助手三种入口均可用（见本节末）。
 
 ```bash
 # 创建复制任务（任何认证用户均可，仅限本租户的对象）

@@ -356,7 +356,7 @@ flowchart LR
 
 - 嵌入式聊天抽屉：自然语言驱动 modelpull（任务查询/创建/取消/重试/升级/补丁、HF/ModelScope 模型搜索、租户配额管理…）
 - 后端：**opencode 无头模式**（modelpull 只对接 opencode CLI；opencode 内部用什么 LLM 由 opencode 自己的配置决定）；stub backend 用于 CI/测试
-- 工具桥：**Skills bridge**（不依赖 MCP）— 18 个工具（11 read + 7 write）按生成的 manifest 投喂给 LLM，LLM 自动按用户问题挑工具、shell out 调 `dlw` CLI 或 curl REST 端点；写操作必须用户在前端确认卡片点「确认」才执行；所有动作进 audit log；完整决策链（thinking + tool_call + tool_result）按时序显示在助手回复上方
+- 工具桥：**Skills bridge**（不依赖 MCP）— 21 个工具（11 read + 10 write）按生成的 manifest 投喂给 LLM，LLM 自动按用户问题挑工具、shell out 调 `dlw` CLI 或 curl REST 端点；写操作必须用户在前端确认卡片点「确认」才执行；所有动作进 audit log；完整决策链（thinking + tool_call + tool_result）按时序显示在助手回复上方
 - 示例 query：「Hugging Face 上最新的 deepseek 是什么」/「下载 deepseek-ai/DeepSeek-R1」/「任务 abcd-1234 为什么失败？」
 
 ### 📐 自适应下载运筹优化（v2.1 ✅ 已落地）
@@ -579,17 +579,15 @@ modelpull/
 
 ## 贡献
 
-设计阶段欢迎对架构 / 协议 / 不变量提出 review 意见。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+代码已开放贡献（v2.0 + v2.1 已落地）。欢迎 bug 修复、测试补强、文档/规范修订，以及对架构 / 协议 / 不变量的 review。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)；提交前确保本地全套测试 + CI 绿。
 
-3 种 issue 模板：
+issue 模板：
 
-- 🐛 [Bug Report](https://github.com/l17728/modelpull/issues/new?template=bug_report.yml) — 文档矛盾 / 规范错误 / 部署物料 bug
+- 🐛 [Bug Report](https://github.com/l17728/modelpull/issues/new?template=bug_report.yml) — 代码 / 文档 / 部署物料 bug
 - ✨ [Feature Request](https://github.com/l17728/modelpull/issues/new?template=feature_request.yml) — 新能力提议
-- 🏛 [Design Review](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — **当前阶段最有价值**：从架构 / 分布式 / 安全 / 运维 / 用户价值 5 个视角 review
+- 🏛 [Design Review](https://github.com/l17728/modelpull/issues/new?template=design_review.yml) — 从架构 / 分布式 / 安全 / 运维 / 用户价值 5 个视角 review
 
 讨论：[GitHub Discussions](https://github.com/l17728/modelpull/discussions)
-
-实施开始后将开放代码贡献，遵循 [`07-test-plan.md`](./docs/v2.0/07-test-plan.md) 的覆盖率要求。
 
 ---
 
