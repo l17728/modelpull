@@ -139,8 +139,8 @@ server {
         proxy_set_header   Connection        "upgrade";
         proxy_read_timeout 3600s;
     }
-    location /healthz {
-        proxy_pass         http://127.0.0.1:8001/healthz;
+    location /health/ {
+        proxy_pass         http://127.0.0.1:8001/health/;
     }
     location /metrics {
         # Prometheus scrape; restrict by IP if exposing externally
@@ -164,7 +164,7 @@ catown.cloud {
             header_up X-Forwarded-Proto https
         }
     }
-    handle /healthz {
+    handle /health/* {
         reverse_proxy 127.0.0.1:8001
     }
     handle /metrics {
@@ -204,8 +204,8 @@ After the reverse proxy is in place:
 
 ```bash
 # from your laptop
-curl https://catown.cloud/healthz
-# expect: {"status":"healthy", ...}
+curl https://catown.cloud/health/ready
+# expect: {"status":"ready","db":"ok"}
 ```
 
 Then open `https://catown.cloud/` in a browser, log in with `admin` +
@@ -341,7 +341,7 @@ ship atomically.
     port is unreachable from the public network even without a firewall.
   - PG and MinIO have **no** host port published; only the docker
     network sees them.
-  - Reverse-proxy `/api/*` and `/healthz`, NOT `/metrics`, to the
+  - Reverse-proxy `/api/*` and `/health/`, NOT `/metrics`, to the
     public internet — Prometheus scrape should come from inside the box.
 
 ## What's NOT included
@@ -362,7 +362,7 @@ ship atomically.
 | Symptom | First thing to check |
 |---------|---------------------|
 | `bash deploy.sh` fails on `docker compose build` | Check disk space (`df -h`) and that the source tar landed correctly under `/opt/modelpull/` |
-| Controller `/healthz` 503 | `docker compose logs controller` — usually PG migration didn't run; rerun `docker compose run --rm migrate` |
+| Controller `/health/ready` 503 | `docker compose logs controller` — usually PG migration didn't run; rerun `docker compose run --rm migrate` |
 | Executor not registering | `docker compose logs executor-1` — most common cause is `DLW_ENROLLMENT_TOKEN` mismatch. Run `bootstrap.sh` again to confirm token. |
 | Browser can't reach UI | Reverse-proxy not configured or wrong port. `curl http://127.0.0.1:5173/` on the box should return HTML. |
 | Login returns 500 | Empty `DLW_ADMIN_INITIAL_PASSWORD` in `.env` — re-run `bootstrap.sh` and `docker compose restart controller`. |

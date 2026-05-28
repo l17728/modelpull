@@ -48,7 +48,7 @@ Token usage: every request uses a per-user JWT issued from the
 
 The run is GREEN only if all four hold across the 7-day window:
 
-1. **Availability**: 0 minutes of all-2xx-on-`/healthz` downtime exceeding
+1. **Availability**: 0 minutes of all-2xx-on-`/health/ready` downtime exceeding
    3 minutes (matches the controller's leader-promotion SLA).
 2. **Latency**: per-endpoint p95 < 300 ms on every 1-hour bucket except
    leader-failover events (allow one 60s spike per drill).

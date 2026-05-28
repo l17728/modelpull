@@ -29,7 +29,7 @@ when PG returns.
    ```
 
 2. Within 2 minutes:
-   - `/healthz` returns 503 (DB unreachable)
+   - `/health/ready` returns 503 (DB unreachable)
    - All `POST /tasks` requests return 503; no 5xx body leaks an exception
      trace
    - Existing in-flight downloads pause (executors retry their next report)
@@ -41,7 +41,7 @@ when PG returns.
    ```
 
 4. Within 5 minutes:
-   - `/healthz` returns 200
+   - `/health/ready` returns 200
    - paused downloads resume
    - `/api/v1/admin/reverse-ws/sessions` lists every previously-connected
      executor (reverse-WSS reconnect-wins path from Sprint 10)
@@ -85,7 +85,10 @@ GC must see refcount >= 1 throughout). No succeeded → failed flapping.
 
    ```bash
    kubectl get pods -l app=dlw-controller -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
-   curl $DLW_BASE/healthz   # check controller_role==active
+   # the active leader returns 200 on /health/active; standby returns 503
+   for pod in $(kubectl get pods -l app=dlw-controller -o name); do
+     echo "$pod $(kubectl exec $pod -- curl -s -o /dev/null -w '%{http_code}' localhost:8001/health/active)"
+   done
    ```
 
 2. Kill it:
@@ -95,8 +98,8 @@ GC must see refcount >= 1 throughout). No succeeded → failed flapping.
    ```
 
 3. Within 30 s:
-   - Standby promotes (Grafana `controller_role` panel flips)
-   - `/healthz` on the surviving pod returns `controller_role: active`
+   - Standby promotes (Grafana leader panel flips)
+   - `/health/active` on the surviving pod returns 200 (was 503 as standby)
    - In-flight downloads continue without progress loss (recovery routine
      re-claimed paused subtasks)
 

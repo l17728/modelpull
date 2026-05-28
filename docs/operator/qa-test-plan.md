@@ -9,6 +9,10 @@
 
 ## 0. 前置：环境准备清单
 
+测试前先把环境跑起来——二选一：**A) 本地 dev**（改代码 / 跑单测用）或 **B) 单机 docker 部署到服务器**（贴近生产的端到端测试用）。
+
+### 0.A 本地 dev 环境
+
 测试前确认以下都满足：
 
 | 检查项 | 验证命令 | 期望 |
@@ -40,6 +44,47 @@ cd D:/download_weights/frontend && pnpm dev
 ```
 
 打开 <http://localhost:5173/>，用 `admin` / `admin1234` 登录。
+
+### 0.B 单机 docker 部署（部署到服务器后再测）
+
+要在一台 VM 上跑贴近生产的端到端测试时，用仓库自带的单机 bundle，**别手工拼各组件**。完整步骤见 [`deploy/single-host/README.md`](../../deploy/single-host/README.md)，最小路径：
+
+```bash
+# 本机打包 → scp 到 VM → 解压到 /opt/modelpull → 一键起
+cd /opt/modelpull/deploy/single-host && sudo bash deploy.sh
+# deploy.sh 会：装 docker(如缺) → bootstrap.sh 生成 .env + 打印一次性 admin 密码
+#            → docker compose up -d --build → 等 controller healthy
+```
+
+起来后验证（controller 只绑 `127.0.0.1:8001`，对外走反代或 :5173）：
+
+```bash
+curl -s http://127.0.0.1:8001/health/ready    # 期望 {"status":"ready","db":"ok"}
+curl -s http://127.0.0.1:8001/health/live     # 期望 {"status":"healthy"}
+```
+
+浏览器开 `http://<VM-IP>:5173/`（或你的反代域名），用 `admin` + bootstrap 打印的密码登录。
+
+**国内 VM 部署必知**（不懂这些 build/pull 会卡到超时，是真实踩过的坑）：
+
+| 坑 | 现象 | 应对 |
+|----|------|------|
+| Docker Hub 拉不动 | `docker compose pull` 卡 minio/postgres | `deploy.sh` 自动写 DaoCloud 镜像（`docker.m.daocloud.io`，实测唯一稳的；aliyun 镜像探测 200 但大文件限速 ~2KB/s） |
+| **`uv sync` 巨慢**（构建镜像时） | 卡在 `Downloading botocore` 等 wheel 半天不动 | **换镜像源没用**——`uv.lock` 钉死 `files.pythonhosted.org` 的 wheel URL，`uv sync` 无视 `PIP_INDEX_URL`/`UV_INDEX_URL`，直连 PyPI 被限速。首次 build 在网络好的窗口做、耐心等；只改了少量代码时**别全量 rebuild**，用增量方式（见 README「Day-2 / Upgrades」） |
+| 前端 dist 构建 OOM | 2GB VM 上容器内 `pnpm build` 被 Killed | **本机 `pnpm build` 后 scp dist 上去**（README「Frontend dist」段有命令），容器检测到 `dist/index.html` 就跳过构建 |
+| pip/apt/npm 慢 | — | Dockerfile 已钉死：pip=清华、apt=阿里、npm=npmmirror，自动生效 |
+
+**测试中出问题看日志**（路径都在 `deploy/single-host/logs/`）：
+
+```bash
+cd /opt/modelpull/deploy/single-host
+bash logs.sh tail                 # 实时 tail controller.log
+bash logs.sh tail executor-1      # 看某个 executor
+bash logs.sh errors               # 最近 1 小时所有 WARNING/ERROR/Traceback
+bash logs.sh snapshot             # 打 tarball，报 bug 时附上
+```
+
+> opencode（AI 助手后端）所需的 `opencode` 命令软链已 baked 进 controller 镜像，测试人员无需手工建。AI 助手的 LLM 连通性排查见 [AI 助手故障排查](./runbook-ai-assistant.md)。
 
 ---
 
