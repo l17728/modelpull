@@ -52,6 +52,16 @@ RUN echo "deb http://${APT_MIRROR}/debian bookworm main contrib non-free non-fre
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src
 
+# Single-host deploy bind-mounts /usr/lib/node_modules/opencode-ai from the
+# host so the container can shell out to `opencode` for AI-helper requests.
+# The npm package ships a single ELF named `opencode.exe`; the host's
+# /usr/bin/opencode wrapper symlink is NOT inside the bind-mount, so PATH
+# would miss it. Pre-create the symlink at the same writable location used
+# by host distros — overwriting the link is a no-op if the file isn't
+# mounted, so this is safe for environments that don't use opencode.
+RUN ln -sf /usr/lib/node_modules/opencode-ai/bin/opencode.exe \
+        /usr/local/bin/opencode
+
 EXPOSE 8001
 
 # Default to uvicorn but allow overriding ENTRYPOINT for migrations etc.

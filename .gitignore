@@ -95,6 +95,12 @@ charts/
 # Claude Code session artifacts
 .claude/
 
+# Ad-hoc paramiko/SSH deploy scripts (single-host operational tooling,
+# kept locally for iteration but not committed — the durable artifacts are
+# docker-compose.yml, bootstrap.sh, README.md, and _remote_deploy.py).
+deploy/single-host/_*.py
+!deploy/single-host/_remote_deploy.py
+
 # ad-hoc screenshots from local manual testing (use docs/screenshots/ for committed images)
 ai-response.png
 copilot-drawer-after-changes.png
