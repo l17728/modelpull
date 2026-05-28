@@ -35,6 +35,11 @@ _DOC_ALLOWLIST: dict[str, dict[str, str]] = {
         "title_zh": "SLA / SLO 基线",
         "path": "docs/operator/sla-slo.md",
     },
+    "observability": {
+        "title_en": "Observability — Prometheus + Grafana (deploy & use)",
+        "title_zh": "可观测性 — Prometheus + Grafana（部署与使用）",
+        "path": "docs/operator/observability.md",
+    },
     "qa-test-plan": {
         "title_en": "QA test plan (for testers)",
         "title_zh": "QA 测试清单（测试人员用）",
