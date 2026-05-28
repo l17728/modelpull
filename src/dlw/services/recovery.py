@@ -168,12 +168,17 @@ async def _maybe_transition_parent(session: AsyncSession, task_id: Any) -> None:
         select(FileSubTask).where(FileSubTask.task_id == task_id)
     )).scalars().all()
     statuses = {s.status for s in siblings}
+    prev_status = parent.status
     if "failed" in statuses:
         parent.status = "failed"
         parent.completed_at = datetime.now(UTC)
     elif statuses == {"succeeded"}:
         parent.status = "succeeded"
         parent.completed_at = datetime.now(UTC)
+    if parent.status in ("succeeded", "failed", "cancelled") \
+            and prev_status not in ("succeeded", "failed", "cancelled"):
+        from dlw.observability.metrics import record_task_terminal
+        record_task_terminal(parent.status, parent.created_at, parent.completed_at)
 
 
 async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
@@ -271,6 +276,9 @@ async def run_recovery_routine(session: AsyncSession) -> RecoveryStats:
         )
     )).rowcount or 0
     stats.no_multipart_reset = n
+    if n:
+        from dlw.observability.metrics import SUBTASK_RETRIES_TOTAL
+        SUBTASK_RETRIES_TOTAL.inc(n)
 
     # Step 3: cleanup orphan multipart uploads on terminal subtasks
     orphans = (await session.execute(

@@ -160,6 +160,8 @@ async def transition_executor(
         metadata_=dict(metadata or {}),
     ))
     ex.status = to_status
+    from dlw.observability.metrics import set_executor_status
+    set_executor_status(ex.id, to_status)
     logger.info(
         "executor_transition: id=%s %s->%s event=%s reason=%s",
         ex.id, from_status, to_status, event, transition.reason,

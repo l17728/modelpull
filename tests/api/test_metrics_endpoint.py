@@ -36,6 +36,11 @@ async def test_metrics_endpoint_returns_prometheus_text(client: AsyncClient):
     # Leader-election role gauge — the overview dashboard graphs
     # `max(dlw_controller_role) by (role)`, so the series must exist.
     assert "dlw_controller_role" in body
+    # Core task-lifecycle + executor-health metrics (back the overview panels).
+    for name in ("dlw_tasks_active_count", "dlw_tasks_completed_total",
+                 "dlw_task_duration_seconds", "dlw_executors_count",
+                 "dlw_executor_status", "dlw_subtask_retries_total"):
+        assert name in body, f"{name} missing from /metrics"
 
 
 def test_set_controller_role_one_hots_the_gauge():
@@ -56,6 +61,71 @@ def test_set_controller_role_one_hots_the_gauge():
     assert val("standby") == 1.0
     assert val("active") == 0.0
     assert val("recovering") == 0.0
+
+
+def test_record_task_terminal_counts_and_times():
+    from datetime import UTC, datetime, timedelta
+
+    from dlw.observability.metrics import (
+        TASK_DURATION_SECONDS,
+        TASKS_COMPLETED_TOTAL,
+        _reset_for_tests,
+        record_task_terminal,
+    )
+    _reset_for_tests()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    record_task_terminal("succeeded", start, start + timedelta(seconds=42))
+    record_task_terminal("failed", start, start + timedelta(seconds=10))
+    assert TASKS_COMPLETED_TOTAL.labels(status="succeeded")._value.get() == 1.0
+    assert TASKS_COMPLETED_TOTAL.labels(status="failed")._value.get() == 1.0
+    # two observations recorded in the histogram
+    assert TASK_DURATION_SECONDS._sum.get() == 52.0
+    # missing timestamps → counter still increments, no duration observed
+    record_task_terminal("cancelled", None, None)
+    assert TASKS_COMPLETED_TOTAL.labels(status="cancelled")._value.get() == 1.0
+    assert TASK_DURATION_SECONDS._sum.get() == 52.0
+
+
+def test_set_executor_status_one_hots_per_executor():
+    from dlw.observability.metrics import (
+        EXECUTOR_STATUS,
+        _reset_for_tests,
+        set_executor_status,
+    )
+    _reset_for_tests()
+
+    def val(eid, status):
+        return EXECUTOR_STATUS.labels(executor_id=eid, status=status)._value.get()
+
+    set_executor_status("worker-1", "healthy")
+    assert val("worker-1", "healthy") == 1.0
+    assert val("worker-1", "faulty") == 0.0
+    set_executor_status("worker-1", "faulty")
+    assert val("worker-1", "faulty") == 1.0
+    assert val("worker-1", "healthy") == 0.0
+    # independent executors keep independent series
+    set_executor_status("worker-2", "joining")
+    assert val("worker-2", "joining") == 1.0
+    assert val("worker-1", "faulty") == 1.0
+
+
+def test_refresh_fleet_gauges_clears_stale_tenants():
+    from dlw.observability.metrics import (
+        EXECUTORS_COUNT,
+        TASKS_ACTIVE,
+        _reset_for_tests,
+        refresh_fleet_gauges,
+    )
+    _reset_for_tests()
+    refresh_fleet_gauges({1: 5, 2: 3}, online_executors=4)
+    assert TASKS_ACTIVE.labels(tenant_id="1")._value.get() == 5.0
+    assert EXECUTORS_COUNT._value.get() == 4.0
+    # tenant 2 drops to zero active → its series must disappear, not freeze at 3
+    refresh_fleet_gauges({1: 2}, online_executors=4)
+    assert TASKS_ACTIVE.labels(tenant_id="1")._value.get() == 2.0
+    # children are keyed by a tuple of label values, e.g. ("1",)
+    labeled = {k[0] for k in TASKS_ACTIVE._metrics}
+    assert "2" not in labeled
 
 
 async def test_metrics_endpoint_is_unauthenticated(client: AsyncClient):

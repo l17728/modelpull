@@ -292,6 +292,7 @@ async def complete_subtask(
     statuses = {s.status for s in siblings}
     TERMINAL = {"succeeded", "failed", "cancelled"}
 
+    prev_status = parent.status
     if parent.status == "cancelling" and statuses <= TERMINAL:
         # W2b2 §3.3: all siblings terminal under cancelling → transition to cancelled.
         parent.status = "cancelled"
@@ -306,6 +307,12 @@ async def complete_subtask(
             parent.status = "succeeded"
             parent.completed_at = datetime.now(UTC)
     # else: parent is cancelling but not all siblings terminal — stay cancelling.
+
+    # Emit task-terminal metrics ONCE, only on the actual transition (this
+    # function fires per sibling completion, so guard against re-emitting).
+    if parent.status in TERMINAL and prev_status not in TERMINAL:
+        from dlw.observability.metrics import record_task_terminal
+        record_task_terminal(parent.status, parent.created_at, parent.completed_at)
 
     # W2a §3.3: route executor health update through the state machine.
     # Unreachable if the W1 epoch-mismatch raised earlier (zombie completion).
@@ -355,4 +362,8 @@ async def reclaim_subtasks(
             retry_count=FileSubTask.__table__.c.retry_count + 1,
         )
     )
-    return result.rowcount or 0
+    reclaimed = result.rowcount or 0
+    if reclaimed:
+        from dlw.observability.metrics import SUBTASK_RETRIES_TOTAL
+        SUBTASK_RETRIES_TOTAL.inc(reclaimed)
+    return reclaimed

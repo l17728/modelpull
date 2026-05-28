@@ -81,6 +81,82 @@ REPLAN_CHUNK_MOVES_TOTAL = Counter(
     labelnames=("mode",),
 )
 
+# ---------------------------------------------------------------------------
+# Core task lifecycle + executor health (the operator's "is it working /
+# are my workers alive" signals — back the overview dashboard's top panels).
+
+TASKS_ACTIVE = Gauge(
+    "dlw_tasks_active_count",
+    "Download tasks in a non-terminal state (pending/scheduling/downloading/"
+    "cancelling), partitioned by tenant. Refreshed by the active controller's "
+    "sweep loop. The overview dashboard's tenant dropdown reads this label.",
+    labelnames=("tenant_id",),
+)
+
+TASKS_COMPLETED_TOTAL = Counter(
+    "dlw_tasks_completed_total",
+    "Download tasks that reached a terminal state, by status "
+    "(succeeded/failed/cancelled). Incremented at the terminal transition.",
+    labelnames=("status",),
+)
+
+TASK_DURATION_SECONDS = Histogram(
+    "dlw_task_duration_seconds",
+    "Wall time from task creation to terminal state. Buckets span seconds "
+    "(tiny repos) to hours (TB-scale multi-file models).",
+    buckets=(1, 5, 30, 60, 300, 1800, 3600, 7200, 21600, 43200),
+)
+
+EXECUTORS_COUNT = Gauge(
+    "dlw_executors_count",
+    "Online executors (registered and not faulty). Refreshed by the active "
+    "controller's sweep loop.",
+)
+
+EXECUTOR_STATUS = Gauge(
+    "dlw_executor_status",
+    "Per-executor health, one-hot: the gauge for the executor's current "
+    "status is 1, the others 0. status ∈ "
+    "{joining, healthy, degraded, suspect, faulty}.",
+    labelnames=("executor_id", "status"),
+)
+
+# Keep in sync with state_machine.VALID_STATUS (duplicated here to avoid an
+# import cycle: state_machine emits this metric, so it can't import nothing
+# heavier from us).
+_EXECUTOR_STATUSES = ("joining", "healthy", "degraded", "suspect", "faulty")
+
+SUBTASK_RETRIES_TOTAL = Counter(
+    "dlw_subtask_retries_total",
+    "Cumulative file-subtask retries issued (reclaim on executor timeout + "
+    "startup recovery re-queue). A rising rate signals flaky workers/sources.",
+)
+
+
+def record_task_terminal(status: str, created_at, completed_at) -> None:
+    """Emit the completed-counter + duration-histogram for one task reaching
+    a terminal state. Call from the single terminal-transition seam(s)."""
+    TASKS_COMPLETED_TOTAL.labels(status=status).inc()
+    if created_at is not None and completed_at is not None:
+        TASK_DURATION_SECONDS.observe((completed_at - created_at).total_seconds())
+
+
+def set_executor_status(executor_id: str, status: str) -> None:
+    """One-hot the per-executor status gauge (current status 1, others 0)."""
+    for s in _EXECUTOR_STATUSES:
+        EXECUTOR_STATUS.labels(executor_id=str(executor_id), status=s).set(
+            1.0 if s == status else 0.0)
+
+
+def refresh_fleet_gauges(active_by_tenant: dict, online_executors: int) -> None:
+    """Reset + repopulate the periodically-sampled gauges. `.clear()` drops
+    stale tenant children so a tenant that fell to zero active tasks doesn't
+    leave a frozen non-zero series."""
+    TASKS_ACTIVE.clear()
+    for tenant_id, n in active_by_tenant.items():
+        TASKS_ACTIVE.labels(tenant_id=str(tenant_id)).set(n)
+    EXECUTORS_COUNT.set(online_executors)
+
 
 def _reset_for_tests() -> None:
     """Reset all counters in this module. Tests that assert on metric
@@ -95,7 +171,13 @@ def _reset_for_tests() -> None:
                    REPLICATION_JOBS_TOTAL,
                    REPLICATION_JOB_DURATION_SECONDS,
                    OPTIMIZER_SOLVE_DURATION_SECONDS,
-                   REPLAN_CHUNK_MOVES_TOTAL):
+                   REPLAN_CHUNK_MOVES_TOTAL,
+                   TASKS_ACTIVE,
+                   TASKS_COMPLETED_TOTAL,
+                   TASK_DURATION_SECONDS,
+                   EXECUTORS_COUNT,
+                   EXECUTOR_STATUS,
+                   SUBTASK_RETRIES_TOTAL):
         children = getattr(metric, "_metrics", None)
         if children is not None:
             children.clear()

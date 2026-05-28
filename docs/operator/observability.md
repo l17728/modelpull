@@ -18,13 +18,26 @@
 curl -s http://127.0.0.1:8001/metrics | grep '^dlw_'
 ```
 
-## 2. 当前真正导出的指标（✅ live，共 6 个）
+## 2. 当前真正导出的指标（✅ live，共 12 个）
 
 定义集中在 `src/dlw/observability/metrics.py`，埋点在对应 service 里。
 
+**核心运维信号**（任务在跑吗 / worker 活着吗 — 撑起 overview 顶部健康面板）：
+
+| 指标 | 类型 | 含义 | 埋点位置 |
+|------|------|------|----------|
+| `dlw_controller_role{role}` | Gauge | leader 角色 one-hot（active/standby/recovering） | leader 循环 state hook |
+| `dlw_tasks_active_count{tenant_id}` | Gauge | 非终态任务数（按租户），sweep 循环每 30s 刷新 | active controller sweep |
+| `dlw_tasks_completed_total{status}` | Counter | 任务终态计数（succeeded/failed/cancelled） | scheduler + recovery 终态 |
+| `dlw_task_duration_seconds` | Histogram | 任务创建→终态耗时 | 同上 |
+| `dlw_executors_count` | Gauge | 在线（非 faulty）executor 数 | active controller sweep |
+| `dlw_executor_status{executor_id,status}` | Gauge | 单 executor 健康 one-hot | state_machine 状态转移 + 注册 |
+| `dlw_subtask_retries_total` | Counter | 子任务重试/重排次数 | reclaim + 启动恢复 |
+
+**v2.1 特性指标**：
+
 | 指标 | 类型 | 含义 | 有数据的 dashboard |
 |------|------|------|--------------------|
-| `dlw_controller_role{role}` | Gauge | leader 选举角色 one-hot（active/standby/recovering=1/0） | overview「Controller role」 |
 | `dlw_replication_bytes_total{tenant_id,target_storage_id,status}` | Counter | 跨地域复制传输字节 | replication-throughput |
 | `dlw_replication_jobs_total{tenant_id,status}` | Counter | 复制任务终态计数 | replication-throughput |
 | `dlw_replication_job_duration_seconds{status}` | Histogram | 单复制任务耗时 | replication-throughput |
@@ -107,7 +120,7 @@ observability:
 | 文件 | 数据现状 |
 |------|----------|
 | `replication-throughput.json` | ✅ **live**（replication 三个指标都已埋点） |
-| `overview-dashboard.json` | 🟡 部分：`dlw_controller_role` 面板 live，其余（task/executor 计数等）📐 空 |
+| `overview-dashboard.json` | 🟢 **大部分 live**：controller_role / 活动任务数 / 完成数 / 任务时长 / executor 状态 + 在线数都已埋点；剩 subtask_state、executor_health_score、audit_chain 等 📐 空 |
 | `optimizer-dashboard.json` | 🟡 部分：solve duration + replan moves live，其余决策类指标 📐 空 |
 | `slo-dashboard.json` | 📐 设计期：SLI/SLO burn-rate 指标未埋点，全空 |
 | `ai-copilot-dashboard.json` | 📐 设计期：AI token/cost/tool 指标未埋点，全空 |
@@ -116,9 +129,11 @@ observability:
 ## 5. ⚠️ 已知差距：dashboard/告警规则 ≫ 已埋点指标
 
 `deploy/grafana/*.json` 引用约 **42** 个指标、`deploy/prometheus/*.yaml`
-引用约 **38** 个，而代码只导出第 2 节那 **6** 个。差额（task 生命周期、
-executor 健康/磁盘、SLO burn-rate、AI 成本、审计链、凭证、限速探测…）是
-v2.0 设计期就规划好的指标名，**实现时尚未埋点**。后果：
+引用约 **38** 个，而代码导出第 2 节那 **12** 个（核心 task/executor 信号 +
+v2.1 特性指标）。仍有约 30 个**未埋点**——它们是被有意判定为「非必要、暂不
+实现」的：AI 成本/token（助手便利功能）、企业内网限速/console 细节（实验性）、
+SLO burn-rate recording rules（需成熟延迟 SLI，过早）、optimizer 细粒度决策
+（flag-gated 实验）、磁盘/源/证书二级指标。后果：
 
 - 多数 dashboard 面板显示「No data」
 - 多数告警规则（`alerting-rules.yaml`）永不触发——**别据此误判系统健康**

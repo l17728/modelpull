@@ -53,6 +53,10 @@ async def upsert_executor_with_cert(
     row = (
         await session.execute(stmt, execution_options={"populate_existing": True})
     ).scalar_one()
+    # This raw pg_insert intentionally bypasses transition_executor (the
+    # normal status seam), so emit the gauge for the initial 'joining' here.
+    from dlw.observability.metrics import set_executor_status
+    set_executor_status(row.id, row.status)
     return row
 
 

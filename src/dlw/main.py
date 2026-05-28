@@ -418,6 +418,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await reset_engine()
 
 
+async def _refresh_fleet_gauges(session) -> None:
+    """Sample the periodically-refreshed gauges (active tasks by tenant +
+    online executor count) from the DB. Runs on the active controller's sweep
+    tick only — exactly where the authoritative counts live."""
+    from sqlalchemy import func, select
+
+    from dlw.db.models import DownloadTask, Executor
+    from dlw.observability.metrics import refresh_fleet_gauges
+
+    _TERMINAL = ("succeeded", "failed", "cancelled")
+    rows = (await session.execute(
+        select(DownloadTask.tenant_id, func.count())
+        .where(DownloadTask.status.not_in(_TERMINAL))
+        .group_by(DownloadTask.tenant_id)
+    )).all()
+    active_by_tenant = {tenant_id: n for tenant_id, n in rows}
+    online = (await session.execute(
+        select(func.count()).select_from(Executor)
+        .where(Executor.status != "faulty")
+    )).scalar_one()
+    refresh_fleet_gauges(active_by_tenant, int(online))
+
+
 async def _sweep_loop_main(factory) -> None:
     """Background task: every N seconds, transition stale executors + reclaim
     + recover paused_disk_full subtasks."""
@@ -434,6 +457,7 @@ async def _sweep_loop_main(factory) -> None:
                 await sweep_executor_timeouts(session)
                 await sweep_paused_disk_full(session)
                 await sweep_paused_external(session)
+                await _refresh_fleet_gauges(session)
                 await session.commit()
         except asyncio.CancelledError:
             raise
