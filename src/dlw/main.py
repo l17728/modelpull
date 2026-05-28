@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     run_recovery_routine + sweep loop are started by the leader loop only
     after this instance acquires the leader advisory lock."""
     from dlw.db.session import get_engine, reset_engine
+    from dlw.observability.metrics import set_controller_role
     from dlw.services.leader_election import LeaderElector, run_leader_loop
     from dlw.services.recovery import run_recovery_routine
 
@@ -299,6 +300,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     def _set_state(s: str) -> None:
         app.state.controller_state = s
+        set_controller_role(s)
 
     async def _on_promote() -> None:
         async with factory() as session:

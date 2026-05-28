@@ -33,6 +33,29 @@ async def test_metrics_endpoint_returns_prometheus_text(client: AsyncClient):
     assert "dlw_replication_bytes_total" in body
     assert "dlw_replication_jobs_total" in body
     assert "dlw_replication_job_duration_seconds" in body
+    # Leader-election role gauge — the overview dashboard graphs
+    # `max(dlw_controller_role) by (role)`, so the series must exist.
+    assert "dlw_controller_role" in body
+
+
+def test_set_controller_role_one_hots_the_gauge():
+    """set_controller_role(r) sets r's gauge to 1 and every other role to 0,
+    so `max(dlw_controller_role) by (role)` shows exactly one active role
+    per instance."""
+    from dlw.observability.metrics import CONTROLLER_ROLE, set_controller_role
+
+    def val(role: str) -> float:
+        return CONTROLLER_ROLE.labels(role=role)._value.get()
+
+    set_controller_role("active")
+    assert val("active") == 1.0
+    assert val("standby") == 0.0
+    assert val("recovering") == 0.0
+
+    set_controller_role("standby")
+    assert val("standby") == 1.0
+    assert val("active") == 0.0
+    assert val("recovering") == 0.0
 
 
 async def test_metrics_endpoint_is_unauthenticated(client: AsyncClient):

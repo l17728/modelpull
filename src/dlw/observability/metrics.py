@@ -11,7 +11,31 @@ The actual increment calls live in the service modules they measure
 the code that owns them while keeping the names discoverable here."""
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
+
+# ---------------------------------------------------------------------------
+# Controller leader-election role (Phase 2 W3c — active/standby)
+
+CONTROLLER_ROLE = Gauge(
+    "dlw_controller_role",
+    "Leader-election role of this controller instance. One-hot: the gauge "
+    "for the current role is 1, the others 0. role ∈ "
+    "{standby, recovering, active}. The overview dashboard graphs "
+    "`max(dlw_controller_role) by (role)` to show, across instances, which "
+    "role is occupied.",
+    labelnames=("role",),
+)
+
+_CONTROLLER_ROLES = ("standby", "recovering", "active")
+
+
+def set_controller_role(role: str) -> None:
+    """One-hot the dlw_controller_role gauge to `role` (set it to 1, all
+    other roles to 0). Called from the leader loop's state-transition hook
+    so the metric tracks active/standby/recovering in real time."""
+    for r in _CONTROLLER_ROLES:
+        CONTROLLER_ROLE.labels(role=r).set(1.0 if r == role else 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Cross-region replication (Sprint 5 / Sprint 6)
@@ -66,7 +90,8 @@ def _reset_for_tests() -> None:
     Labeled metrics (Counter/Histogram with labelnames=) keep their
     children in `_metrics`; unlabeled metrics use `_sum` / `_value` /
     `_buckets` directly. Handle both."""
-    for metric in (REPLICATION_BYTES_TOTAL,
+    for metric in (CONTROLLER_ROLE,
+                   REPLICATION_BYTES_TOTAL,
                    REPLICATION_JOBS_TOTAL,
                    REPLICATION_JOB_DURATION_SECONDS,
                    OPTIMIZER_SOLVE_DURATION_SECONDS,
